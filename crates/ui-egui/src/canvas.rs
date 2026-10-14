@@ -2857,7 +2857,13 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     }
     // View › Equirectangular Live Projection draws and handles input on its own.
     if view.projection.is_some() {
-        return crate::live_projection::canvas(app, ui, idx, rect, view, ppp, output);
+        let view = crate::live_projection::canvas(app, ui, idx, rect, view, ppp, output);
+        // The primary canvas owns `app.ui.views[idx]` (the write-back at the end of this function
+        // is skipped here), so the camera must be stored now or the next frame starts over.
+        if primary && let Some(v) = app.ui.views.get_mut(idx) {
+            *v = view.clone();
+        }
+        return view;
     }
     // View › Pixel Aspect Ratio Correction: document pixels are shown this much wider.
     let aspect = app.ui.view.display_aspect();

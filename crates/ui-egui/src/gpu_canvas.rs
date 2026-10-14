@@ -92,6 +92,25 @@ pub struct ViewParams {
     pub projection: Option<[f32; 3]>,
 }
 
+/// Mip level the live projection pass (`fs_proj`, `proj_lod`) samples for a device pixel at
+/// view-plane offset (`dx`, `dy`) (`k` = view-plane units per device pixel) and latitude `lat`
+/// (radians) of a `size` equirect document. A pixel's angular size is `k / (1 + r²)` radially
+/// and `k / √(1 + r²)` across, so off-centre pixels cover *less* of the sphere; the larger
+/// (across) one is used. Horizontal stretch toward the poles only counts within ~2° of them, and
+/// the level is biased half a step sharp. 0 = full resolution.
+pub fn projection_lod(k: f32, dx: f32, dy: f32, lat: f32, size: [f32; 2]) -> f32 {
+    use std::f32::consts::PI;
+    let r2 = dx * dx + dy * dy;
+    let ang = k / (1.0 + r2).sqrt();
+    let along_lon = ang * size[1] / PI;
+    let c = lat.cos().max(0.0005);
+    let along_lat = ang * size[0] / (2.0 * PI) / c;
+    let t = ((0.035 - c) / 0.035).clamp(0.0, 1.0);
+    let near_pole = t * t * (3.0 - 2.0 * t);
+    let fp = along_lon.max(along_lon + (along_lat * 0.25 - along_lon) * near_pole);
+    (fp.max(1e-6).log2() - 0.5).max(0.0)
+}
+
 /// When high-bit documents get an `Rgba16Float` canvas texture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HighPolicy {
@@ -2214,6 +2233,18 @@ fn vs_proj(@builtin(vertex_index) vi: u32) -> VOut {
 
 const PI: f32 = 3.14159265358979;
 
+// Mirror of `projection_lod` (Rust, tested): the mip level of one device pixel's footprint.
+fn proj_lod(k: f32, dx: f32, dy: f32, lat: f32, size_doc: vec2<f32>) -> f32 {
+    let r2 = dx * dx + dy * dy;
+    let ang = k / sqrt(1.0 + r2);
+    let along_lon = ang * size_doc.y / PI;
+    let c = max(cos(lat), 0.0005);
+    let along_lat = ang * size_doc.x / (2.0 * PI) / c;
+    let near_pole = 1.0 - smoothstep(0.0, 0.035, c);
+    let fp = max(along_lon, mix(along_lon, along_lat * 0.25, near_pole));
+    return max(log2(max(fp, 1e-6)) - 0.5, 0.0);
+}
+
 @fragment
 fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
     // engine::equirect::ViewProjection::view_to_dir, then dir_to_equirect.
@@ -2239,14 +2270,7 @@ fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
     if (any(t < vec2(0.0)) || any(t >= size)) {
         discard;
     }
-    // Mip level from the footprint of one device pixel: k radians across the view centre,
-    // growing off axis by 1 / cos² and stretched horizontally by 1 / cos(latitude).
-    let off = 1.0 + dx * dx + dy * dy;
-    let ang = k * off;
-    let along_lat = ang * size_doc.x / (2.0 * PI) / max(cos(lat), 0.02);
-    let along_lon = ang * size_doc.y / PI;
-    // Anisotropy is capped at 4:1 so the poles stay sharp along the meridians.
-    let lod = max(log2(max(max(along_lon, along_lat * 0.25), 1e-6)), 0.0);
+    let lod = proj_lod(k, dx, dy, lat, size_doc);
     let col = textureSampleLevel(tex, samp, t / size, lod);
     return shade(col, d, 0.0, 1.0);
 }
@@ -2375,6 +2399,25 @@ mod tests {
         assert_eq!(canvas_budget(None), 4 << 30);
         assert_eq!(canvas_budget(Some(1 << 30)), MIN_GPU_BUDGET);
         assert!(canvas_texture_bytes([12_000, 8_000], DEFAULT_TILE, 8) < canvas_budget(None), "a 96 MP 16-bit canvas stays on the GPU");
+    }
+
+    #[test]
+    fn projection_lod_is_sharp_off_centre_and_only_blurs_at_the_poles() {
+        let size = [20000.0, 10000.0];
+        // 90° vertical FOV over 1000 device px: ~6.4 texels per px at the centre.
+        let k = 1.0 / 500.0;
+        let centre = projection_lod(k, 0.0, 0.0, 0.0, size);
+        assert!(centre > 2.0 && centre < 3.0, "{centre}");
+        // Off centre (a 16:9 corner) is never blurrier than the centre.
+        let corner = projection_lod(k, 1.78, 1.0, 0.5, size);
+        assert!(corner <= centre, "{corner} vs {centre}");
+        // Narrow FOV (≤ 1 texel per px): full resolution everywhere, also at 60° latitude.
+        let k = (2.5f32.to_radians()).tan() / 500.0;
+        for (dx, dy, lat) in [(0.0, 0.0, 0.0), (0.04, 0.04, 1.0), (0.0, 0.0, 1.2)] {
+            assert_eq!(projection_lod(k, dx, dy, lat, size), 0.0, "({dx},{dy},{lat})");
+        }
+        // Only right at a pole does the horizontal stretch raise the level.
+        assert!(projection_lod(k, 0.0, 0.0, 89.99f32.to_radians(), size) > 0.0);
     }
 
     #[test]

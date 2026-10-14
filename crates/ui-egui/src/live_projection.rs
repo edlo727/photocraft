@@ -232,6 +232,7 @@ fn tool_name(t: Tool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::Pos2;
 
     #[test]
     fn look_follows_the_pointer_and_wraps() {
@@ -241,6 +242,42 @@ mod tests {
         assert!((v.yaw - (-100.0)).abs() < 1e-3, "{}", v.yaw);
         v.look(vec2(0.0, 1000.0), 100.0);
         assert_eq!(v.pitch, MAX_PITCH as f32);
+    }
+
+    /// A Hand-tool drag through the primary canvas accumulates frame by frame and stays put
+    /// after release (Ed's report: the view moved ~50 px and snapped back, because the camera
+    /// was never stored in `app.ui.views`).
+    #[test]
+    fn hand_drag_accumulates_and_persists_across_frames() {
+        let ctx = egui::Context::default();
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.run("file.new", json!({"width": 400, "height": 200})).unwrap();
+        app.sync_views();
+        toggle(&mut app, 0, Some(true)).unwrap();
+        app.ui.tool = Tool::Hand;
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0));
+        let frame = |app: &mut PhotocraftApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput { events, screen_rect: Some(rect), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let view = app.ui.views[0].clone();
+                crate::canvas::canvas_view(app, ui, 0, rect, view, true);
+            });
+            out.textures_delta.clear();
+        };
+        let at = |x: f32| egui::pos2(x, 150.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(at(300.0))]);
+        frame(&mut app, vec![egui::Event::PointerButton { pos: at(300.0), button: PointerButton::Primary, pressed: true, modifiers: Default::default() }]);
+        let mut x = 300.0;
+        for _ in 0..15 {
+            x -= 10.0;
+            frame(&mut app, vec![egui::Event::PointerMoved(at(x))]);
+        }
+        frame(&mut app, vec![egui::Event::PointerButton { pos: at(x), button: PointerButton::Primary, pressed: false, modifiers: Default::default() }]);
+        frame(&mut app, vec![]);
+        let cam = app.ui.views[0].projection.expect("still on");
+        // 150 points left in a 300-point-tall 90° view: about 45° to the right (egui may hold
+        // back the first few points until the drag threshold).
+        assert!(cam.yaw > 35.0 && cam.yaw <= 45.5, "yaw {}", cam.yaw);
     }
 
     #[test]
