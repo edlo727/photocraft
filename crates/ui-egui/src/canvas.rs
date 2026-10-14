@@ -1249,6 +1249,7 @@ pub fn navigator_gpu_view(app: &PhotocraftApp, idx: usize, rect: Rect, ctx: &egu
         pixel_grid: false,
         view_key: egui::Id::new(("pc-navigator", ctx.viewport_id(), idx)).value(),
         offset: [0.0, 0.0],
+        projection: None,
         ..params
     })
 }
@@ -1529,7 +1530,7 @@ pub(crate) fn effect_reach(layers: &[photocraft_doc::Layer]) -> i32 {
 /// GPU path: make sure document `idx` is current in the GPU canvas. Edits draw their damage;
 /// unchanged lower-stack composites can be reused by the compositor inside that region.
 /// Returns false if there is no GPU canvas.
-fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible: DRect) -> bool {
+pub(crate) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize, visible: DRect) -> bool {
     let Some(gpu) = app.gpu.clone() else { return false };
     let Some((revision, last_damage, id)) = app
         .session
@@ -2783,7 +2784,7 @@ const DISPLAY_LUT: usize = 33;
 /// `doc`'s colour management: document → monitor profile and View › Proof Colors / Gamut
 /// Warning (the 32-bit preview is applied by the canvas shader, see [`hdr_preview`]). Returns the canvas `display` mode (0 none — the identity, e.g. sRGB on
 /// an sRGB monitor —, 1 LUT, 2 LUT + gamut warning).
-fn sync_display_lut(app: &mut PhotocraftApp, doc: &photocraft_doc::Document, key: u64, display: Option<u32>) -> u8 {
+pub(crate) fn sync_display_lut(app: &mut PhotocraftApp, doc: &photocraft_doc::Document, key: u64, display: Option<u32>) -> u8 {
     let Some(gpu) = app.gpu.clone() else { return 0 };
     let output = display.unwrap_or(0);
     // Rebuild only when anything feeding the LUT changes.
@@ -2815,7 +2816,7 @@ fn sync_display_lut(app: &mut PhotocraftApp, doc: &photocraft_doc::Document, key
 }
 
 /// View › 32-bit Preview Options for the GPU canvas shader: (exposure, gamma) when active.
-fn hdr_preview(app: &PhotocraftApp, doc: &photocraft_doc::Document) -> Option<[f32; 2]> {
+pub(crate) fn hdr_preview(app: &PhotocraftApp, doc: &photocraft_doc::Document) -> Option<[f32; 2]> {
     app.session.color.hdr_preview(doc).map(|h| [h.exposure, h.gamma])
 }
 
@@ -2853,6 +2854,10 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
             view.center = [size[0] as f32 / 2.0, size[1] as f32 / 2.0];
         }
         view.doc_size = size;
+    }
+    // View › Equirectangular Live Projection draws and handles input on its own.
+    if view.projection.is_some() {
+        return crate::live_projection::canvas(app, ui, idx, rect, view, ppp, output);
     }
     // View › Pixel Aspect Ratio Correction: document pixels are shown this much wider.
     let aspect = app.ui.view.display_aspect();
@@ -2935,6 +2940,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
                 output: output.unwrap_or(0),
                 hdr: hdr_preview(app, &doc),
                 offset: [0.0, 0.0],
+                projection: None,
             };
             paint_gpu_view(&painter, rect, params, &pattern);
         } else if gpu_ok && ensure_gpu(app, &ctx, idx, visible_doc_rect(&xf)) {
@@ -2957,6 +2963,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
                 output: output.unwrap_or(0),
                 hdr: hdr_preview(app, &doc),
                 offset: [0.0, 0.0],
+                projection: None,
             };
             if app.navigator_plain.contains(&doc.id) {
                 app.navigator_gpu.insert(doc.id, params);

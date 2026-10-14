@@ -1020,6 +1020,15 @@ fn build() -> Vec<CommandSpec> {
             crate::brush_cmds::paint_stroke
         ),
         cmd!(
+            "paint.projectedStroke",
+            "Projected Brush Stroke",
+            [],
+            None,
+            r##"{…paint.stroke params, with "points" and "size" in view pixels…,"projection":{"yaw":deg,"pitch":deg,"fov":deg (vertical),"width":px,"height":px}} — View › Equirectangular Live Projection: a stroke drawn in the perspective view, reprojected onto the equirect pixels"##,
+            has_paintable,
+            crate::brush_cmds::paint_projected_stroke
+        ),
+        cmd!(
             "tools.setColors",
             "Set Colors",
             [],

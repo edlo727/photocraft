@@ -153,6 +153,7 @@ pub mod panels;
 pub mod parity;
 pub mod patch_preview;
 pub(crate) mod pattern_fill_ui;
+pub mod live_projection;
 pub mod pattern_preview;
 pub mod perspective_crop_ui;
 pub mod perspective_ui;

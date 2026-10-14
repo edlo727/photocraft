@@ -1162,3 +1162,5 @@ pub fn specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests;
+mod projected;
+pub use projected::paint_projected_stroke;

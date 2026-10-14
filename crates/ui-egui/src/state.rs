@@ -483,11 +483,14 @@ pub struct View {
     /// Canvas camera rotation in degrees, wrapped to (−180, 180]. Turns the view, not the pixels.
     #[serde(default)]
     pub rotation: f32,
+    /// View › Equirectangular Live Projection camera, when on (live_projection.rs).
+    #[serde(default)]
+    pub projection: Option<crate::live_projection::ProjectionView>,
 }
 
 impl Default for View {
     fn default() -> Self {
-        Self { zoom: 1.0, center: [0.0, 0.0], fit_pending: true, fill_pending: false, doc_size: [0, 0], rotation: 0.0 }
+        Self { zoom: 1.0, center: [0.0, 0.0], fit_pending: true, fill_pending: false, doc_size: [0, 0], rotation: 0.0, projection: None }
     }
 }
 

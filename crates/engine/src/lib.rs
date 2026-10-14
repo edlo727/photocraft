@@ -12,6 +12,7 @@ pub mod actions_edit_cmds;
 pub mod adjust_cmds;
 pub mod adjust_params;
 pub mod align_cmds;
+pub mod equirect;
 mod allocation;
 pub mod analysis_cmds;
 pub mod artboard_cmds;

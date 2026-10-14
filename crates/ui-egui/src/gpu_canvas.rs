@@ -43,8 +43,8 @@ const FORMAT_HIGH: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// documents (a 14000² one would need 2.1 GB) use `Rgba8Unorm`, so they stay on the GPU like
 /// 8-bit ones. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas off, `=1` ignores this budget.
 pub const F16_BUDGET_PX: u64 = 100_000_000;
-const VIEW_UNIFORM_SIZE: u64 = 128;
-const VIEW_FLOATS: usize = 32;
+const VIEW_UNIFORM_SIZE: u64 = 160;
+const VIEW_FLOATS: usize = 40;
 const TILE_UNIFORM_SIZE: u64 = 16;
 
 /// Whether this view can use the GPU canvas. Flip and non-square pixel aspect correction are
@@ -86,6 +86,10 @@ pub struct ViewParams {
     /// document, a whole number of widths and heights for a View › Pattern Preview copy (#1067).
     /// A copy samples the same texture, so nothing is composited again.
     pub offset: [f32; 2],
+    /// View › Equirectangular Live Projection: the document is a latlong panorama seen through a
+    /// perspective camera, `[yaw, pitch, vertical fov]` in degrees (live_projection.rs). `zoom`,
+    /// `center` and `rotation` are then unused.
+    pub projection: Option<[f32; 3]>,
 }
 
 /// When high-bit documents get an `Rgba16Float` canvas texture.
@@ -1290,6 +1294,8 @@ struct Resources {
     tile_bgl: wgpu::BindGroupLayout,
     shadow_pipeline: wgpu::RenderPipeline,
     tile_pipeline: wgpu::RenderPipeline,
+    /// Live projection: the perspective view of a latlong document (`fs_proj`).
+    proj_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     mip_bgl: wgpu::BindGroupLayout,
     mip_pipeline: wgpu::RenderPipeline,
@@ -1509,6 +1515,7 @@ impl Resources {
         };
         let shadow_pipeline = pipeline(device, "pc_canvas_shadow", &shadow_layout, &module, ("vs_shadow", "fs_shadow"), target, Some(blend));
         let tile_pipeline = pipeline(device, "pc_canvas_tile", &layout, &module, ("vs_tile", "fs_tile"), target, Some(blend));
+        let proj_pipeline = pipeline(device, "pc_canvas_proj", &layout, &module, ("vs_proj", "fs_proj"), target, Some(blend));
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pc_canvas_trilinear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1565,6 +1572,7 @@ impl Resources {
             tile_bgl,
             shadow_pipeline,
             tile_pipeline,
+            proj_pipeline,
             sampler,
             mip_bgl,
             mip_pipeline,
@@ -1840,6 +1848,16 @@ impl CanvasCallback {
         let square = if style.checker_square > 0.0 { (style.checker_square * ppp).round().max(1.0) } else { 0.0 };
         let (l, d, g) = (style.checker_light, style.checker_dark, style.gamut_color);
         // 32-bit preview: linear-light gain 2^exposure (0 = off) and 1 / gamma.
+        // Live projection: flag, yaw, pitch (radians), view-plane units per device pixel, and the
+        // view's centre in device pixels.
+        let proj = match p.projection {
+            Some([yaw, pitch, fov]) if yaw.is_finite() && pitch.is_finite() && fov.is_finite() => {
+                let h = (self.rect.height() * ppp).max(1.0);
+                let c = self.rect.center();
+                [1.0, yaw.to_radians(), pitch.to_radians(), (fov.to_radians() / 2.0).tan() / (h / 2.0), c.x * ppp, c.y * ppp]
+            }
+            _ => [0.0; 6],
+        };
         let (gain, inv_gamma) = match p.hdr {
             Some([e, gm]) if e.is_finite() && gm.is_finite() && gm > 0.0 => (2f32.powf(e.clamp(-20.0, 20.0)), 1.0 / gm.max(0.01)),
             _ => (0.0, 1.0),
@@ -1883,6 +1901,14 @@ impl CanvasCallback {
             },
             p.center[0],
             p.center[1],
+            proj[0],
+            proj[1],
+            proj[2],
+            proj[3],
+            proj[4],
+            proj[5],
+            0.0,
+            0.0,
         ]
     }
 }
@@ -1941,7 +1967,7 @@ impl CallbackTrait for CanvasCallback {
         pass.set_viewport(0.0, 0.0, sw as f32, sh as f32, 0.0, 1.0);
         pass.set_scissor_rect(clip.left_px.max(0) as u32, clip.top_px.max(0) as u32, clip.width_px as u32, clip.height_px as u32);
         pass.set_bind_group(0, &view.bind_group, &[]);
-        if self.params.shadow {
+        if self.params.shadow && self.params.projection.is_none() {
             pass.set_pipeline(&res.shadow_pipeline);
             pass.draw(0..6, 0..1);
         }
@@ -1956,8 +1982,17 @@ impl CallbackTrait for CanvasCallback {
         let (cos, sin) = if rot.abs() < 1e-8 { (1.0, 0.0) } else { (rot.cos(), rot.sin()) };
         let cen = self.params.center;
         let [ox, oy] = self.params.offset.map(|v| if v.is_finite() { v } else { 0.0 });
-        pass.set_pipeline(&res.tile_pipeline);
         pass.set_bind_group(2, res.luts.get(&(self.params.doc, self.params.output)).unwrap_or(&res.identity_lut), &[]);
+        if self.params.projection.is_some() {
+            // Every tile covers the whole view and keeps only the directions that land in it.
+            pass.set_pipeline(&res.proj_pipeline);
+            for t in &doc.tiles {
+                pass.set_bind_group(1, &t.bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
+            return;
+        }
+        pass.set_pipeline(&res.tile_pipeline);
         for t in &doc.tiles {
             let [tx, ty, tw, th] = t.rect.map(|v| v as f32);
             let (x0, y0, x1, y1) = tile_screen_aabb(origin, scale, cen, cos, sin, [tx + ox, ty + oy, tw, th]);
@@ -1980,6 +2015,8 @@ struct View {
     f: vec4<f32>, // checker dark rgb, 32-bit preview gain (2^exposure; 0 = off)
     g: vec4<f32>, // gamut warning rgb, 32-bit preview 1 / gamma
     h: vec4<f32>, // cos, sin, center_doc_x, center_doc_y
+    i: vec4<f32>, // live projection: on (1), yaw, pitch (radians), view-plane units per device px
+    j: vec4<f32>, // live projection: view centre x, y (device px), unused, unused
 };
 struct Tile { r: vec4<f32> }; // x, y, w, h in doc px
 
@@ -2121,6 +2158,13 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         let f = clamp((tt - i - 0.5) * scale + 0.5, vec2(0.0), vec2(1.0));
         col = textureSampleLevel(tex, samp, (i + 0.5 + f) / size, 0.0);
     }
+    return shade(col, d, view.c.z, scale);
+}
+
+// The 32-bit preview, display LUT, checkerboard, pixel grid and output encoding of a sampled
+// document colour `col` at document point `d`.
+fn shade(col_in: vec4<f32>, d: vec2<f32>, grid_alpha: f32, scale: f32) -> vec4<f32> {
+    var col = col_in;
     if (view.f.w > 0.0 && col.a > 0.0) {
         // View › 32-bit Preview Options: exposure and gamma in linear light on the sRGB-encoded
         // texture value, before the display LUT. A float canvas keeps values above 1.0, so they
@@ -2140,7 +2184,7 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
     }
     var rgb = col.rgb + checker(d) * (1.0 - col.a);
     // The pixel grid is drawn over pixels with content, not over empty checker.
-    let grid = view.c.z * col.a;
+    let grid = grid_alpha * col.a;
     if (grid > 0.0) {
         let e = fract(d) * scale;
         if (e.x < 1.0 || e.y < 1.0) {
@@ -2157,6 +2201,54 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         rgb = srgb_to_linear(rgb);
     }
     return vec4(rgb, 1.0);
+}
+
+// --- live projection -----------------------------------------------------------------------
+
+@vertex
+fn vs_proj(@builtin(vertex_index) vi: u32) -> VOut {
+    // The whole screen; the scissor keeps it to the canvas.
+    let c = corner(vi) * 2.0 - 1.0;
+    return VOut(vec4(c.x, c.y, 0.0, 1.0));
+}
+
+const PI: f32 = 3.14159265358979;
+
+@fragment
+fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
+    // engine::equirect::ViewProjection::view_to_dir, then dir_to_equirect.
+    let k = view.i.w;
+    let dx = (in.pos.x - view.j.x) * k;
+    let dy = -(in.pos.y - view.j.y) * k;
+    let sy = sin(view.i.y);
+    let cy = cos(view.i.y);
+    let sp = sin(view.i.z);
+    let cp = cos(view.i.z);
+    let f = vec3(cp * sy, sp, cp * cy);
+    let r = vec3(cy, 0.0, -sy);
+    let u = vec3(-sp * sy, cp, -sp * cy);
+    let dir = normalize(f + dx * r + dy * u);
+    let lon = atan2(dir.x, dir.z);
+    let lat = asin(clamp(dir.y, -1.0, 1.0));
+    let size_doc = view.b.zw;
+    var d = vec2((lon / (2.0 * PI) + 0.5) * size_doc.x, (0.5 - lat / PI) * size_doc.y);
+    d.x = d.x - floor(d.x / size_doc.x) * size_doc.x;
+    d.y = clamp(d.y, 0.0, size_doc.y - 0.001);
+    let t = d - tile.r.xy;
+    let size = tile.r.zw;
+    if (any(t < vec2(0.0)) || any(t >= size)) {
+        discard;
+    }
+    // Mip level from the footprint of one device pixel: k radians across the view centre,
+    // growing off axis by 1 / cos² and stretched horizontally by 1 / cos(latitude).
+    let off = 1.0 + dx * dx + dy * dy;
+    let ang = k * off;
+    let along_lat = ang * size_doc.x / (2.0 * PI) / max(cos(lat), 0.02);
+    let along_lon = ang * size_doc.y / PI;
+    // Anisotropy is capped at 4:1 so the poles stay sharp along the meridians.
+    let lod = max(log2(max(max(along_lon, along_lat * 0.25), 1e-6)), 0.0);
+    let col = textureSampleLevel(tex, samp, t / size, lod);
+    return shade(col, d, 0.0, 1.0);
 }
 "#;
 
@@ -2287,8 +2379,8 @@ mod tests {
 
     #[test]
     fn view_uniform_packs_rotation() {
-        assert_eq!(VIEW_FLOATS, 32);
-        assert_eq!(VIEW_UNIFORM_SIZE, 128);
+        assert_eq!(VIEW_FLOATS, 40);
+        assert_eq!(VIEW_UNIFORM_SIZE, 160);
         assert_eq!(VIEW_FLOATS * 4, VIEW_UNIFORM_SIZE as usize);
         assert!(gpu_view_ok(false, 0.0, 1.0));
         assert!(gpu_view_ok(false, 45.0_f32.to_radians(), 1.0));
