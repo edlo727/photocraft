@@ -530,6 +530,8 @@ pub struct PhotocraftApp {
     /// The tool pointer events go to this frame when it isn't the selected one: the Move tool
     /// while ⌘ is held (`hold_keys::cmd_moves`). Set by the canvas for its gestures, never saved.
     pub(crate) tool_override: Option<state::Tool>,
+    /// The Equirectangular Live Projection stroke being drawn and its preview (live_projection.rs).
+    pub(crate) projection_live: Option<live_projection::Live>,
     /// Brush/Eraser stroke being drawn, rendered by the engine (see `canvas::LiveStroke`).
     live_stroke: Option<canvas::LiveStroke>,
     /// A live stroke just committed with its own pixels: the canvas caches that showed it
@@ -791,6 +793,7 @@ impl PhotocraftApp {
             drag: None,
             move_blocked: false,
             tool_override: None,
+            projection_live: None,
             live_stroke: None,
             committed_stroke: None,
             trail: None,

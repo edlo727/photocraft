@@ -69,3 +69,58 @@ fn toolbox_click_switches_tools_in_projection() {
     assert_eq!(h.state().ui.tool, Tool::Brush, "a toolbox click picks the Brush");
     let _ = pos2(0.0, 0.0);
 }
+
+fn click(h: &mut Harness<'_, PhotocraftApp>, at: egui::Pos2, button: PointerButton) {
+    h.event(Event::PointerMoved(at));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: at, button, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.event(Event::PointerButton { pos: at, button, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+}
+
+#[test]
+fn right_click_opens_the_brush_picker_in_projection() {
+    for tool in [Tool::Brush, Tool::Eraser, Tool::CloneStamp] {
+        let mut h = harness(tool);
+        let c = h.state().last_canvas_rect.center();
+        click(&mut h, c, PointerButton::Secondary);
+        assert!(h.state().ui.brush_picker.is_some(), "{tool:?}: right-click opens the preset picker");
+    }
+}
+
+#[test]
+fn bracket_keys_resize_the_brush_in_projection() {
+    let mut h = harness(Tool::Brush);
+    let c = h.state().last_canvas_rect.center();
+    h.event(Event::PointerMoved(c));
+    h.run_steps(2);
+    let before = h.state().session.tools.brush.size;
+    h.event(Event::Text("]".into()));
+    key(&mut h, Key::CloseBracket);
+    assert!(h.state().session.tools.brush.size > before, "] grows the brush");
+    let grown = h.state().session.tools.brush.size;
+    h.event(Event::Text("[".into()));
+    key(&mut h, Key::OpenBracket);
+    assert!(h.state().session.tools.brush.size < grown, "[ shrinks the brush");
+}
+
+#[test]
+fn a_drag_shows_a_live_preview_and_commits_on_release() {
+    let mut h = harness(Tool::Brush);
+    let c = h.state().last_canvas_rect.center();
+    h.event(Event::PointerMoved(c));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    for i in 1..=10 {
+        h.event(Event::PointerMoved(c + vec2(i as f32 * 8.0, 0.0)));
+        h.run_steps(1);
+    }
+    let live = h.state().projection_live.as_ref().expect("a stroke in progress");
+    assert!(live.has_preview(), "the stroke is rendered while dragging");
+    h.event(Event::PointerButton { pos: c + vec2(80.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(h.state().projection_live.is_none());
+    assert!(h.state().ui.status_error == false, "{}", h.state().ui.status);
+}

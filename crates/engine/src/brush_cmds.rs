@@ -1163,4 +1163,4 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod tests;
 pub(crate) mod projected;
-pub use projected::paint_projected_stroke;
+pub use projected::{PreviewOverlay, ProjectedPreview, paint_projected_stroke};

@@ -103,13 +103,6 @@ pub fn active(app: &PhotocraftApp, idx: usize) -> bool {
     app.ui.views.get(idx).is_some_and(|v| v.projection.is_some())
 }
 
-#[derive(Clone, Default)]
-struct Stroke2 {
-    /// View device pixels and pen pressure.
-    points: Vec<[f64; 3]>,
-    erase: bool,
-}
-
 /// The canvas of a view in live projection: draws, looks around and paints. Returns the view.
 pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect, mut view: View, ppp: f32, output: Option<u32>) -> View {
     let ctx = ui.ctx().clone();
@@ -132,8 +125,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     let middle = ctx.input(|i| i.pointer.button_down(PointerButton::Middle));
     let looking = tool == Tool::Hand || space || middle;
     // A stroke whose release this canvas never saw (released over a panel, focus lost) ends.
-    if !ctx.input(|i| i.pointer.any_down()) && !response.drag_stopped() {
-        ctx.data_mut(|d| d.remove_temp::<Stroke2>(egui::Id::new(("pc-live-projection-stroke", idx))));
+    if !ctx.input(|i| i.pointer.any_down()) && !response.drag_stopped() && app.projection_live.as_ref().is_some_and(|l| l.doc == idx) {
+        app.projection_live = None;
     }
     let paints = matches!(tool, Tool::Brush | Tool::Eraser | Tool::CloneStamp) && !looking;
 
@@ -144,7 +137,6 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             cam.scale_fov((-dy * 0.002).exp());
         }
     }
-    let stroke_id = egui::Id::new(("pc-live-projection-stroke", idx));
     if response.dragged() && (looking || !paints) {
         if looking {
             cam.look(response.drag_delta(), rect.height());
@@ -183,7 +175,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     let vp = ViewProjection::new(cam.camera(), f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
     let cloning = tool == Tool::CloneStamp;
     let alt = ctx.input(|i| i.modifiers.alt);
-    if paints && drawn && cloning && alt {
+    if paints && cloning && alt {
         // ⌥/Alt-click (or press) sets the source: a direction, so looking around keeps it.
         if (response.clicked() || response.drag_started())
             && let Some(p) = response.interact_pointer_pos()
@@ -198,60 +190,85 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             crosshair(&painter, h, Color32::WHITE);
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
-    } else if paints && drawn {
+    } else if paints {
         let pressure = f64::from(app.stylus.pressure());
-        if response.drag_started_by(PointerButton::Primary) || response.drag_started_by(PointerButton::Secondary) {
-            let erase = tool == Tool::Eraser;
-            ctx.data_mut(|d| d.insert_temp(stroke_id, Stroke2 { points: Vec::new(), erase }));
+        // Right-click: the Brush Preset picker, as on the flat canvas.
+        if response.secondary_clicked()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            crate::brush_picker::open(&mut app.ui, &ctx, [p.x, p.y]);
         }
-        if (response.dragged() || response.drag_started())
+        let start = |app: &mut PhotocraftApp, cam: &ProjectionView, first: [f64; 3]| -> Option<Live> {
+            let (cmd, p, q) = if cloning {
+                let q = clone_rotation_for(app, cam, &vp, first)?;
+                ("paint.projectedClone", clone_params(app, cam, &vp, &q), Some(q))
+            } else {
+                ("paint.projectedStroke", brush_params(app, cam, &vp, tool == Tool::Eraser), None)
+            };
+            let preview = if cloning {
+                photocraft_engine::retouch_cmds::projected_clone_preview(&app.session, &p)
+            } else {
+                photocraft_engine::brush_cmds::ProjectedPreview::brush(&app.session, &p)
+            };
+            match preview {
+                Ok(preview) => Some(Live { doc: idx, cmd, params: p, rotation: q, points: vec![first], preview, texture: None, shown: None, rendered: 0 }),
+                Err(e) => {
+                    app.ui.status = e.to_string();
+                    app.ui.status_error = true;
+                    None
+                }
+            }
+        };
+        if response.drag_started_by(PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
         {
             let [x, y] = to_view(p);
-            if let Some(mut s) = ctx.data(|d| d.get_temp::<Stroke2>(stroke_id)) {
-                s.points.push([x, y, pressure]);
-                ctx.data_mut(|d| d.insert_temp(stroke_id, s));
+            app.projection_live = start(app, &cam, [x, y, pressure]);
+        } else if response.dragged_by(PointerButton::Primary)
+            && let Some(p) = response.interact_pointer_pos()
+            && let Some(l) = app.projection_live.as_mut().filter(|l| l.doc == idx)
+        {
+            let [x, y] = to_view(p);
+            if l.points.last().is_none_or(|q| (q[0] - x).abs() + (q[1] - y).abs() > 0.25) {
+                l.points.push([x, y, pressure]);
             }
         }
-        let click = response.clicked().then(|| response.interact_pointer_pos()).flatten();
-        let finished: Option<Stroke2> = if response.drag_stopped() {
-            ctx.data_mut(|d| d.remove_temp::<Stroke2>(stroke_id))
-        } else if let Some(p) = click {
+        let finished: Option<Live> = if response.drag_stopped_by(PointerButton::Primary) {
+            app.projection_live.take().filter(|l| l.doc == idx)
+        } else if response.clicked()
+            && let Some(p) = response.interact_pointer_pos()
+        {
             let [x, y] = to_view(p);
-            Some(Stroke2 { points: vec![[x, y, pressure]], erase: tool == Tool::Eraser })
+            start(app, &cam, [x, y, pressure])
         } else {
             None
         };
-        // Preview: the path so far at the brush width.
-        if let Some(s) = ctx.data(|d| d.get_temp::<Stroke2>(stroke_id)) {
-            let pts: Vec<Pos2> = s.points.iter().map(|q| rect.min + vec2(q[0] as f32, q[1] as f32) / ppp).collect();
-            let fg = app.session.tools.foreground;
-            let c = if s.erase { Color32::from_white_alpha(90) } else { Color32::from_rgba_unmultiplied((fg[0] * 255.0) as u8, (fg[1] * 255.0) as u8, (fg[2] * 255.0) as u8, 140) };
-            painter.add(egui::Shape::line(pts, Stroke::new((size_px / ppp).max(1.0), c)));
+        // The live preview: the real dabs (or cloned pixels), redrawn as points arrive.
+        if let Some(l) = app.projection_live.as_mut().filter(|l| l.doc == idx) {
+            l.draw(&ctx, &painter, rect, ppp);
             ctx.request_repaint();
         }
-        if let Some(s) = finished.as_ref().filter(|s| !s.points.is_empty() && cloning) {
-            clone_stroke(app, &mut cam, &vp, &s.points);
-        } else if let Some(s) = finished.filter(|s| !s.points.is_empty() && !cloning) {
-            let p = json!({
-                "points": s.points,
-                "erase": s.erase,
-                "zoom": 1.0,
-                "target": crate::canvas::paint_target(app),
-                "projection": {"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": rect.width() * ppp, "height": rect.height() * ppp},
-            });
-            if let Err(e) = app.run("paint.projectedStroke", p) {
-                app.ui.status = e;
-                app.ui.status_error = true;
+        if let Some(mut l) = finished {
+            // Keep showing the stroke on the frame it is committed.
+            l.draw(&ctx, &painter, rect, ppp);
+            l.params["points"] = json!(l.points);
+            match app.run(l.cmd, l.params) {
+                Ok(_) if cloning => cam.clone_rotation = l.rotation.filter(|_| app.ui.tool_options.clone_aligned).map(|q| flat(&q)),
+                Ok(_) => {}
+                Err(e) => {
+                    app.ui.status = e;
+                    app.ui.status_error = true;
+                }
             }
         }
         // Clone source crosshair: where the pointer (or the stroke) samples from.
         if cloning && let Some(src) = cam.clone_source {
-            let at = ctx.data(|d| d.get_temp::<Stroke2>(stroke_id)).and_then(|s| s.points.last().copied()).or_else(|| response.hover_pos().map(|h| {
+            let live = app.projection_live.as_ref().filter(|l| l.doc == idx);
+            let at = live.and_then(|l| l.points.last().copied()).or_else(|| response.hover_pos().map(|h| {
                 let [x, y] = to_view(h);
                 [x, y, 1.0]
             }));
-            let first = ctx.data(|d| d.get_temp::<Stroke2>(stroke_id)).and_then(|s| s.points.first().copied());
+            let first = live.and_then(|l| l.points.first().copied());
             let shown = match (at, cam.clone_rotation.filter(|_| app.ui.tool_options.clone_aligned)) {
                 (Some(a), Some(q)) => vp.dir_to_view(rot(&rot_of(&q), vp.view_to_dir(a[0], a[1]))),
                 (Some(a), None) => {
@@ -297,35 +314,92 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     view
 }
 
-/// Commit a Clone Stamp stroke (`points` in view device pixels) through `paint.projectedClone`.
-fn clone_stroke(app: &mut PhotocraftApp, cam: &mut ProjectionView, vp: &ViewProjection, points: &[[f64; 3]]) {
-    let Some(src) = cam.clone_source else {
-        app.ui.status = if cfg!(target_os = "macos") { "Option-click to define a source point to clone from" } else { "Alt-click to define a source point to clone from" }.into();
-        app.ui.status_error = true;
-        return;
-    };
-    let aligned = app.ui.tool_options.clone_aligned;
-    let q = match cam.clone_rotation.filter(|_| aligned) {
-        Some(q) => rot_of(&q),
-        None => rotation_between(vp.view_to_dir(points[0][0], points[0][1]), src),
-    };
-    let o = &app.ui.tool_options;
-    let p = json!({
-        "points": points,
+/// A projected stroke being drawn: its command, params (without points), the points so far
+/// (view device pixels, pressure) and the engine's live preview.
+pub struct Live {
+    doc: usize,
+    cmd: &'static str,
+    params: serde_json::Value,
+    rotation: Option<Rot>,
+    points: Vec<[f64; 3]>,
+    preview: photocraft_engine::brush_cmds::ProjectedPreview,
+    texture: Option<egui::TextureHandle>,
+    /// The overlay's view rect (device px) when it was uploaded.
+    shown: Option<photocraft_geom::Rect>,
+    /// Points rendered into the texture.
+    rendered: usize,
+}
+
+impl Live {
+    #[cfg(test)]
+    pub(crate) fn has_preview(&self) -> bool {
+        self.texture.is_some()
+    }
+
+    /// Render new points with the real brush engine and draw the overlay over the view.
+    fn draw(&mut self, ctx: &egui::Context, painter: &egui::Painter, rect: Rect, ppp: f32) {
+        if self.rendered != self.points.len() {
+            self.rendered = self.points.len();
+            if let Some(o) = self.preview.render(&self.points) {
+                let size = [o.rect.width() as usize, o.rect.height() as usize];
+                let img = egui::ColorImage::from_rgba_unmultiplied(size, bytemuck_flat(&o.px));
+                match &mut self.texture {
+                    Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                    None => self.texture = Some(ctx.load_texture("pc-live-projection-stroke", img, egui::TextureOptions::LINEAR)),
+                }
+                self.shown = Some(o.rect);
+            }
+        }
+        if let (Some(t), Some(r)) = (&self.texture, self.shown) {
+            let min = rect.min + vec2(r.x0 as f32, r.y0 as f32) / ppp;
+            let at = Rect::from_min_size(min, vec2(r.width() as f32, r.height() as f32) / ppp);
+            painter.image(t.id(), at, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+    }
+}
+
+fn bytemuck_flat(px: &[[u8; 4]]) -> &[u8] {
+    // SAFETY-free: [[u8; 4]] is laid out as consecutive bytes.
+    px.as_flattened()
+}
+
+fn view_json(cam: &ProjectionView, vp: &ViewProjection) -> serde_json::Value {
+    json!({"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": vp.w, "height": vp.h})
+}
+
+/// `paint.projectedStroke` params (without points) for the Brush or Eraser.
+fn brush_params(app: &PhotocraftApp, cam: &ProjectionView, vp: &ViewProjection, erase: bool) -> serde_json::Value {
+    json!({"erase": erase, "zoom": 1.0, "target": crate::canvas::paint_target(app), "projection": view_json(cam, vp)})
+}
+
+/// `paint.projectedClone` params (without points) through sphere rotation `q`.
+fn clone_params(app: &PhotocraftApp, cam: &ProjectionView, vp: &ViewProjection, q: &Rot) -> serde_json::Value {
+    json!({
         "rotation": q.concat(),
-        "sampleLayer": o.clone_sample,
+        "sampleLayer": app.ui.tool_options.clone_sample,
         "opacity": app.session.tools.brush.opacity * 100.0,
         "flow": app.session.tools.brush.flow * 100.0,
         "target": crate::canvas::paint_target(app),
-        "projection": {"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": vp.w, "height": vp.h},
-    });
-    match app.run("paint.projectedClone", p) {
-        Ok(_) => cam.clone_rotation = aligned.then(|| q.concat().try_into().unwrap_or([0.0; 9])),
-        Err(e) => {
-            app.ui.status = e;
-            app.ui.status_error = true;
-        }
-    }
+        "projection": view_json(cam, vp),
+    })
+}
+
+/// The source rotation of a Clone Stamp stroke starting at `first`: the aligned one kept from an
+/// earlier stroke, else from here to the source. `None` (with the status hint) without a source.
+fn clone_rotation_for(app: &mut PhotocraftApp, cam: &ProjectionView, vp: &ViewProjection, first: [f64; 3]) -> Option<Rot> {
+    let Some(src) = cam.clone_source else {
+        app.ui.status = if cfg!(target_os = "macos") { "Option-click to define a source point to clone from" } else { "Alt-click to define a source point to clone from" }.into();
+        app.ui.status_error = true;
+        return None;
+    };
+    Some(match cam.clone_rotation.filter(|_| app.ui.tool_options.clone_aligned) {
+        Some(q) => rot_of(&q),
+        None => rotation_between(vp.view_to_dir(first[0], first[1]), src),
+    })
+}
+
+fn flat(q: &Rot) -> [f64; 9] {
+    [q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2], q[2][0], q[2][1], q[2][2]]
 }
 
 fn rot_of(q: &[f64; 9]) -> Rot {

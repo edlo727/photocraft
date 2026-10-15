@@ -73,6 +73,49 @@ pub(super) fn projected_clone(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "damage": damage_json(dmg) }))
 }
 
+/// A live Clone Stamp preview from `paint.projectedClone` params (points unused): the target
+/// and the rotated source resampled into the whole view once.
+pub fn projected_clone_preview(s: &Session, p: &Value) -> Result<crate::brush_cmds::projected::ProjectedPreview> {
+    use crate::brush_cmds::projected::{PreviewKind, ProjectedPreview};
+    let q = p.get("projection").ok_or_else(|| bad(CMD, "missing `projection`"))?;
+    let g = |k: &str, d: f64| q.get(k).and_then(Value::as_f64).unwrap_or(d);
+    let (w, h) = (g("width", 0.0), g("height", 0.0));
+    if !(w >= 1.0 && h >= 1.0 && w <= 16384.0 && h <= 16384.0) {
+        return Err(bad(CMD, "`projection.width` and `height` must be 1..=16384"));
+    }
+    let proj = ViewProjection::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, w, h);
+    let rotation: Vec<f64> = p.get("rotation").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+    let rotation = rot_from_slice(&rotation).ok_or_else(|| bad(CMD, "`rotation` must be a 3×3 rotation"))?;
+    let src_proj = proj.rotated(&rotation);
+    let mut pp = p.clone();
+    pp["points"] = json!([[0, 0]]);
+    let (stroke, id) = parse_brush(s, &pp, CMD)?;
+    let which = sample_layers(p, CMD)?;
+    let mode = blend_param(p, CMD)?;
+    let st = s.active().ok_or(crate::EngineError::NoDocument)?;
+    let pre = st.doc.clone();
+    let mut doc = (*pre).clone();
+    let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
+    let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
+    let view = Rect::new(0, 0, w as i32, h as i32);
+    let source = match which {
+        SampleLayers::Current => to_view(surf, &src_proj, view, iw, ih),
+        _ => {
+            let fmt = surf.format();
+            let mut flat = Surface::new(fmt);
+            for e in view_rect_to_equirect(&src_proj, [0.0, 0.0, w, h], iw as u32, ih as u32, 2.0) {
+                let rect = Rect::new(e[0] as i32, e[1] as i32, e[2] as i32, e[3] as i32);
+                if !rect.is_empty() {
+                    flat.write_region(rect, &composite_region(&pre, id, which, rect, fmt).data);
+                }
+            }
+            to_view(&flat, &src_proj, view, iw, ih)
+        }
+    };
+    let pre_view = to_view(surf, &proj, view, iw, ih);
+    Ok(ProjectedPreview::with(pre_view, view, PreviewKind::Clone { source, brush: Box::new(stroke.brush), mode, lock }))
+}
+
 /// `cov` (row-major over `from`) cut to `to` (inside `from`).
 fn crop(cov: &[f32], from: Rect, to: Rect) -> Vec<f32> {
     if from == to {
