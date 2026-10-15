@@ -96,10 +96,26 @@ impl ProjectedTool {
         let src_proj = if history { Some(proj.clone()) } else { rotation.map(|r| proj.rotated(&r)) };
         let history_src = if history { Some(crate::retouch_cmds::history_source(s, layer, &params, &cmd)?) } else { None };
         let source_half = Rect::new(view.x1, 0, 2 * view.x1, view.y1);
+        // Real HDR latlongs carry `inf` (the sun) and `NaN` pixels: the healing solves and patch
+        // searches spread one of them over the whole fill (written back as black). The view copy
+        // holds finite values; write-back only adds finite deltas, so those pixels stay as they were.
+        let finite = |mut s: Surface| -> Surface {
+            let mut b = s.read_region(view);
+            if b.iter().all(|v| v.is_finite()) {
+                return s;
+            }
+            for v in &mut b {
+                if !v.is_finite() {
+                    *v = if v.is_nan() { 0.0 } else { v.signum() * 65504.0 };
+                }
+            }
+            s.write_region(view, &b);
+            s
+        };
         let resample = |surf: &Surface, src: Option<&Surface>| -> Surface {
-            let mut out = to_view(surf, &proj, view, iw, ih);
+            let mut out = finite(to_view(surf, &proj, view, iw, ih));
             if let Some(sp) = &src_proj {
-                let r = to_view(src.unwrap_or(surf), sp, view, iw, ih);
+                let r = finite(to_view(src.unwrap_or(surf), sp, view, iw, ih));
                 out.write_region(source_half, &r.read_region(view));
             }
             out
@@ -378,4 +394,97 @@ mod tests {
     }
 
 
+}
+
+#[cfg(test)]
+mod realistic {
+    use super::*;
+    use crate::equirect::rotation_between;
+
+    /// Ed's material, scaled: a 4096×2048 F32 latlong (multi-tile) with a gradient, per-pixel
+    /// noise, HDR sky up to ~30 and a dark blemish.
+    pub(crate) fn hdr_session() -> Session {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 4096, "height": 2048, "depth": 32})).unwrap();
+        let id = s.active().unwrap().doc.walk().iter().find(|(_, _, l)| l.surface().is_some()).map(|(_, _, l)| l.id).unwrap();
+        s.select_layer(id).unwrap();
+        s.edit("fill", |doc, _| {
+            let surf = doc.layer_mut(id).unwrap().surface_mut().unwrap();
+            let n = surf.channels();
+            let (w, h) = (4096usize, 2048usize);
+            let mut d = vec![0f32; w * h * n];
+            let mut seed = 0x1234_5678u32;
+            for y in 0..h {
+                for x in 0..w {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    let t = (seed % 1000) as f32 / 1000.0;
+                    let i = (y * w + x) * n;
+                    let sky = if y < h / 2 { 30.0 * (1.0 - y as f32 / (h / 2) as f32).powi(3) } else { 0.0 };
+                    d[i] = 0.2 + 0.8 * x as f32 / w as f32 + 0.2 * t + sky;
+                    d[i + 1] = 0.3 + 0.2 * t + sky * 0.9;
+                    d[i + 2] = 0.05 + 0.6 * y as f32 / h as f32 + sky * 0.8;
+                    if n == 4 {
+                        d[i + 3] = 1.0;
+                    }
+                    if (x as i32 - 2048).pow(2) + (y as i32 - 1000).pow(2) < 25 {
+                        d[i..i + 3].fill(0.0);
+                    }
+                    // As in real HDR files: an `inf` sun pixel and a `NaN` near the blemish.
+                    if (x, y) == (2070, 990) {
+                        d[i..i + 3].fill(f32::INFINITY);
+                    }
+                    if (x, y) == (2030, 1012) {
+                        d[i] = f32::NAN;
+                    }
+                }
+            }
+            surf.write_region(Rect::new(0, 0, w as i32, h as i32), &d);
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn bad_pixels(s: &Session, r: Rect) -> (usize, usize) {
+        let d = s.active().unwrap();
+        let surf = d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap();
+        let b = surf.read_region(r);
+        let n = surf.channels();
+        let nan = b.iter().filter(|v| !v.is_finite()).count();
+        let nan = nan.saturating_sub(if r.contains(2030, 1012) { 1 } else { 0 });
+        let black = b.chunks_exact(n).filter(|p| p[0] <= 1e-6 && p[1] <= 1e-6 && p[2] <= 1e-6).count();
+        (nan, black)
+    }
+
+    #[test]
+    fn spot_healing_and_healing_on_a_big_hdr_f32_leave_no_black_or_nan() {
+        let view = json!({"yaw": 0.0, "pitch": 5.0, "fov": 70.0, "width": 1920, "height": 1080});
+        let vp = ViewProjection::new(Camera { yaw: 0.0, pitch: 5.0, fov: 70.0 }, 1920.0, 1080.0);
+        let dot = vp.equirect_to_view(2048.5, 1000.5, 4096.0, 2048.0).unwrap();
+        let blem = Rect::new(2040, 992, 2057, 1009);
+        for size in [30.0, 80.0, 200.0] {
+            for ty in ["contentAware", "proximityMatch", "createTexture"] {
+                let mut s = hdr_session();
+                s.tools.brush.size = size;
+                let pts: Vec<[f64; 3]> = (0..12).map(|i| [dot[0] - 20.0 + i as f64 * 4.0, dot[1], 1.0]).collect();
+                let p = json!({"command": "paint.spotHealing", "params": {"type": ty, "sampleAllLayers": false, "target": "pixels"}, "projection": view, "points": pts});
+                let mut t = ProjectedTool::new(&s, &p).unwrap();
+                let o = t.preview(&pts).expect("a preview");
+                let dark = o.px.iter().filter(|q| q[3] > 0 && q[0] < 4 && q[1] < 4 && q[2] < 4).count();
+                s.execute(CMD, p).unwrap();
+                let (nan, black) = bad_pixels(&s, blem);
+                eprintln!("spot {ty} size {size}: nan {nan} black {black} preview-dark {dark}/{}", o.px.len());
+                assert!(nan == 0 && black == 0 && dark == 0, "spot {ty} size {size}: nan {nan} black {black} preview-dark {dark}");
+            }
+        }
+        let mut s = hdr_session();
+        s.tools.brush.size = 80.0;
+        let q = rotation_between(vp.view_to_dir(dot[0], dot[1]), vp.view_to_dir(dot[0] + 150.0, dot[1]));
+        let pts: Vec<[f64; 3]> = (0..12).map(|i| [dot[0] - 20.0 + i as f64 * 4.0, dot[1], 1.0]).collect();
+        let r = s.execute(CMD, json!({"command": "paint.healingBrush", "params": {"aligned": true, "sampleLayer": "current", "target": "pixels"}, "rotation": q.concat(), "projection": view, "points": pts}));
+        let (nan, black) = bad_pixels(&s, blem);
+        assert!(r.is_ok() && nan == 0 && black == 0, "healing: {r:?} nan {nan} black {black}");
+    }
 }

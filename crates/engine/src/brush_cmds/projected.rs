@@ -138,7 +138,7 @@ pub(crate) fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surf
                     sample_buf(&post_b, damage, n, vx, vy, &mut b);
                     for c in 0..n {
                         let d = (b[c] - a[c]) * k;
-                        if d != 0.0 {
+                        if d != 0.0 && d.is_finite() {
                             touched = true;
                             let v = line[i * n + c] + d;
                             line[i * n + c] = if Some(c) == alpha { v.clamp(0.0, 1.0) } else { v.max(0.0) };

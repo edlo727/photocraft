@@ -31,7 +31,25 @@ const FINE_OMEGA: f32 = 1.7;
 pub fn solve_membrane(w: usize, h: usize, unknown: &[bool], v: &mut [f32]) {
     assert_eq!(unknown.len(), w * h);
     assert_eq!(v.len(), w * h);
-    solve_rec(w, h, unknown, v, 0, &|| false);
+    solve_guarded(w, h, unknown, v, &|| false);
+}
+
+/// [`solve_rec`] with non-finite known values (an HDR file's `inf` sun, a renderer's `NaN`)
+/// solved over like unknowns and put back afterwards: one of them anywhere in the box used to
+/// spread through the coarse levels and turn the whole fill `NaN` (shown black).
+fn solve_guarded(w: usize, h: usize, unknown: &[bool], v: &mut [f32], stop: &(dyn Fn() -> bool + Sync)) {
+    if v.iter().zip(unknown).all(|(x, u)| *u || x.is_finite()) {
+        return solve_rec(w, h, unknown, v, 0, stop);
+    }
+    let bad: Vec<(usize, f32)> = v.iter().zip(unknown).enumerate().filter(|(_, (x, u))| !**u && !x.is_finite()).map(|(i, (x, _))| (i, *x)).collect();
+    let mut u = unknown.to_vec();
+    for &(i, _) in &bad {
+        u[i] = true;
+    }
+    solve_rec(w, h, &u, v, 0, stop);
+    for (i, x) in bad {
+        v[i] = x;
+    }
 }
 
 fn solve_rec(w: usize, h: usize, unknown: &[bool], v: &mut [f32], depth: usize, stop: &(dyn Fn() -> bool + Sync)) {
@@ -249,7 +267,7 @@ pub fn membrane_fill_with(
     let out = per_channel(w, h, ch, |c| {
         let mut v: Vec<f32> = (0..w * h).map(|i| if hole[i] { 0.0 } else { img[i * ch + c] }).collect();
         if hole.len() == w * h && v.len() == w * h {
-            solve_rec(w, h, hole, &mut v, 0, &stop);
+            solve_guarded(w, h, hole, &mut v, &stop);
         }
         v
     });
@@ -324,5 +342,22 @@ mod tests {
         assert!(e / (n as f32) < 0.01, "gradient error {}", e / n as f32);
         // Outside untouched.
         assert_eq!(&out[..3], &dst[..3]);
+    }
+}
+
+#[cfg(test)]
+mod non_finite_tests {
+    #[test]
+    fn an_inf_or_nan_pixel_near_the_hole_does_not_poison_the_fill() {
+        let (w, h) = (40usize, 40usize);
+        for bad in [f32::INFINITY, f32::NAN] {
+            let mut img = vec![0.5f32; w * h];
+            img[5 * w + 20] = bad;
+            let hole: Vec<bool> = (0..w * h).map(|i| ((i % w) as i32 - 20).pow(2) + ((i / w) as i32 - 20).pow(2) < 64).collect();
+            for out in [super::membrane_fill(w, h, 1, &img, &hole), super::seamless_clone(w, h, 1, &img, &img, &hole)] {
+                assert!((out[20 * w + 20] - 0.5).abs() < 1e-3, "{bad}: {}", out[20 * w + 20]);
+                assert_eq!(out.iter().filter(|v| !v.is_finite()).count(), 1, "{bad}: only the bad pixel itself");
+            }
+        }
     }
 }
