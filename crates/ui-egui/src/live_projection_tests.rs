@@ -232,3 +232,26 @@ fn quick_selection_previews_while_dragging_and_magnetic_lasso_closes() {
     key(&mut h, Key::Enter);
     assert!(selected(&h), "{}", h.state().ui.status);
 }
+
+#[test]
+fn right_click_menu_is_drawn_and_stays_open_in_projection() {
+    for tool in [Tool::RectMarquee, Tool::Lasso, Tool::MagicWand] {
+        let mut h = harness(tool);
+        // Something to act on, as Ed has.
+        let c = h.state().last_canvas_rect.center();
+        drag(&mut h, c - vec2(40.0, 30.0), c + vec2(40.0, 30.0), Modifiers::NONE);
+        if tool != Tool::RectMarquee {
+            h.state_mut().run("select.all", json!({})).unwrap();
+        }
+        h.event(Event::PointerMoved(c));
+        h.run_steps(2);
+        h.event(Event::PointerButton { pos: c, button: PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        h.event(Event::PointerButton { pos: c, button: PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        h.event(Event::PointerMoved(c + vec2(10.0, 10.0)));
+        h.run_steps(5);
+        assert!(h.state().ui.canvas_tool_menu.is_some(), "{tool:?}: still open on frame 5+");
+        assert!(h.query_by_label_contains("Deselect").is_some(), "{tool:?}: the menu is actually drawn");
+    }
+}

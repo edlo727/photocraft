@@ -2858,6 +2858,10 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
     // View › Equirectangular Live Projection draws and handles input on its own.
     if view.projection.is_some() {
         let view = crate::live_projection::canvas(app, ui, idx, rect, view, ppp, output);
+        // The canvas popups the flat canvas draws at its end (its tool context menu, the layer
+        // picker) are drawn here too, or a right-click opens one that never shows.
+        crate::layer_pick_ui::show(app, &ui.ctx().clone());
+        crate::canvas_tool_menu::show(app, &ui.ctx().clone());
         // The primary canvas owns `app.ui.views[idx]` (the write-back at the end of this function
         // is skipped here), so the camera must be stored now or the next frame starts over.
         if primary && let Some(v) = app.ui.views.get_mut(idx) {
