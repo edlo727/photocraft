@@ -93,9 +93,10 @@ pub(crate) fn to_view(target: &Surface, proj: &ViewProjection, r: Rect, iw: i32,
     s
 }
 
-/// Write `post − pre` (view space, over `damage`) back into the equirect `target`. Returns the
-/// equirect damage.
-pub(crate) fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surface, post: &Surface, damage: Rect, iw: i32, ih: i32) -> Rect {
+/// Write `post − pre` (view space, over `damage`) back into the equirect `target`, scaled by the
+/// equirect `selection` coverage when there is one. Returns the equirect damage.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surface, post: &Surface, damage: Rect, iw: i32, ih: i32, selection: Option<&Surface>) -> Rect {
     let n = target.channels();
     let (pre_b, post_b) = (pre.read_region(damage), post.read_region(damage));
     let alpha = target.format().alpha.then(|| n - 1);
@@ -117,15 +118,26 @@ pub(crate) fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surf
                 let y = rect.y0 + j as i32;
                 let (mut a, mut b) = (vec![0f32; n], vec![0f32; n]);
                 let mut touched = false;
+                let mut m = vec![0f32; selection.map_or(1, Surface::channels)];
                 for (i, x) in (rect.x0..rect.x1).enumerate() {
                     let Some([vx, vy]) = proj.equirect_to_view(f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(iw), f64::from(ih)) else { continue };
                     if !(vx >= r[0] && vx < r[2] && vy >= r[1] && vy < r[3]) {
                         continue;
                     }
+                    let k = match selection {
+                        Some(sel) => {
+                            sel.read_pixel(x, y, &mut m);
+                            m[0].clamp(0.0, 1.0)
+                        }
+                        None => 1.0,
+                    };
+                    if k <= 0.0 {
+                        continue;
+                    }
                     sample_buf(&pre_b, damage, n, vx, vy, &mut a);
                     sample_buf(&post_b, damage, n, vx, vy, &mut b);
                     for c in 0..n {
-                        let d = b[c] - a[c];
+                        let d = (b[c] - a[c]) * k;
                         if d != 0.0 {
                             touched = true;
                             let v = line[i * n + c] + d;
@@ -159,6 +171,8 @@ pub(crate) enum PreviewKind {
 pub struct ProjectedPreview {
     pre: Surface,
     view: Rect,
+    /// The active selection resampled into the view: strokes are clipped by it.
+    sel: Option<Surface>,
     pub(crate) kind: PreviewKind,
 }
 
@@ -178,14 +192,15 @@ impl ProjectedPreview {
         let st = s.active().ok_or(EngineError::NoDocument)?;
         let mut doc = (*st.doc).clone();
         let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
+        let view = Rect::new(0, 0, proj.w as i32, proj.h as i32);
+        let sel = doc.selection.clone().map(|m| to_view(&m, &proj, view, iw, ih));
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
         erase_locked(&mut brush, lock, bg);
-        let view = Rect::new(0, 0, proj.w as i32, proj.h as i32);
-        Ok(Self { pre: to_view(surf, &proj, view, iw, ih), view, kind: PreviewKind::Brush { brush: Box::new(brush), lock } })
+        Ok(Self { pre: to_view(surf, &proj, view, iw, ih), view, sel, kind: PreviewKind::Brush { brush: Box::new(brush), lock } })
     }
 
-    pub(crate) fn with(pre: Surface, view: Rect, kind: PreviewKind) -> Self {
-        Self { pre, view, kind }
+    pub(crate) fn with(pre: Surface, view: Rect, sel: Option<Surface>, kind: PreviewKind) -> Self {
+        Self { pre, view, sel, kind }
     }
 
     /// Render `points` (view pixels, `[x, y, pressure]`). `None` when nothing shows yet or the
@@ -197,7 +212,7 @@ impl ProjectedPreview {
         }
         let mut post = self.pre.clone();
         let damage = match &self.kind {
-            PreviewKind::Brush { brush, lock } => photocraft_paint::render_stroke(&mut post, brush, &pts, None, *lock, 1.0),
+            PreviewKind::Brush { brush, lock } => photocraft_paint::render_stroke(&mut post, brush, &pts, self.sel.as_ref(), *lock, 1.0),
             PreviewKind::Clone { source, brush, mode, lock } => {
                 let stroke = photocraft_paint::Stroke { brush: (**brush).clone(), points: pts };
                 let (bounds, cov) = photocraft_paint::retouch::stroke_coverage(&stroke);
@@ -207,7 +222,7 @@ impl ProjectedPreview {
                 }
                 let cov = crop_cov(&cov, bounds, work);
                 let paint = photocraft_paint::retouch::Region::read(source, work);
-                photocraft_paint::retouch::apply_coverage(&mut post, work, &cov, brush.opacity, None, *lock, &paint, *mode)
+                photocraft_paint::retouch::apply_coverage(&mut post, work, &cov, brush.opacity, self.sel.as_ref(), *lock, &paint, *mode)
             }
         }
         .intersect(&self.view);
@@ -283,6 +298,7 @@ pub fn paint_projected_stroke(s: &mut Session, p: &Value) -> Result<Value> {
     let (id, brush, _) = stroke_target(s, p, brush)?;
     let dmg = s.edit(label, |doc, _| {
         let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
+        let selection = doc.selection.clone();
         if iw < 2 || ih < 1 {
             return Err(EngineError::Other("document too small for a projected stroke".into()));
         }
@@ -306,7 +322,7 @@ pub fn paint_projected_stroke(s: &mut Session, p: &Value) -> Result<Value> {
         if damage.is_empty() {
             return Ok(Rect::EMPTY);
         }
-        Ok(write_back(surf, &proj, &pre, &post, damage, iw, ih))
+        Ok(write_back(surf, &proj, &pre, &post, damage, iw, ih, selection.as_ref()))
     })?;
     Ok(damage_json(s, dmg))
 }

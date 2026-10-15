@@ -124,3 +124,43 @@ fn a_drag_shows_a_live_preview_and_commits_on_release() {
     assert!(h.state().projection_live.is_none());
     assert!(h.state().ui.status_error == false, "{}", h.state().ui.status);
 }
+
+fn drag(h: &mut Harness<'_, PhotocraftApp>, from: egui::Pos2, to: egui::Pos2, modifiers: Modifiers) {
+    h.event(Event::PointerMoved(from));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers });
+    h.run_steps(1);
+    for i in 1..=8 {
+        h.event(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
+        h.run_steps(1);
+    }
+    h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers });
+    h.run_steps(3);
+}
+
+fn selected(h: &Harness<'_, PhotocraftApp>) -> bool {
+    h.state().session.active().unwrap().doc.selection.as_ref().is_some_and(|s| !s.content_bounds().is_empty())
+}
+
+#[test]
+fn marquee_drag_selects_and_click_deselects_in_projection() {
+    let mut h = harness(Tool::RectMarquee);
+    assert_eq!(h.state().ui.tool, Tool::RectMarquee, "the marquee works in projection");
+    let c = h.state().last_canvas_rect.center();
+    drag(&mut h, c - vec2(40.0, 30.0), c + vec2(40.0, 30.0), Modifiers::NONE);
+    assert!(selected(&h), "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.last().map(|(id, _)| id.as_str()), Some("select.projected"));
+    click(&mut h, c + vec2(200.0, 0.0), PointerButton::Primary);
+    assert!(!selected(&h), "a click deselects");
+}
+
+#[test]
+fn polygonal_lasso_closes_on_the_first_corner_in_projection() {
+    let mut h = harness(Tool::PolygonLasso);
+    let c = h.state().last_canvas_rect.center();
+    for q in [vec2(-40.0, -30.0), vec2(40.0, -30.0), vec2(40.0, 30.0), vec2(-40.0, -30.0)] {
+        click(&mut h, c + q, PointerButton::Primary);
+        h.run_steps(20); // not a double-click
+    }
+    assert!(selected(&h), "{}", h.state().ui.status);
+}

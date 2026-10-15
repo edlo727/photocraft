@@ -1029,6 +1029,15 @@ fn build() -> Vec<CommandSpec> {
             crate::brush_cmds::paint_projected_stroke
         ),
         cmd!(
+            "select.projected",
+            "Projected Selection",
+            [],
+            None,
+            r##"{"kind":"rect|ellipse|lasso|wand|quick|object","rect":[x0,y0,x1,y1],"points":[[x,y],…],"mode":"replace|add|subtract|intersect","feather":px,"antiAlias":bool,"tolerance":n,"contiguous":bool,"size":px,"sampleAllLayers":bool,"projection":{"yaw":deg,"pitch":deg,"fov":deg,"width":px,"height":px}} — View › Equirectangular Live Projection: a selection drawn in the perspective view, reprojected onto the equirect selection"##,
+            has_doc,
+            crate::projected_select::select_projected
+        ),
+        cmd!(
             "tools.setColors",
             "Set Colors",
             [],

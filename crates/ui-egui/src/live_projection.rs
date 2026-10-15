@@ -5,6 +5,8 @@
 //!   zoom commands change the field of view.
 //! - Brush and Eraser strokes are drawn in the view and committed as one
 //!   `paint.projectedStroke`, which reprojects them onto the equirect pixels (one History step).
+//! - The selection tools draw in the view and commit `select.projected` (live_projection_select.rs);
+//!   the marching ants follow the camera, and strokes are clipped by the selection.
 //! - Other tools are off in this view; the canvas says so.
 //!
 //! Drawing is the GPU canvas's `fs_proj` pass over the document's existing tiles
@@ -95,7 +97,7 @@ pub fn toggle(app: &mut PhotocraftApp, idx: usize, on: Option<bool>) -> Result<b
 
 /// Tools that work in the projection view.
 pub fn supported(t: Tool) -> bool {
-    matches!(t, Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Hand | Tool::Zoom)
+    matches!(t, Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Hand | Tool::Zoom) || crate::live_projection_select::supported(t)
 }
 
 /// Whether document `idx`'s view shows the projection.
@@ -291,6 +293,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             painter.circle_stroke(h, (size_px / ppp / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
+    } else if crate::live_projection_select::supported(tool) && !looking {
+        crate::live_projection_select::tool(app, &ctx, &response, &painter, rect, ppp, cam.camera(), idx, tool);
     } else if looking {
         // Only over the canvas (or while dragging from it): the cursor is per frame and global.
         if response.dragged() {
@@ -301,10 +305,11 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     } else if !matches!(tool, Tool::Zoom) && response.hovered() {
         ctx.set_cursor_icon(egui::CursorIcon::NotAllowed);
         if response.clicked() || response.drag_started() {
-            app.ui.status = format!("{} is not available in Equirectangular Live Projection: use the Brush, Eraser or Hand tool, or turn it off in the View menu.", tool_name(tool));
+            app.ui.status = format!("{} is not available in Equirectangular Live Projection: use the Brush, Eraser, Clone Stamp, a selection tool or the Hand, or turn it off in the View menu.", tool_name(tool));
             app.ui.status_error = false;
         }
     }
+    crate::live_projection_select::ants(app, &ctx, &painter, rect, ppp, cam.camera(), idx);
     // Heads-up: camera readout.
     let label = format!("Live Projection   yaw {:.1}°   pitch {:.1}°   FOV {:.1}°", cam.yaw, cam.pitch, cam.fov);
     let at = rect.left_bottom() + vec2(8.0, -8.0);

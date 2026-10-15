@@ -154,6 +154,7 @@ pub mod parity;
 pub mod patch_preview;
 pub(crate) mod pattern_fill_ui;
 pub mod live_projection;
+pub mod live_projection_select;
 #[cfg(test)]
 mod live_projection_tests;
 pub mod pattern_preview;
@@ -532,6 +533,9 @@ pub struct PhotocraftApp {
     pub(crate) tool_override: Option<state::Tool>,
     /// The Equirectangular Live Projection stroke being drawn and its preview (live_projection.rs).
     pub(crate) projection_live: Option<live_projection::Live>,
+    /// A selection shape being drawn in a projection view, and the projected marching ants.
+    pub(crate) projection_select: Option<live_projection_select::SelDrag>,
+    pub(crate) projection_ants: Option<live_projection_select::Ants>,
     /// Brush/Eraser stroke being drawn, rendered by the engine (see `canvas::LiveStroke`).
     live_stroke: Option<canvas::LiveStroke>,
     /// A live stroke just committed with its own pixels: the canvas caches that showed it
@@ -794,6 +798,8 @@ impl PhotocraftApp {
             move_blocked: false,
             tool_override: None,
             projection_live: None,
+            projection_select: None,
+            projection_ants: None,
             live_stroke: None,
             committed_stroke: None,
             trail: None,

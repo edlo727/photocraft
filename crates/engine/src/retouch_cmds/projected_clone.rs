@@ -32,7 +32,7 @@ pub(super) fn projected_clone(s: &mut Session, p: &Value) -> Result<Value> {
     let (stroke, id) = parse_brush(s, p, CMD)?;
     let which = sample_layers(p, CMD)?;
     let mode = blend_param(p, CMD)?;
-    let dmg = run_stroke(s, "Clone Stamp", id, p, |pre, surf, _sel, lock| {
+    let dmg = run_stroke(s, "Clone Stamp", id, p, |pre, surf, sel, lock| {
         let (iw, ih) = (pre.size.width as i32, pre.size.height as i32);
         if iw < 2 || ih < 1 {
             return Err(bad(CMD, "document too small for a projected stroke"));
@@ -68,7 +68,7 @@ pub(super) fn projected_clone(s: &mut Session, p: &Value) -> Result<Value> {
         if damage.is_empty() {
             return Ok(Rect::EMPTY);
         }
-        Ok(write_back(surf, &proj, &pre_view, &post, damage, iw, ih))
+        Ok(write_back(surf, &proj, &pre_view, &post, damage, iw, ih, sel))
     })?;
     Ok(json!({ "damage": damage_json(dmg) }))
 }
@@ -113,7 +113,8 @@ pub fn projected_clone_preview(s: &Session, p: &Value) -> Result<crate::brush_cm
         }
     };
     let pre_view = to_view(surf, &proj, view, iw, ih);
-    Ok(ProjectedPreview::with(pre_view, view, PreviewKind::Clone { source, brush: Box::new(stroke.brush), mode, lock }))
+    let sel = pre.selection.as_ref().map(|m| to_view(m, &proj, view, iw, ih));
+    Ok(ProjectedPreview::with(pre_view, view, sel, PreviewKind::Clone { source, brush: Box::new(stroke.brush), mode, lock }))
 }
 
 /// `cov` (row-major over `from`) cut to `to` (inside `from`).
