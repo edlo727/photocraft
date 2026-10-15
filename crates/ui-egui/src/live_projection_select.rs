@@ -483,7 +483,9 @@ pub fn ants(app: &mut PhotocraftApp, ctx: &egui::Context, painter: &egui::Painte
     if let Some(t) = &a.texture {
         let [x0, y0, x1, y1] = a.bbox;
         let k = ANTS_SCALE / ppp;
-        let at = Rect::from_min_max(rect.min + vec2(x0 as f32, y0 as f32) * k, rect.min + vec2(x1 as f32, y1 as f32) * k);
+        // A Patch / Content-Aware Move drag carries the outline with the pointer.
+        let shift = ctx.data(|d| d.get_temp::<egui::Vec2>(crate::live_projection::ants_shift_id(idx))).unwrap_or_default();
+        let at = Rect::from_min_max(rect.min + vec2(x0 as f32, y0 as f32) * k, rect.min + vec2(x1 as f32, y1 as f32) * k).translate(shift);
         painter.image(t.id(), at, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
     }
     ctx.request_repaint_after(std::time::Duration::from_millis(125));

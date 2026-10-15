@@ -462,3 +462,171 @@ fn remove_red_eye_and_content_aware_move_work_on_an_f32_exr() {
         }
     }
 }
+
+/// End to end, as Ed works: a 4096×2048 F32 latlong (multi-tile) with a gradient, per-pixel
+/// noise, an HDR sky up to ~30, an `inf` sun pixel and a `NaN` pixel near a dark blemish at doc
+/// (2100, 1020), round-tripped through EXR; projection on; the tool options exactly as the app
+/// initialises them (nothing overridden); real pointer events over many frames.
+fn ed_harness(tool: Tool) -> Harness<'static, PhotocraftApp> {
+    let mut s = photocraft_engine::Session::new();
+    s.execute("file.new", json!({"width": 4096, "height": 2048, "depth": 32})).unwrap();
+    let id = s.active().unwrap().doc.walk().iter().find(|(_, _, l)| l.surface().is_some()).map(|(_, _, l)| l.id).unwrap();
+    s.select_layer(id).unwrap();
+    s.edit("fill", |doc, _| {
+        let surf = doc.layer_mut(id).unwrap().surface_mut().unwrap();
+        let n = surf.channels();
+        let (w, h) = (4096usize, 2048usize);
+        let mut d = vec![0f32; w * h * n];
+        let mut seed = 0x9e37_79b9u32;
+        for y in 0..h {
+            for x in 0..w {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let t = (seed % 1000) as f32 / 1000.0;
+                let i = (y * w + x) * n;
+                let sky = if y < h / 2 { 30.0 * (1.0 - y as f32 / (h / 2) as f32).powi(3) } else { 0.0 };
+                d[i] = 0.2 + 0.8 * x as f32 / w as f32 + 0.15 * t + sky;
+                d[i + 1] = 0.3 + 0.15 * t + sky * 0.9;
+                d[i + 2] = 0.05 + 0.6 * y as f32 / h as f32 + sky * 0.8;
+                if n == 4 {
+                    d[i + 3] = 1.0;
+                }
+                if (x as i32 - 2100).pow(2) + (y as i32 - 1020).pow(2) < 36 {
+                    d[i..i + 3].fill(0.0);
+                }
+                if (x, y) == (2118, 1008) {
+                    d[i..i + 3].fill(f32::INFINITY);
+                }
+                if (x, y) == (2086, 1031) {
+                    d[i] = f32::NAN;
+                }
+            }
+        }
+        surf.write_region(photocraft_geom::Rect::new(0, 0, w as i32, h as i32), &d);
+        Ok(())
+    })
+    .unwrap();
+    let doc = (*s.active().unwrap().doc).clone();
+    let r = photocraft_io::export(&doc, "ed.exr", &photocraft_io::ExportOptions::default()).unwrap();
+    let back = photocraft_io::import("ed.exr", &r.bytes).unwrap().document;
+    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
+        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+        let mut session = photocraft_engine::Session::new();
+        session.add_document(back.clone(), Some("ed.exr".into()));
+        let mut app = PhotocraftApp::new(session, Services::default());
+        app.sync_views();
+        app.ui.tool = tool;
+        app
+    });
+    h.run_steps(5);
+    let ctx = h.ctx.clone();
+    crate::menus::invoke(h.state_mut(), &ctx, crate::live_projection::COMMAND, json!({})).unwrap();
+    h.run_steps(5);
+    assert!(crate::live_projection::active(h.state(), 0));
+    assert_eq!(h.state().ui.tool, tool, "{tool:?} works in projection");
+    h
+}
+
+/// Non-finite values and black pixels in the blemish (doc 2094..2107 × 1014..1027), besides
+/// the planted `NaN`.
+fn ed_damage(h: &Harness<'_, PhotocraftApp>) -> (usize, usize, f32) {
+    let d = h.state().session.active().unwrap();
+    let surf = d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap();
+    let r = photocraft_geom::Rect::new(2094, 1014, 2107, 1027);
+    let n = surf.channels();
+    let b = surf.read_region(r);
+    let nan = b.iter().filter(|v| !v.is_finite()).count();
+    let black = b.chunks_exact(n).filter(|p| p[0] <= 1e-6 && p[1] <= 1e-6 && p[2] <= 1e-6).count();
+    (nan, black, surf.rgba(2100, 1020)[0])
+}
+
+/// What the GPU canvas shows after a commit: the live overlay gone, and a new revision whose
+/// damage (the tiles re-uploaded) covers the healed pixels.
+fn assert_canvas_refreshed(h: &Harness<'_, PhotocraftApp>, tool: Tool, revision: u64) {
+    assert!(h.state().projection_live.is_none(), "{tool:?}: the live overlay is cleared");
+    let st = h.state().session.active().unwrap();
+    assert!(st.revision > revision, "{tool:?}: a new revision for the canvas");
+    assert!(st.last_damage.is_some_and(|d| d.contains(2100, 1020)), "{tool:?}: damage {:?} re-uploads the healed tiles", st.last_damage);
+}
+
+fn alt_click(h: &mut Harness<'_, PhotocraftApp>, at: egui::Pos2) {
+    h.event(Event::PointerMoved(at));
+    h.event(Event::ModifiersChanged(Modifiers::ALT));
+    h.run_steps(2);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::ALT });
+        h.run_steps(1);
+    }
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(3);
+}
+
+#[test]
+fn ed_flow_spot_healing_and_healing_heal_a_hdr_f32_exr_end_to_end() {
+    for tool in [Tool::SpotHealing, Tool::Healing] {
+        let mut h = ed_harness(tool);
+        let dot = screen_of_doc(&h, 2100.5, 1020.5);
+        if tool == Tool::Healing {
+            alt_click(&mut h, dot + vec2(0.0, 40.0));
+            assert!(h.state().ui.views[0].projection.unwrap().clone_source.is_some(), "Alt-click sets the Healing source");
+        }
+        let rev = h.state().session.active().unwrap().revision;
+        let previewed = stroke(&mut h, dot - vec2(12.0, 0.0), 4);
+        assert!(!h.state().ui.status_error, "{tool:?}: {}", h.state().ui.status);
+        assert!(previewed, "{tool:?}: a live preview while stroking");
+        assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("paint.projectedTool"), "{tool:?}: the stroke was dispatched");
+        let (nan, black, c) = ed_damage(&h);
+        assert!(nan == 0 && black == 0 && c > 0.2, "{tool:?}: nan {nan} black {black} centre {c}");
+        assert_canvas_refreshed(&h, tool, rev);
+    }
+}
+
+#[test]
+fn ed_flow_patch_draws_its_selection_then_drags_it_with_ants_and_preview() {
+    let mut h = ed_harness(Tool::Patch);
+    assert!(h.state().session.active().unwrap().doc.selection.is_none());
+    let dot = screen_of_doc(&h, 2100.5, 1020.5);
+    // Draw the patch selection around the blemish with the Patch tool itself.
+    let ring: Vec<egui::Pos2> = (0..=24).map(|i| {
+        let a = i as f32 / 24.0 * std::f32::consts::TAU;
+        dot + vec2(a.cos(), a.sin()) * 18.0
+    }).collect();
+    h.event(Event::PointerMoved(ring[0]));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: ring[0], button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    for p in &ring[1..] {
+        h.event(Event::PointerMoved(*p));
+        h.run_steps(1);
+    }
+    h.event(Event::PointerButton { pos: *ring.last().unwrap(), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(selected(&h), "Patch drew its own selection: {}", h.state().ui.status);
+    assert!(h.state().projection_ants.is_some(), "marching ants show it");
+    // Drag it (from inside) to the source, over frames: ants and preview follow.
+    let rev = h.state().session.active().unwrap().revision;
+    let to = dot + vec2(0.0, 50.0);
+    h.event(Event::PointerMoved(dot));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: dot, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    let mut previewed = false;
+    let mut shifted = false;
+    for i in 1..=10 {
+        h.event(Event::PointerMoved(dot + (to - dot) * (i as f32 / 10.0)));
+        h.run_steps(6);
+        previewed |= h.state().projection_live.as_ref().is_some_and(|l| l.has_preview());
+        shifted |= h.ctx.data(|d| d.get_temp::<egui::Vec2>(crate::live_projection::ants_shift_id(0))).is_some_and(|v| v.y > 5.0);
+    }
+    assert!(previewed, "the patch preview shows while dragging");
+    assert!(shifted, "the marching ants follow the drag");
+    h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("paint.projectedTool"));
+    let (nan, black, c) = ed_damage(&h);
+    assert!(nan == 0 && black == 0 && c > 0.2, "patch: nan {nan} black {black} centre {c}");
+    assert_canvas_refreshed(&h, Tool::Patch, rev);
+    assert!(h.ctx.data(|d| d.get_temp::<egui::Vec2>(crate::live_projection::ants_shift_id(0))).is_none(), "ants back in place");
+}

@@ -299,9 +299,18 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             // Keep showing the stroke on the frame it is committed.
             l.draw(&ctx, &painter, rect, ppp);
             l.params["points"] = json!(l.points);
+            let cmd = l.cmd;
             match app.run(l.cmd, l.params) {
-                Ok(_) if cloning => cam.clone_rotation = l.rotation.filter(|_| app.ui.tool_options.clone_aligned).map(|q| flat(&q)),
-                Ok(_) => {}
+                Ok(v) => {
+                    if cloning {
+                        cam.clone_rotation = l.rotation.filter(|_| app.ui.tool_options.clone_aligned).map(|q| flat(&q));
+                    }
+                    // Say so when a stroke changed nothing, rather than leaving it a mystery.
+                    if cmd == "paint.projectedTool" && v["damage"].get(2).and_then(serde_json::Value::as_i64).is_some_and(|w| w <= 0) {
+                        app.ui.status = format!("{}: the stroke changed no pixels", tool_name(tool));
+                        app.ui.status_error = false;
+                    }
+                }
                 Err(e) => {
                     app.ui.status = e;
                     app.ui.status_error = true;
@@ -454,16 +463,40 @@ impl Live {
     }
 }
 
-/// The Patch tool: drag the selection to the place to patch it from (Source mode). The preview
-/// runs the flat Patch on the view, rotated onto where the pointer is, at most every 150 ms.
+/// A Patch / Content-Aware Move drag: drawing its own freehand selection, or moving it.
+#[derive(Clone)]
+enum PatchDrag {
+    Lasso { points: Vec<[f64; 2]>, mode: &'static str },
+    Move { start: [f64; 2] },
+}
+
+/// Where the marching ants of document `idx` are drawn shifted to (view points), while a Patch
+/// or Content-Aware Move drag moves the selection.
+pub(crate) fn ants_shift_id(idx: usize) -> egui::Id {
+    egui::Id::new(("pc-live-projection-ants-shift", idx))
+}
+
+/// Whether view device pixel `v` lies inside the selection of the active document.
+fn in_selection(app: &PhotocraftApp, vp: &ViewProjection, v: [f64; 2]) -> bool {
+    let Some(st) = app.session.active() else { return false };
+    let Some(sel) = st.doc.selection.as_ref() else { return false };
+    let (w, h) = (st.doc.size.width, st.doc.size.height);
+    let [x, y] = vp.view_to_equirect(v[0], v[1], f64::from(w), f64::from(h));
+    let (x, y) = ((x.floor() as i64).rem_euclid(i64::from(w)) as i32, (y.floor() as i32).clamp(0, h as i32 - 1));
+    let mut m = vec![0f32; sel.channels()];
+    sel.read_pixel(x, y, &mut m);
+    m[0] >= 0.5
+}
+
+/// The Patch and Content-Aware Move tools, as in Photoshop: drag outside the selection (or with
+/// none, or with Shift/Alt) to draw a freehand selection; drag inside it to move it, with the
+/// marching ants and the patch preview following the pointer; release applies (Patch: Normal,
+/// Source; the preview runs the flat Patch on the view, rotated onto the pointer, throttled).
 #[allow(clippy::too_many_arguments)]
 fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: &ProjectionView, vp: &ViewProjection, idx: usize, tool: Tool) {
     let id = egui::Id::new(("pc-live-projection-patch", idx));
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
-    let selected = app.session.active().is_some_and(|d| d.doc.selection.is_some());
-    if response.hovered() {
-        ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-    }
+    let to_screen = |q: [f64; 2]| -> Pos2 { rect.min + vec2(q[0] as f32, q[1] as f32) / ppp };
     let params = |app: &PhotocraftApp, start: [f64; 2], end: [f64; 2]| -> serde_json::Value {
         if tool == Tool::ContentAwareMove {
             // The content moves within the view: a view-space offset.
@@ -474,57 +507,119 @@ fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
         let q = rotation_between(vp.view_to_dir(start[0], start[1]), vp.view_to_dir(end[0], end[1]));
         json!({"command": "paint.patch", "params": {"mode": "source", "target": crate::canvas::paint_target(app)}, "rotation": q.concat(), "projection": view_json(cam, vp)})
     };
+    // A drag whose release this canvas never saw ends (and the ants stop following it).
+    if !ctx.input(|i| i.pointer.any_down()) && !response.drag_stopped() {
+        ctx.data_mut(|d| {
+            d.remove::<PatchDrag>(id);
+            d.remove_temp::<egui::Vec2>(ants_shift_id(idx));
+        });
+    }
+    let drag: Option<PatchDrag> = ctx.data(|d| d.get_temp(id));
+    if response.hovered() {
+        let inside = response.hover_pos().is_some_and(|h| in_selection(app, vp, to_view(h)));
+        let moving = matches!(drag, Some(PatchDrag::Move { .. }));
+        ctx.set_cursor_icon(if moving || (inside && drag.is_none()) { egui::CursorIcon::Move } else { egui::CursorIcon::Crosshair });
+    }
     if response.drag_started_by(PointerButton::Primary)
         && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos())
     {
-        if !selected {
-            app.ui.status = "Make a selection first (any selection tool), then drag it to where it should come from (Patch) or go (Content-Aware Move).".into();
-            app.ui.status_error = true;
-            return;
-        }
-        if tool == Tool::Patch && (app.ui.tool_options.patch_mode != "source" || app.ui.tool_options.patch_content_aware) {
-            app.ui.status = "In Live Projection the Patch tool patches from where you drag (Normal, Source).".into();
-            app.ui.status_error = false;
-        }
-        ctx.data_mut(|d| d.insert_temp(id, to_view(p)));
+        let q = to_view(p);
+        let m = ctx.input(|i| i.modifiers);
+        let d = if !m.shift && !m.alt && in_selection(app, vp, q) {
+            if tool == Tool::Patch && (app.ui.tool_options.patch_mode != "source" || app.ui.tool_options.patch_content_aware) {
+                app.ui.status = "In Live Projection the Patch tool patches from where you drag (Normal, Source).".into();
+                app.ui.status_error = false;
+            }
+            PatchDrag::Move { start: q }
+        } else {
+            let selected = app.session.active().is_some_and(|d| d.doc.selection.is_some());
+            let mode = if selected { crate::tool_feedback::document_selection_mode(app, Tool::Lasso, m) } else { "replace" };
+            PatchDrag::Lasso { points: vec![q], mode }
+        };
+        ctx.data_mut(|x| x.insert_temp(id, d));
     }
-    let Some(start) = ctx.data(|d| d.get_temp::<[f64; 2]>(id)) else { return };
-    let Some(now) = response.interact_pointer_pos().map(to_view) else { return };
-    if response.drag_stopped() {
-        ctx.data_mut(|d| d.remove_temp::<[f64; 2]>(id));
-        app.projection_live = None;
-        if (now[0] - start[0]).abs() + (now[1] - start[1]).abs() < 1.0 {
-            return;
+    let Some(drag) = ctx.data(|d| d.get_temp::<PatchDrag>(id)) else { return };
+    let now = response.interact_pointer_pos().map(to_view);
+    match drag {
+        PatchDrag::Lasso { mut points, mode } => {
+            if let Some(q) = now
+                && points.last().is_none_or(|l| (l[0] - q[0]).abs() + (l[1] - q[1]).abs() > 1.0)
+            {
+                points.push(q);
+            }
+            if response.drag_stopped() {
+                ctx.data_mut(|d| d.remove::<PatchDrag>(id));
+                if points.len() < 3 {
+                    if mode == "replace" {
+                        let _ = app.run("select.deselect", json!({}));
+                    }
+                    return;
+                }
+                if let Some(p) = crate::live_projection_select::params(app, Tool::Lasso, mode, &points, cam.camera(), vp.w, vp.h)
+                    && let Err(e) = app.run("select.projected", p)
+                {
+                    app.ui.status = e;
+                    app.ui.status_error = true;
+                }
+                return;
+            }
+            let line: Vec<Pos2> = points.iter().map(|q| to_screen(*q)).collect();
+            painter.add(egui::Shape::line(line.clone(), Stroke::new(3.0, Color32::from_black_alpha(160))));
+            painter.add(egui::Shape::line(line, Stroke::new(1.0, Color32::WHITE)));
+            ctx.data_mut(|d| d.insert_temp(id, PatchDrag::Lasso { points, mode }));
+            ctx.request_repaint();
         }
-        let p = params(app, start, now);
-        if let Err(e) = app.run("paint.projectedTool", p) {
-            app.ui.status = e;
-            app.ui.status_error = true;
+        PatchDrag::Move { start } => {
+            let Some(now) = now else { return };
+            if response.drag_stopped() {
+                ctx.data_mut(|d| {
+                    d.remove::<PatchDrag>(id);
+                    d.remove_temp::<egui::Vec2>(ants_shift_id(idx));
+                });
+                app.projection_live = None;
+                if (now[0] - start[0]).abs() + (now[1] - start[1]).abs() < 1.0 {
+                    return;
+                }
+                let p = params(app, start, now);
+                if let Err(e) = app.run("paint.projectedTool", p) {
+                    app.ui.status = e;
+                    app.ui.status_error = true;
+                }
+                return;
+            }
+            if !response.dragged() {
+                return;
+            }
+            // The marching ants follow the pointer (drawn after this, shifted).
+            let shift = vec2((now[0] - start[0]) as f32, (now[1] - start[1]) as f32) / ppp;
+            ctx.data_mut(|d| d.insert_temp(ants_shift_id(idx), shift));
+            painter.line_segment([to_screen(start), to_screen(now)], Stroke::new(1.0, Color32::from_white_alpha(160)));
+            // The preview: rebuilt for each new drag position (a new source rotation), throttled.
+            let t = ctx.input(|i| i.time);
+            let stale = app.projection_live.as_ref().is_none_or(|l| l.doc != idx || (t - l.last > 0.15 && l.points.first().is_none_or(|q| q[0] != now[0] || q[1] != now[1])));
+            // Content-Aware Move is a heavy content-aware fill: no live re-run, just the ants.
+            if stale && tool == Tool::Patch {
+                let p = params(app, start, now);
+                match photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
+                    Ok(tool) => {
+                        let texture = app.projection_live.take().and_then(|l| l.texture);
+                        let mut l = Live { doc: idx, cmd: "paint.projectedTool", params: p, rotation: None, points: vec![[now[0], now[1], 1.0]], preview: LivePreview::Tool(Box::new(tool)), texture, shown: None, rendered: 0, last: 0.0 };
+                        // Patch takes no points: render once now.
+                        l.draw(ctx, painter, rect, ppp);
+                        l.last = t;
+                        app.projection_live = Some(l);
+                    }
+                    Err(e) => {
+                        app.ui.status = e.to_string();
+                        app.ui.status_error = true;
+                    }
+                }
+            } else if let Some(l) = app.projection_live.as_mut() {
+                l.draw(ctx, painter, rect, ppp);
+            }
+            ctx.request_repaint();
         }
-        return;
     }
-    if !response.dragged() {
-        return;
-    }
-    painter.line_segment([rect.min + vec2(start[0] as f32, start[1] as f32) / ppp, rect.min + vec2(now[0] as f32, now[1] as f32) / ppp], Stroke::new(1.0, Color32::WHITE));
-    // The preview: rebuilt for each new drag position (a new source rotation), throttled.
-    let t = ctx.input(|i| i.time);
-    let stale = app.projection_live.as_ref().is_none_or(|l| l.doc != idx || (t - l.last > 0.15 && l.points.first().is_none_or(|q| q[0] != now[0] || q[1] != now[1])));
-    // Content-Aware Move is a heavy content-aware fill: no live re-run, just the arrow.
-    if stale && tool == Tool::Patch {
-        let p = params(app, start, now);
-        if let Ok(tool) = photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
-            let texture = app.projection_live.take().and_then(|l| l.texture);
-            let mut l = Live { doc: idx, cmd: "paint.projectedTool", params: p, rotation: None, points: vec![[now[0], now[1], 1.0]], preview: LivePreview::Tool(Box::new(tool)), texture, shown: None, rendered: 0, last: 0.0 };
-            // Patch takes no points: render once now.
-            l.draw(ctx, painter, rect, ppp);
-            l.last = t;
-            app.projection_live = Some(l);
-        }
-    } else if let Some(l) = app.projection_live.as_mut() {
-        l.draw(ctx, painter, rect, ppp);
-    }
-    ctx.request_repaint();
 }
 
 /// What draws a live projected stroke.
