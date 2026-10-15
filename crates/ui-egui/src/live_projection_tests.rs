@@ -318,3 +318,16 @@ fn healing_brush_needs_a_source_then_heals_in_projection() {
     assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
     assert_eq!(h.state().session.journal.last().map(|(id, _)| id.as_str()), Some("paint.projectedTool"));
 }
+
+#[test]
+fn patch_drags_the_selection_to_its_source_in_projection() {
+    let mut h = harness(Tool::Patch);
+    h.state_mut().run("select.rect", json!({"x": 380, "y": 150, "width": 60, "height": 100})).unwrap();
+    h.state_mut().run("edit.fill", json!({"color": "#3070c0"})).unwrap();
+    let c = h.state().last_canvas_rect.center();
+    let journal = h.state().session.journal.len();
+    drag(&mut h, c, c + vec2(150.0, 0.0), Modifiers::NONE);
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert!(h.state().session.journal.len() > journal);
+    assert_eq!(h.state().session.journal.last().map(|(id, _)| id.as_str()), Some("paint.projectedTool"));
+}
