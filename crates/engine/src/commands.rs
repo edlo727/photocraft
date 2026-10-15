@@ -1029,6 +1029,15 @@ fn build() -> Vec<CommandSpec> {
             crate::brush_cmds::paint_projected_stroke
         ),
         cmd!(
+            "paint.projectedTool",
+            "Projected Tool Stroke",
+            [],
+            None,
+            r##"{"command":"paint.healingBrush|paint.spotHealing|paint.patch|paint.smudge|paint.blur|paint.sharpen|paint.dodge|paint.burn|paint.sponge|paint.pencil|paint.mixerBrush|paint.colorReplacement|paint.historyBrush","params":{…that command's params, without points…},"points":[[x,y,pressure],…] (view px),"rotation":[9 numbers]? (Healing/Patch: destination→source on the sphere),"projection":{"yaw","pitch","fov","width","height"}} — View › Equirectangular Live Projection: a retouch or paint tool stroke drawn in the perspective view, reprojected onto the equirect pixels"##,
+            has_paintable,
+            crate::projected_tool::projected_tool
+        ),
+        cmd!(
             "select.projected",
             "Projected Selection",
             [],

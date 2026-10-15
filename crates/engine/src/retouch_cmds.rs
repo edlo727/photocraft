@@ -616,7 +616,7 @@ fn healing_brush(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// The History Brush's source: the targeted surface (pixels, mask, channel) as it was in history
 /// state `state` (default: the oldest state still held, the "Open" snapshot unless trimmed).
-fn history_source(s: &Session, id: Option<LayerId>, p: &Value, cmd: &str) -> Result<Surface> {
+pub(crate) fn history_source(s: &Session, id: Option<LayerId>, p: &Value, cmd: &str) -> Result<Surface> {
     let st = s.active().ok_or(EngineError::NoDocument)?;
     let explicit = p.get("state").and_then(Value::as_u64).map(|v| v as usize);
     let source_doc = match explicit {
