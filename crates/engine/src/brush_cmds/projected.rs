@@ -72,7 +72,7 @@ fn sample_buf(buf: &[f32], r: Rect, n: usize, x: f64, y: f64, out: &mut [f32]) {
 }
 
 /// Resample the equirect target into view space over `r`.
-fn to_view(target: &Surface, proj: &ViewProjection, r: Rect, iw: i32, ih: i32) -> Surface {
+pub(crate) fn to_view(target: &Surface, proj: &ViewProjection, r: Rect, iw: i32, ih: i32) -> Surface {
     let n = target.channels();
     let mut data = vec![0f32; r.width() as usize * r.height() as usize * n];
     let (mut px, mut tmp) = (vec![0f32; n], vec![0f32; n]);
@@ -92,7 +92,7 @@ fn to_view(target: &Surface, proj: &ViewProjection, r: Rect, iw: i32, ih: i32) -
 
 /// Write `post − pre` (view space, over `damage`) back into the equirect `target`. Returns the
 /// equirect damage.
-fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surface, post: &Surface, damage: Rect, iw: i32, ih: i32) -> Rect {
+pub(crate) fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surface, post: &Surface, damage: Rect, iw: i32, ih: i32) -> Rect {
     let n = target.channels();
     let (pre_b, post_b) = (pre.read_region(damage), post.read_region(damage));
     let alpha = target.format().alpha.then(|| n - 1);

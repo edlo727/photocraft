@@ -110,6 +110,71 @@ impl ViewProjection {
     }
 }
 
+impl ViewProjection {
+    /// This view with its camera turned by rotation `q` (row-major 3×3): view pixel `p` looks
+    /// along `q · view_to_dir(p)`. The Clone Stamp samples through it, so the source shows
+    /// undistorted where the stroke is.
+    pub fn rotated(&self, q: &Rot) -> ViewProjection {
+        let [f, r, u] = self.basis;
+        ViewProjection { basis: [rot(q, f), rot(q, r), rot(q, u)], ..*self }
+    }
+}
+
+/// A rotation of the sphere, row-major.
+pub type Rot = [[f64; 3]; 3];
+
+pub const IDENTITY: Rot = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// `q · v`.
+pub fn rot(q: &Rot, v: [f64; 3]) -> [f64; 3] {
+    [dot(q[0], v), dot(q[1], v), dot(q[2], v)]
+}
+
+/// The smallest rotation taking unit direction `a` to unit direction `b` (Rodrigues). Opposite
+/// directions turn half way round an axis perpendicular to `a`.
+pub fn rotation_between(a: [f64; 3], b: [f64; 3]) -> Rot {
+    let (a, b) = (normalize(a), normalize(b));
+    let c = dot(a, b);
+    let mut k = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let mut s = dot(k, k).sqrt();
+    if s < 1e-12 {
+        if c > 0.0 {
+            return IDENTITY;
+        }
+        // 180°: any perpendicular axis.
+        let t = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        k = normalize([a[1] * t[2] - a[2] * t[1], a[2] * t[0] - a[0] * t[2], a[0] * t[1] - a[1] * t[0]]);
+        s = 0.0;
+    } else {
+        k = [k[0] / s, k[1] / s, k[2] / s];
+    }
+    let v = 1.0 - c;
+    let [x, y, z] = k;
+    [
+        [c + x * x * v, x * y * v - z * s, x * z * v + y * s],
+        [y * x * v + z * s, c + y * y * v, y * z * v - x * s],
+        [z * x * v - y * s, z * y * v + x * s, c + z * z * v],
+    ]
+}
+
+/// A rotation from `"rotation"`'s 9 numbers (row-major); `None` unless it is finite and close to
+/// orthonormal.
+pub fn rot_from_slice(v: &[f64]) -> Option<Rot> {
+    if v.len() != 9 || !v.iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    let q = [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]];
+    for i in 0..3 {
+        for j in 0..3 {
+            let d = dot(q[i], q[j]) - if i == j { 1.0 } else { 0.0 };
+            if d.abs() > 1e-3 {
+                return None;
+            }
+        }
+    }
+    Some(q)
+}
+
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -279,6 +344,17 @@ mod tests {
         let rects = view_rect_to_equirect(&p, [450.0, 450.0, 550.0, 550.0], 20000, 10000, 1.0);
         assert_eq!(rects.len(), 2, "{rects:?}");
         assert!(rects.iter().any(|r| r[0] == 0) && rects.iter().any(|r| r[2] == 20000), "{rects:?}");
+    }
+
+    #[test]
+    fn rotation_between_maps_a_to_b_and_is_orthonormal() {
+        for (a, b) in [([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), ([0.3, 0.4, -0.8], [-0.2, 0.9, 0.1]), ([0.0, 1.0, 0.0], [0.0, -1.0, 0.0]), ([1.0, 0.0, 0.0], [1.0, 0.0, 0.0])] {
+            let q = rotation_between(a, b);
+            let m = rot(&q, normalize(a));
+            let b = normalize(b);
+            assert!((0..3).all(|i| close(m[i], b[i], 1e-9)), "{a:?}→{b:?}: {m:?}");
+            assert!(rot_from_slice(&q.concat()).is_some(), "orthonormal");
+        }
     }
 
     #[test]

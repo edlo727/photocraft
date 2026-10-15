@@ -27,6 +27,7 @@ mod content_aware_move;
 mod patch;
 mod pattern_stamp;
 mod periodic;
+mod projected_clone;
 mod remove;
 pub use content_aware_move::{ContentAwarePreview, preview as content_aware_move_preview};
 pub use patch::preview as patch_preview;
@@ -1230,6 +1231,18 @@ pub fn specs() -> Vec<CommandSpec> {
             ),
             enabled: has_pixel_layer,
             run: clone_stamp,
+            journal: true,
+        },
+        CommandSpec {
+            id: "paint.projectedClone",
+            label: "Clone Stamp",
+            menu: &[],
+            shortcut: None,
+            params: brush_params!(
+                r#","rotation":[9 numbers, row-major 3×3: destination direction d samples rotation·d],"projection":{"yaw","pitch","fov","width","height"},"sampleLayer":"current|currentAndBelow|all"="current","mode":"normal|multiply|…"="normal" — View › Equirectangular Live Projection: points and size in view pixels → {"damage"}"#
+            ),
+            enabled: has_pixel_layer,
+            run: projected_clone::projected_clone,
             journal: true,
         },
         CommandSpec {

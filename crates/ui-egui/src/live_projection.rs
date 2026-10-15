@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::PhotocraftApp;
 use crate::state::{Tool, View};
-use photocraft_engine::equirect::{Camera, MAX_FOV, MAX_PITCH, MIN_FOV, wrap_deg};
+use photocraft_engine::equirect::{Camera, MAX_FOV, MAX_PITCH, MIN_FOV, Rot, ViewProjection, rot, rotation_between, wrap_deg};
 
 /// Command id of the View menu toggle.
 pub const COMMAND: &str = "view.equirectLiveProjection";
@@ -30,11 +30,19 @@ pub struct ProjectionView {
     pub fov: f32,
     #[serde(default)]
     pub zoom: f32,
+    /// Clone Stamp source as a direction on the sphere (⌥/Alt-click), so it survives looking
+    /// around.
+    #[serde(default)]
+    pub clone_source: Option<[f64; 3]>,
+    /// Aligned Clone Stamp: the sphere rotation from destination to source fixed by the first
+    /// stroke after the source was set (row-major 3×3).
+    #[serde(default)]
+    pub clone_rotation: Option<[f64; 9]>,
 }
 
 impl Default for ProjectionView {
     fn default() -> Self {
-        ProjectionView { yaw: 0.0, pitch: 0.0, fov: 90.0, zoom: 0.0 }
+        ProjectionView { yaw: 0.0, pitch: 0.0, fov: 90.0, zoom: 0.0, clone_source: None, clone_rotation: None }
     }
 }
 
@@ -87,7 +95,7 @@ pub fn toggle(app: &mut PhotocraftApp, idx: usize, on: Option<bool>) -> Result<b
 
 /// Tools that work in the projection view.
 pub fn supported(t: Tool) -> bool {
-    matches!(t, Tool::Brush | Tool::Eraser | Tool::Hand | Tool::Zoom)
+    matches!(t, Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Hand | Tool::Zoom)
 }
 
 /// Whether document `idx`'s view shows the projection.
@@ -127,7 +135,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     if !ctx.input(|i| i.pointer.any_down()) && !response.drag_stopped() {
         ctx.data_mut(|d| d.remove_temp::<Stroke2>(egui::Id::new(("pc-live-projection-stroke", idx))));
     }
-    let paints = matches!(tool, Tool::Brush | Tool::Eraser) && !looking;
+    let paints = matches!(tool, Tool::Brush | Tool::Eraser | Tool::CloneStamp) && !looking;
 
     // Wheel: field of view about the view centre.
     if response.hovered() {
@@ -172,7 +180,25 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     // Painting: collect the stroke in view device pixels, commit it on release.
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     let size_px = app.session.tools.brush.size;
-    if paints && drawn {
+    let vp = ViewProjection::new(cam.camera(), f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
+    let cloning = tool == Tool::CloneStamp;
+    let alt = ctx.input(|i| i.modifiers.alt);
+    if paints && drawn && cloning && alt {
+        // ⌥/Alt-click (or press) sets the source: a direction, so looking around keeps it.
+        if (response.clicked() || response.drag_started())
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let [x, y] = to_view(p);
+            cam.clone_source = Some(vp.view_to_dir(x, y));
+            cam.clone_rotation = None;
+            app.ui.status = "Clone source set".into();
+            app.ui.status_error = false;
+        }
+        if let Some(h) = response.hover_pos().filter(|_| response.hovered()) {
+            crosshair(&painter, h, Color32::WHITE);
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
+    } else if paints && drawn {
         let pressure = f64::from(app.stylus.pressure());
         if response.drag_started_by(PointerButton::Primary) || response.drag_started_by(PointerButton::Secondary) {
             let erase = tool == Tool::Eraser;
@@ -204,7 +230,9 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             painter.add(egui::Shape::line(pts, Stroke::new((size_px / ppp).max(1.0), c)));
             ctx.request_repaint();
         }
-        if let Some(s) = finished.filter(|s| !s.points.is_empty()) {
+        if let Some(s) = finished.as_ref().filter(|s| !s.points.is_empty() && cloning) {
+            clone_stroke(app, &mut cam, &vp, &s.points);
+        } else if let Some(s) = finished.filter(|s| !s.points.is_empty() && !cloning) {
             let p = json!({
                 "points": s.points,
                 "erase": s.erase,
@@ -215,6 +243,29 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             if let Err(e) = app.run("paint.projectedStroke", p) {
                 app.ui.status = e;
                 app.ui.status_error = true;
+            }
+        }
+        // Clone source crosshair: where the pointer (or the stroke) samples from.
+        if cloning && let Some(src) = cam.clone_source {
+            let at = ctx.data(|d| d.get_temp::<Stroke2>(stroke_id)).and_then(|s| s.points.last().copied()).or_else(|| response.hover_pos().map(|h| {
+                let [x, y] = to_view(h);
+                [x, y, 1.0]
+            }));
+            let first = ctx.data(|d| d.get_temp::<Stroke2>(stroke_id)).and_then(|s| s.points.first().copied());
+            let shown = match (at, cam.clone_rotation.filter(|_| app.ui.tool_options.clone_aligned)) {
+                (Some(a), Some(q)) => vp.dir_to_view(rot(&rot_of(&q), vp.view_to_dir(a[0], a[1]))),
+                (Some(a), None) => {
+                    let start = first.unwrap_or(a);
+                    let q = rotation_between(vp.view_to_dir(start[0], start[1]), src);
+                    vp.dir_to_view(rot(&q, vp.view_to_dir(a[0], a[1])))
+                }
+                _ => vp.dir_to_view(src),
+            };
+            if let Some([x, y]) = shown {
+                let p = rect.min + vec2(x as f32, y as f32) / ppp;
+                if rect.contains(p) {
+                    crosshair(&painter, p, Color32::WHITE);
+                }
             }
         }
         // Brush outline at the pointer.
@@ -244,6 +295,49 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     painter.text(at, egui::Align2::LEFT_BOTTOM, &label, egui::FontId::proportional(12.0), Color32::from_white_alpha(230));
     view.projection = Some(cam);
     view
+}
+
+/// Commit a Clone Stamp stroke (`points` in view device pixels) through `paint.projectedClone`.
+fn clone_stroke(app: &mut PhotocraftApp, cam: &mut ProjectionView, vp: &ViewProjection, points: &[[f64; 3]]) {
+    let Some(src) = cam.clone_source else {
+        app.ui.status = if cfg!(target_os = "macos") { "Option-click to define a source point to clone from" } else { "Alt-click to define a source point to clone from" }.into();
+        app.ui.status_error = true;
+        return;
+    };
+    let aligned = app.ui.tool_options.clone_aligned;
+    let q = match cam.clone_rotation.filter(|_| aligned) {
+        Some(q) => rot_of(&q),
+        None => rotation_between(vp.view_to_dir(points[0][0], points[0][1]), src),
+    };
+    let o = &app.ui.tool_options;
+    let p = json!({
+        "points": points,
+        "rotation": q.concat(),
+        "sampleLayer": o.clone_sample,
+        "opacity": app.session.tools.brush.opacity * 100.0,
+        "flow": app.session.tools.brush.flow * 100.0,
+        "target": crate::canvas::paint_target(app),
+        "projection": {"yaw": cam.yaw, "pitch": cam.pitch, "fov": cam.fov, "width": vp.w, "height": vp.h},
+    });
+    match app.run("paint.projectedClone", p) {
+        Ok(_) => cam.clone_rotation = aligned.then(|| q.concat().try_into().unwrap_or([0.0; 9])),
+        Err(e) => {
+            app.ui.status = e;
+            app.ui.status_error = true;
+        }
+    }
+}
+
+fn rot_of(q: &[f64; 9]) -> Rot {
+    [[q[0], q[1], q[2]], [q[3], q[4], q[5]], [q[6], q[7], q[8]]]
+}
+
+fn crosshair(painter: &egui::Painter, p: Pos2, c: Color32) {
+    for (w, col) in [(3.0, Color32::from_black_alpha(160)), (1.0, c)] {
+        let s = Stroke::new(w, col);
+        painter.line_segment([p - vec2(8.0, 0.0), p + vec2(8.0, 0.0)], s);
+        painter.line_segment([p - vec2(0.0, 8.0), p + vec2(0.0, 8.0)], s);
+    }
 }
 
 fn tool_name(t: Tool) -> String {
@@ -299,6 +393,15 @@ mod tests {
         // 150 points left in a 300-point-tall 90° view: about 45° to the right (egui may hold
         // back the first few points until the drag threshold).
         assert!(cam.yaw > 35.0 && cam.yaw <= 45.5, "yaw {}", cam.yaw);
+    }
+
+    #[test]
+    fn clone_source_and_aligned_rotation_survive_looking_around() {
+        let mut v = ProjectionView { clone_source: Some([0.0, 0.0, 1.0]), clone_rotation: Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]), ..Default::default() };
+        let before = (v.clone_source, v.clone_rotation);
+        v.look(vec2(-250.0, 40.0), 300.0);
+        v.scale_fov(0.5);
+        assert_eq!((v.clone_source, v.clone_rotation), before);
     }
 
     #[test]
