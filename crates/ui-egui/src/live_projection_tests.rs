@@ -331,3 +331,134 @@ fn patch_drags_the_selection_to_its_source_in_projection() {
     assert!(h.state().session.journal.len() > journal);
     assert_eq!(h.state().session.journal.last().map(|(id, _)| id.as_str()), Some("paint.projectedTool"));
 }
+
+/// A 4096×2048 HDR float latlong round-tripped through EXR (as Ed opens his files), minified in
+/// the view like a 20k image is.
+fn exr_harness(tool: Tool) -> Harness<'static, PhotocraftApp> {
+    let mut s = photocraft_engine::Session::new();
+    s.execute("file.new", json!({"width": 4096, "height": 2048, "depth": 32})).unwrap();
+    let id = s.active().unwrap().doc.walk().iter().find(|(_, _, l)| l.surface().is_some()).map(|(_, _, l)| l.id).unwrap();
+    s.select_layer(id).unwrap();
+    s.edit("fill", |doc, _| {
+        let surf = doc.layer_mut(id).unwrap().surface_mut().unwrap();
+        let n = surf.channels();
+        let (w, h) = (4096usize, 2048usize);
+        let mut d = vec![0f32; w * h * n];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * n;
+                let t = ((x * 7 + y * 13) % 17) as f32 / 17.0;
+                let sky = if y < h / 2 { 30.0 * (1.0 - y as f32 / (h / 2) as f32).powi(3) } else { 0.0 };
+                d[i] = 0.2 + 0.8 * x as f32 / w as f32 + 0.1 * t + sky;
+                d[i + 1] = 0.3 + 0.1 * t + sky * 0.9;
+                d[i + 2] = 0.05 + 0.6 * y as f32 / h as f32 + sky * 0.8;
+                if n == 4 {
+                    d[i + 3] = 1.0;
+                }
+                if (x as i32 - 2100).pow(2) + (y as i32 - 1020).pow(2) < 400 {
+                    d[i..i + 3].fill(0.0);
+                }
+            }
+        }
+        surf.write_region(photocraft_geom::Rect::new(0, 0, w as i32, h as i32), &d);
+        Ok(())
+    })
+    .unwrap();
+    let doc = (*s.active().unwrap().doc).clone();
+    let r = photocraft_io::export(&doc, "x.exr", &photocraft_io::ExportOptions::default()).unwrap();
+    let back = photocraft_io::import("x.exr", &r.bytes).unwrap().document;
+    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
+        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+        let mut session = photocraft_engine::Session::new();
+        session.add_document(back.clone(), Some("x.exr".into()));
+        let mut app = PhotocraftApp::new(session, Services::default());
+        app.sync_views();
+        app.ui.tool = tool;
+        app
+    });
+    h.run_steps(5);
+    let ctx = h.ctx.clone();
+    crate::menus::invoke(h.state_mut(), &ctx, crate::live_projection::COMMAND, json!({})).unwrap();
+    h.run_steps(5);
+    h
+}
+
+fn screen_of_doc(h: &Harness<'_, PhotocraftApp>, x: f64, y: f64) -> egui::Pos2 {
+    let r = h.state().last_canvas_rect;
+    let ppp = h.ctx.pixels_per_point();
+    let st = h.state().session.active().unwrap();
+    let (w, hh) = (f64::from(st.doc.size.width), f64::from(st.doc.size.height));
+    let cam = h.state().ui.views[0].projection.unwrap().camera();
+    let vp = photocraft_engine::equirect::ViewProjection::new(cam, f64::from(r.width() * ppp), f64::from(r.height() * ppp));
+    let [vx, vy] = vp.equirect_to_view(x, y, w, hh).unwrap();
+    r.min + vec2(vx as f32, vy as f32) / ppp
+}
+
+#[test]
+fn healing_group_heals_an_f32_exr_and_refreshes_the_canvas() {
+    for tool in [Tool::SpotHealing, Tool::Healing, Tool::Patch] {
+        let mut h = exr_harness(tool);
+        let d = h.state().session.active().unwrap();
+        let fmt = d.active_layer.and_then(|id| d.doc.layer(id)).and_then(|l| l.surface()).map(|s| s.format());
+        assert_eq!(fmt.map(|f| f.sample), Some(photocraft_color::SampleType::F32));
+        h.state_mut().session.tools.brush.size = 60.0;
+        let dot = screen_of_doc(&h, 2100.5, 1020.5);
+        if tool == Tool::Healing {
+            let src = dot + vec2(40.0, 0.0);
+            h.event(Event::PointerMoved(src));
+            h.event(Event::ModifiersChanged(Modifiers::ALT));
+            h.run_steps(2);
+            for pressed in [true, false] {
+                h.event(Event::PointerButton { pos: src, button: PointerButton::Primary, pressed, modifiers: Modifiers::ALT });
+                h.run_steps(1);
+            }
+            h.event(Event::ModifiersChanged(Modifiers::NONE));
+            h.run_steps(3);
+        }
+        if tool == Tool::Patch {
+            h.state_mut().run("select.rect", json!({"x": 2070, "y": 990, "width": 60, "height": 60})).unwrap();
+            drag(&mut h, dot, dot + vec2(70.0, 0.0), Modifiers::NONE);
+        } else {
+            stroke(&mut h, dot - vec2(3.0, 0.0), 1);
+        }
+        let p = |x: i32, y: i32| {
+            let d = h.state().session.active().unwrap();
+            d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().rgba(x, y)
+        };
+        assert!(!h.state().ui.status_error, "{tool:?}: {}", h.state().ui.status);
+        assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("paint.projectedTool"), "{tool:?}");
+        let centre = p(2100, 1020);
+        assert!(centre[0] > 0.2, "{tool:?}: the black dot is gone on the F32 EXR: {centre:?}");
+        // What the GPU canvas uploads: it must cover the healed pixels.
+        let dmg = h.state().session.active().unwrap().last_damage;
+        assert!(dmg.is_some_and(|d| d.contains(2100, 1020)), "{tool:?}: damage {dmg:?} reaches the canvas");
+    }
+}
+
+
+#[test]
+fn remove_red_eye_and_content_aware_move_work_on_an_f32_exr() {
+    for tool in [Tool::Remove, Tool::RedEye, Tool::ContentAwareMove] {
+        let mut h = exr_harness(tool);
+        assert_eq!(h.state().ui.tool, tool);
+        h.state_mut().session.tools.brush.size = 60.0;
+        let dot = screen_of_doc(&h, 2100.5, 1020.5);
+        match tool {
+            Tool::Remove => {
+                stroke(&mut h, dot - vec2(3.0, 0.0), 1);
+            }
+            Tool::RedEye => click(&mut h, dot, PointerButton::Primary),
+            _ => {
+                h.state_mut().run("select.rect", json!({"x": 2070, "y": 990, "width": 60, "height": 60})).unwrap();
+                drag(&mut h, dot, dot + vec2(70.0, 0.0), Modifiers::NONE);
+            }
+        }
+        assert!(!h.state().ui.status_error, "{tool:?}: {}", h.state().ui.status);
+        assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("paint.projectedTool"), "{tool:?}");
+        if tool == Tool::Remove {
+            let d = h.state().session.active().unwrap();
+            let c = d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().rgba(2100, 1020);
+            assert!(c[0] > 0.2, "removed: {c:?}");
+        }
+    }
+}

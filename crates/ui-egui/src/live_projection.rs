@@ -115,6 +115,9 @@ pub fn supported(t: Tool) -> bool {
             | Tool::ColorReplacement
             | Tool::HistoryBrush
             | Tool::Patch
+            | Tool::Remove
+            | Tool::ContentAwareMove
+            | Tool::RedEye
             | Tool::Hand
             | Tool::Zoom
     ) || crate::live_projection_select::supported(t)
@@ -335,8 +338,24 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             painter.circle_stroke(h, (size_px / ppp / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
-    } else if tool == Tool::Patch && !looking {
-        patch(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx);
+    } else if matches!(tool, Tool::Patch | Tool::ContentAwareMove) && !looking {
+        patch(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx, tool);
+    } else if tool == Tool::RedEye && !looking {
+        if response.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if response.clicked()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let [x, y] = to_view(p);
+            let o = &app.ui.tool_options;
+            let fp = json!({"pupilSize": o.red_eye_pupil_size.clamp(1.0, 100.0), "darken": o.red_eye_darken.clamp(0.0, 100.0), "target": crate::canvas::paint_target(app)});
+            let p = json!({"command": "paint.redEye", "params": fp, "points": [[x, y, 1.0]], "projection": view_json(&cam, &vp)});
+            if let Err(e) = app.run("paint.projectedTool", p) {
+                app.ui.status = e;
+                app.ui.status_error = true;
+            }
+        }
     } else if crate::live_projection_select::supported(tool) && !looking {
         crate::live_projection_select::tool(app, &ctx, &response, &painter, rect, ppp, cam.camera(), idx, tool);
     } else if looking {
@@ -438,7 +457,7 @@ impl Live {
 /// The Patch tool: drag the selection to the place to patch it from (Source mode). The preview
 /// runs the flat Patch on the view, rotated onto where the pointer is, at most every 150 ms.
 #[allow(clippy::too_many_arguments)]
-fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: &ProjectionView, vp: &ViewProjection, idx: usize) {
+fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: &ProjectionView, vp: &ViewProjection, idx: usize, tool: Tool) {
     let id = egui::Id::new(("pc-live-projection-patch", idx));
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     let selected = app.session.active().is_some_and(|d| d.doc.selection.is_some());
@@ -446,6 +465,12 @@ fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
     }
     let params = |app: &PhotocraftApp, start: [f64; 2], end: [f64; 2]| -> serde_json::Value {
+        if tool == Tool::ContentAwareMove {
+            // The content moves within the view: a view-space offset.
+            let mut fp = crate::retouch_ui::content_aware_move_params(app, [(end[0] - start[0]).round() as i64, (end[1] - start[1]).round() as i64]);
+            fp["target"] = crate::canvas::paint_target(app);
+            return json!({"command": "paint.contentAwareMove", "params": fp, "projection": view_json(cam, vp)});
+        }
         let q = rotation_between(vp.view_to_dir(start[0], start[1]), vp.view_to_dir(end[0], end[1]));
         json!({"command": "paint.patch", "params": {"mode": "source", "target": crate::canvas::paint_target(app)}, "rotation": q.concat(), "projection": view_json(cam, vp)})
     };
@@ -453,11 +478,11 @@ fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
         && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos())
     {
         if !selected {
-            app.ui.status = "Make a selection first (any selection tool), then drag it with the Patch tool to the area to patch from.".into();
+            app.ui.status = "Make a selection first (any selection tool), then drag it to where it should come from (Patch) or go (Content-Aware Move).".into();
             app.ui.status_error = true;
             return;
         }
-        if app.ui.tool_options.patch_mode != "source" || app.ui.tool_options.patch_content_aware {
+        if tool == Tool::Patch && (app.ui.tool_options.patch_mode != "source" || app.ui.tool_options.patch_content_aware) {
             app.ui.status = "In Live Projection the Patch tool patches from where you drag (Normal, Source).".into();
             app.ui.status_error = false;
         }
@@ -485,7 +510,8 @@ fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
     // The preview: rebuilt for each new drag position (a new source rotation), throttled.
     let t = ctx.input(|i| i.time);
     let stale = app.projection_live.as_ref().is_none_or(|l| l.doc != idx || (t - l.last > 0.15 && l.points.first().is_none_or(|q| q[0] != now[0] || q[1] != now[1])));
-    if stale {
+    // Content-Aware Move is a heavy content-aware fill: no live re-run, just the arrow.
+    if stale && tool == Tool::Patch {
         let p = params(app, start, now);
         if let Ok(tool) = photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
             let texture = app.projection_live.take().and_then(|l| l.texture);
@@ -522,6 +548,9 @@ pub(crate) fn retouch_cmd(app: &PhotocraftApp, tool: Tool, alt: bool) -> Option<
         Tool::MixerBrush => ("paint.mixerBrush", json!({})),
         Tool::ColorReplacement => ("paint.colorReplacement", crate::retouch_ui::color_replacement_params(app)),
         Tool::HistoryBrush => ("paint.historyBrush", json!({})),
+        // Each stroke is one removal here (the pending-strokes mode and New Layer stay on the
+        // flat canvas: the projection writes back into the target layer).
+        Tool::Remove => ("paint.remove", json!({"sampleAllLayers": o.sample_all_layers, "newLayer": false})),
         _ => return None,
     })
 }

@@ -43,6 +43,9 @@ fn label_of(cmd: &str) -> Option<&'static str> {
         "paint.mixerBrush" => "Mixer Brush",
         "paint.colorReplacement" => "Color Replacement",
         "paint.historyBrush" => "History Brush",
+        "paint.remove" => "Remove",
+        "paint.contentAwareMove" => "Content-Aware Move",
+        "paint.redEye" => "Red Eye",
         _ => return None,
     })
 }
@@ -152,8 +155,15 @@ impl ProjectedTool {
             d.doc = self.base.clone();
         }
         let mut p = self.params.clone();
-        if self.cmd != "paint.patch" {
-            p["points"] = json!(points);
+        match self.cmd.as_str() {
+            // Selection-driven: the selection (and the offset in the params) say where.
+            "paint.patch" | "paint.contentAwareMove" => {}
+            "paint.redEye" => {
+                let [x, y, _] = points.first().copied().unwrap_or_default();
+                p["x"] = json!(x.floor());
+                p["y"] = json!(y.floor());
+            }
+            _ => p["points"] = json!(points),
         }
         // The History Brush paints the state from the source half through the Clone Stamp.
         let cmd = if self.cmd == "paint.historyBrush" { "paint.cloneStamp" } else { self.cmd.as_str() };
@@ -214,7 +224,7 @@ pub fn projected_tool(s: &mut Session, p: &Value) -> Result<Value> {
         })
         .unwrap_or_default();
     let mut t = ProjectedTool::new(s, p)?;
-    if points.is_empty() && t.cmd != "paint.patch" {
+    if points.is_empty() && !matches!(t.cmd.as_str(), "paint.patch" | "paint.contentAwareMove") {
         return Err(bad("no points"));
     }
     let (post, damage) = t.run(&points)?;
@@ -228,6 +238,11 @@ pub fn projected_tool(s: &mut Session, p: &Value) -> Result<Value> {
         let (surf, _) = crate::channel_cmds::target_surface(doc, layer, &params)?;
         Ok(write_back(surf, &proj, &pre, &post, damage, iw, ih, selection.as_ref()))
     })?;
+    // The canvas uploads only the last damage to the GPU: without it the view keeps showing the
+    // old pixels (or a previous stroke's rect) and the tool looks like it did nothing.
+    if let Some(st) = s.active_mut() {
+        st.last_damage = Some(dmg);
+    }
     Ok(json!({"damage": [dmg.x0, dmg.y0, dmg.width(), dmg.height()]}))
 }
 
@@ -296,4 +311,71 @@ mod tests {
         let best = (322..330).map(|x| rgba(&s, x, 180)[0]).fold(0.0f32, f32::max);
         assert!(best > 0.3, "the band healed toward white: {best}");
     }
+
+    /// A 32-bit float (EXR-like) latlong: smooth HDR gradient with texture, and a black dot.
+    fn float_doc() -> Session {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 720, "height": 360, "depth": 32, "background": "white"})).unwrap();
+        let id = s.active().unwrap().doc.walk().iter().find(|(_, _, l)| l.surface().is_some()).map(|(_, _, l)| l.id).unwrap();
+        s.select_layer(id).unwrap();
+        s.edit("fill", |doc, _| {
+            let surf = doc.layer_mut(id).unwrap().surface_mut().unwrap();
+            let r = Rect::new(0, 0, 720, 360);
+            let n = surf.channels();
+            let mut d = vec![0f32; 720 * 360 * n];
+            for y in 0..360 {
+                for x in 0..720 {
+                    let i = (y * 720 + x) * n;
+                    let t = ((x * 7 + y * 13) % 17) as f32 / 17.0;
+                    d[i] = 0.2 + 1.5 * x as f32 / 720.0 + 0.1 * t;
+                    d[i + 1] = 0.3 + 0.1 * t;
+                    d[i + 2] = 0.6 * y as f32 / 360.0 + 0.05;
+                    if n == 4 {
+                        d[i + 3] = 1.0;
+                    }
+                    if (x as i32 - 330).pow(2) + (y as i32 - 180).pow(2) < 36 {
+                        d[i] = 0.0;
+                        d[i + 1] = 0.0;
+                        d[i + 2] = 0.0;
+                    }
+                }
+            }
+            surf.write_region(r, &d);
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn float_doc_healing_group_runs_and_reports_damage() {
+        let vp = ViewProjection::new(Camera { yaw: 0.0, pitch: 0.0, fov: 60.0 }, 200.0, 200.0);
+        let dot = vp.equirect_to_view(330.5, 180.5, 720.0, 360.0).unwrap();
+        for ty in ["contentAware", "proximityMatch", "createTexture"] {
+            let mut s = float_doc();
+            let r = s.execute(CMD, json!({"command": "paint.spotHealing", "params": {"type": ty, "sampleAllLayers": false, "target": "pixels"}, "projection": view(), "points": [[dot[0], dot[1], 1.0], [dot[0] + 0.5, dot[1], 1.0]]}));
+            assert!(r.is_ok() && rgba(&s, 330, 180)[0] > 0.5, "F32 spot {ty}: {r:?} -> {:?}", rgba(&s, 330, 180));
+            assert!(s.active().unwrap().last_damage.is_some_and(|d| d.contains(330, 180)), "the canvas is told what changed");
+        }
+        let mut s = float_doc();
+        let q = rotation_between(vp.view_to_dir(dot[0], dot[1]), vp.view_to_dir(dot[0] + 30.0, dot[1]));
+        let r = s.execute(CMD, json!({"command": "paint.healingBrush", "params": {"aligned": true, "sampleLayer": "current", "target": "pixels"}, "rotation": q.concat(), "projection": view(), "points": [[dot[0], dot[1], 1.0], [dot[0] + 0.5, dot[1], 1.0]]}));
+        assert!(r.is_ok() && rgba(&s, 330, 180)[0] > 0.5, "F32 healing: {r:?} -> {:?}", rgba(&s, 330, 180));
+        let mut s = float_doc();
+        s.execute("select.rect", json!({"x": 322, "y": 172, "width": 16, "height": 16})).unwrap();
+        let r = s.execute(CMD, json!({"command": "paint.patch", "params": {"mode": "source", "target": "pixels"}, "rotation": q.concat(), "projection": view()}));
+        assert!(r.is_ok() && rgba(&s, 330, 180)[0] > 0.5, "F32 patch: {r:?} -> {:?}", rgba(&s, 330, 180));
+        // Remove, Red Eye and Content-Aware Move run too.
+        for (cmd, extra) in [("paint.remove", json!({"points": [[dot[0], dot[1], 1.0]]})), ("paint.redEye", json!({"points": [[dot[0], dot[1], 1.0]]}))] {
+            let mut s = float_doc();
+            let mut p = json!({"command": cmd, "params": {"target": "pixels"}, "projection": view()});
+            p["points"] = extra["points"].clone();
+            let r = s.execute(CMD, p);
+            assert!(r.is_ok(), "F32 {cmd}: {r:?}");
+        }
+        let r = s.execute(CMD, json!({"command": "paint.contentAwareMove", "params": {"offset": [20, 0], "target": "pixels"}, "projection": view()}));
+        assert!(r.is_ok(), "F32 content-aware move: {r:?}");
+    }
+
+
 }
