@@ -255,3 +255,66 @@ fn right_click_menu_is_drawn_and_stays_open_in_projection() {
         assert!(h.query_by_label_contains("Deselect").is_some(), "{tool:?}: the menu is actually drawn");
     }
 }
+
+fn stroke(h: &mut Harness<'_, PhotocraftApp>, from: egui::Pos2, steps: usize) -> bool {
+    h.event(Event::PointerMoved(from));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    let mut previewed = false;
+    for i in 1..=steps {
+        h.event(Event::PointerMoved(from + vec2(i as f32 * 6.0, 0.0)));
+        // Past the 50 ms preview throttle.
+        h.run_steps(4);
+        previewed |= h.state().projection_live.as_ref().is_some_and(|l| l.has_preview());
+    }
+    h.event(Event::PointerButton { pos: from + vec2(steps as f32 * 6.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    previewed
+}
+
+#[test]
+fn retouch_and_paint_tools_stroke_with_a_live_preview_in_projection() {
+    for tool in [Tool::SpotHealing, Tool::Smudge, Tool::Blur, Tool::Sharpen, Tool::Dodge, Tool::Burn, Tool::Sponge, Tool::Pencil, Tool::MixerBrush, Tool::ColorReplacement, Tool::HistoryBrush] {
+        let mut h = harness(tool);
+        assert_eq!(h.state().ui.tool, tool, "{tool:?} works in projection");
+        // Something to retouch: a coloured band across the view.
+        h.state_mut().run("select.rect", json!({"x": 380, "y": 150, "width": 60, "height": 100})).unwrap();
+        h.state_mut().run("edit.fill", json!({"color": "#3070c0"})).unwrap();
+        h.state_mut().run("select.deselect", json!({})).unwrap();
+        if tool == Tool::HistoryBrush {
+            // Paint over it, then brush the earlier state back.
+            h.state_mut().run("edit.fill", json!({"color": "#000000"})).unwrap();
+        }
+        let c = h.state().last_canvas_rect.center();
+        let _previewed = stroke(&mut h, c - vec2(30.0, 0.0), 10);
+        assert!(!h.state().ui.status_error, "{tool:?}: {}", h.state().ui.status);
+        assert_eq!(h.state().session.journal.last().map(|(id, _)| id.as_str()), Some("paint.projectedTool"), "{tool:?} committed");
+    }
+}
+
+#[test]
+fn healing_brush_needs_a_source_then_heals_in_projection() {
+    let mut h = harness(Tool::Healing);
+    h.state_mut().run("select.rect", json!({"x": 380, "y": 150, "width": 60, "height": 100})).unwrap();
+    h.state_mut().run("edit.fill", json!({"color": "#3070c0"})).unwrap();
+    h.state_mut().run("select.deselect", json!({})).unwrap();
+    let c = h.state().last_canvas_rect.center();
+    stroke(&mut h, c, 3);
+    assert!(h.state().ui.status_error, "no source yet: says so");
+    // ⌥-click sets the source.
+    h.event(Event::PointerMoved(c + vec2(80.0, 0.0)));
+    h.run_steps(2);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos: c + vec2(80.0, 0.0), button: PointerButton::Primary, pressed, modifiers: Modifiers::ALT });
+        h.event(Event::ModifiersChanged(Modifiers::ALT));
+        h.run_steps(1);
+    }
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(3);
+    h.state_mut().ui.status_error = false;
+    let previewed = stroke(&mut h, c, 10);
+    assert!(previewed, "a live preview while healing");
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.last().map(|(id, _)| id.as_str()), Some("paint.projectedTool"));
+}

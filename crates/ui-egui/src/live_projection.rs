@@ -97,7 +97,26 @@ pub fn toggle(app: &mut PhotocraftApp, idx: usize, on: Option<bool>) -> Result<b
 
 /// Tools that work in the projection view.
 pub fn supported(t: Tool) -> bool {
-    matches!(t, Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Hand | Tool::Zoom) || crate::live_projection_select::supported(t)
+    matches!(
+        t,
+        Tool::Brush
+            | Tool::Eraser
+            | Tool::CloneStamp
+            | Tool::Healing
+            | Tool::SpotHealing
+            | Tool::Blur
+            | Tool::Sharpen
+            | Tool::Smudge
+            | Tool::Dodge
+            | Tool::Burn
+            | Tool::Sponge
+            | Tool::Pencil
+            | Tool::MixerBrush
+            | Tool::ColorReplacement
+            | Tool::HistoryBrush
+            | Tool::Hand
+            | Tool::Zoom
+    ) || crate::live_projection_select::supported(t)
 }
 
 /// Whether document `idx`'s view shows the projection.
@@ -130,7 +149,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     if !ctx.input(|i| i.pointer.any_down()) && !response.drag_stopped() && app.projection_live.as_ref().is_some_and(|l| l.doc == idx) {
         app.projection_live = None;
     }
-    let paints = matches!(tool, Tool::Brush | Tool::Eraser | Tool::CloneStamp) && !looking;
+    let paints = (matches!(tool, Tool::Brush | Tool::Eraser | Tool::CloneStamp) || retouch_cmd(app, tool, false).is_some()) && !looking;
 
     // Wheel: field of view about the view centre.
     if response.hovered() {
@@ -175,7 +194,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     let size_px = app.session.tools.brush.size;
     let vp = ViewProjection::new(cam.camera(), f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
-    let cloning = tool == Tool::CloneStamp;
+    let cloning = matches!(tool, Tool::CloneStamp | Tool::Healing);
     let alt = ctx.input(|i| i.modifiers.alt);
     if paints && cloning && alt {
         // ⌥/Alt-click (or press) sets the source: a direction, so looking around keeps it.
@@ -201,6 +220,27 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             crate::brush_picker::open(&mut app.ui, &ctx, [p.x, p.y]);
         }
         let start = |app: &mut PhotocraftApp, cam: &ProjectionView, first: [f64; 3]| -> Option<Live> {
+            let alt = ctx.input(|i| i.modifiers.alt);
+            if let Some((flat_cmd, mut fp)) = retouch_cmd(app, tool, alt) {
+                // Retouch and paint tools: the flat tool on the view (`paint.projectedTool`).
+                fp["target"] = crate::canvas::paint_target(app);
+                let mut p = json!({"command": flat_cmd, "params": fp, "projection": view_json(cam, &vp)});
+                let q = if tool == Tool::Healing {
+                    let q = clone_rotation_for(app, cam, &vp, first)?;
+                    p["rotation"] = json!(q.concat());
+                    Some(q)
+                } else {
+                    None
+                };
+                return match photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
+                    Ok(t) => Some(Live { doc: idx, cmd: "paint.projectedTool", params: p, rotation: q, points: vec![first], preview: LivePreview::Tool(Box::new(t)), texture: None, shown: None, rendered: 0, last: 0.0 }),
+                    Err(e) => {
+                        app.ui.status = e.to_string();
+                        app.ui.status_error = true;
+                        None
+                    }
+                };
+            }
             let (cmd, p, q) = if cloning {
                 let q = clone_rotation_for(app, cam, &vp, first)?;
                 ("paint.projectedClone", clone_params(app, cam, &vp, &q), Some(q))
@@ -211,9 +251,10 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
                 photocraft_engine::retouch_cmds::projected_clone_preview(&app.session, &p)
             } else {
                 photocraft_engine::brush_cmds::ProjectedPreview::brush(&app.session, &p)
-            };
+            }
+            .map(LivePreview::Stroke);
             match preview {
-                Ok(preview) => Some(Live { doc: idx, cmd, params: p, rotation: q, points: vec![first], preview, texture: None, shown: None, rendered: 0 }),
+                Ok(preview) => Some(Live { doc: idx, cmd, params: p, rotation: q, points: vec![first], preview, texture: None, shown: None, rendered: 0, last: 0.0 }),
                 Err(e) => {
                     app.ui.status = e.to_string();
                     app.ui.status_error = true;
@@ -346,7 +387,9 @@ pub struct Live {
     params: serde_json::Value,
     rotation: Option<Rot>,
     points: Vec<[f64; 3]>,
-    preview: photocraft_engine::brush_cmds::ProjectedPreview,
+    preview: LivePreview,
+    /// When the preview last rendered (the flat tools re-run at most every 50 ms).
+    last: f64,
     texture: Option<egui::TextureHandle>,
     /// The overlay's view rect (device px) when it was uploaded.
     shown: Option<photocraft_geom::Rect>,
@@ -362,9 +405,16 @@ impl Live {
 
     /// Render new points with the real brush engine and draw the overlay over the view.
     fn draw(&mut self, ctx: &egui::Context, painter: &egui::Painter, rect: Rect, ppp: f32) {
-        if self.rendered != self.points.len() {
+        let now = ctx.input(|i| i.time);
+        let throttled = matches!(self.preview, LivePreview::Tool(_)) && now - self.last < 0.05;
+        if self.rendered != self.points.len() && !throttled {
             self.rendered = self.points.len();
-            if let Some(o) = self.preview.render(&self.points) {
+            self.last = now;
+            let o = match &mut self.preview {
+                LivePreview::Stroke(p) => p.render(&self.points),
+                LivePreview::Tool(t) => t.preview(&self.points),
+            };
+            if let Some(o) = o {
                 let size = [o.rect.width() as usize, o.rect.height() as usize];
                 let img = egui::ColorImage::from_rgba_unmultiplied(size, bytemuck_flat(&o.px));
                 match &mut self.texture {
@@ -380,6 +430,31 @@ impl Live {
             painter.image(t.id(), at, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
         }
     }
+}
+
+/// What draws a live projected stroke.
+enum LivePreview {
+    /// Brush, Eraser, Clone Stamp: the brush engine on the view.
+    Stroke(photocraft_engine::brush_cmds::ProjectedPreview),
+    /// The retouch and paint tools: the flat tool re-run on the resampled view.
+    Tool(Box<photocraft_engine::projected_tool::ProjectedTool>),
+}
+
+/// The flat command and options-bar params (without points and target) of a retouch or paint
+/// tool that runs in projection through `paint.projectedTool`; ⌥ flips Dodge/Burn and
+/// Blur/Sharpen as on the canvas.
+pub(crate) fn retouch_cmd(app: &PhotocraftApp, tool: Tool, alt: bool) -> Option<(&'static str, serde_json::Value)> {
+    let o = &app.ui.tool_options;
+    Some(match tool {
+        Tool::Healing => ("paint.healingBrush", json!({"aligned": o.clone_aligned, "sampleLayer": o.clone_sample})),
+        Tool::SpotHealing => ("paint.spotHealing", json!({"type": o.spot_type, "sampleAllLayers": o.sample_all_layers})),
+        Tool::Blur | Tool::Sharpen | Tool::Smudge | Tool::Dodge | Tool::Burn | Tool::Sponge => crate::retouch_ui::dab_params(app, crate::retouch_ui::alt_flipped(tool, alt))?,
+        Tool::Pencil => ("paint.pencil", json!({})),
+        Tool::MixerBrush => ("paint.mixerBrush", json!({})),
+        Tool::ColorReplacement => ("paint.colorReplacement", crate::retouch_ui::color_replacement_params(app)),
+        Tool::HistoryBrush => ("paint.historyBrush", json!({})),
+        _ => return None,
+    })
 }
 
 fn bytemuck_flat(px: &[[u8; 4]]) -> &[u8] {
