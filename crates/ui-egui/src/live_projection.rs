@@ -309,6 +309,25 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             app.ui.status_error = false;
         }
     }
+    // Right-click: the tool's canvas context menu (selection tools: Deselect, Select Inverse,
+    // Feather, Layer via Copy…; Hand and Zoom: the view menu), as on the flat canvas. The
+    // painting tools open the brush picker above.
+    if response.secondary_clicked()
+        && !paints
+        && let Some(p) = response.interact_pointer_pos()
+    {
+        let [x, y] = to_view(p);
+        let d = vp.view_to_equirect(x, y, f64::from(doc.size.width), f64::from(doc.size.height));
+        app.ui.canvas_tool_menu = None;
+        if crate::paint_mouse::has_brush_picker(tool) {
+            // Quick Selection (and later brush-like tools): the brush picker, as on the canvas.
+            crate::brush_picker::open(&mut app.ui, &ctx, [p.x, p.y]);
+        } else if crate::canvas_tool_menu::is_view_tool(tool) {
+            crate::canvas_tool_menu::open_view(app, &ctx, tool, [p.x, p.y], d);
+        } else {
+            crate::canvas_tool_menu::open_at(app, &ctx, tool, [p.x, p.y], Some(d));
+        }
+    }
     crate::live_projection_select::ants(app, &ctx, &painter, rect, ppp, cam.camera(), idx);
     // Heads-up: camera readout.
     let label = format!("Live Projection   yaw {:.1}°   pitch {:.1}°   FOV {:.1}°", cam.yaw, cam.pitch, cam.fov);

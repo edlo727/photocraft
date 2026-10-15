@@ -164,3 +164,18 @@ fn polygonal_lasso_closes_on_the_first_corner_in_projection() {
     }
     assert!(selected(&h), "{}", h.state().ui.status);
 }
+
+#[test]
+fn right_click_opens_the_tool_menu_for_selection_tools_in_projection() {
+    for tool in [Tool::RectMarquee, Tool::EllipseMarquee, Tool::Lasso, Tool::PolygonLasso, Tool::MagicWand, Tool::ObjectSelection, Tool::Hand, Tool::Zoom] {
+        let mut h = harness(tool);
+        let c = h.state().last_canvas_rect.center();
+        click(&mut h, c, PointerButton::Secondary);
+        assert!(h.state().ui.canvas_tool_menu.is_some(), "{tool:?}: right-click opens the context menu");
+    }
+    // Quick Selection is brush-like: its brush picker, as on the flat canvas.
+    let mut h = harness(Tool::QuickSelection);
+    let c = h.state().last_canvas_rect.center();
+    click(&mut h, c, PointerButton::Secondary);
+    assert!(h.state().ui.brush_picker.is_some());
+}
