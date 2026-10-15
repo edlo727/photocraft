@@ -12,7 +12,19 @@ use photocraft_engine::equirect::Camera;
 
 /// The selection tools that work in the projection view.
 pub fn supported(t: Tool) -> bool {
-    matches!(t, Tool::RectMarquee | Tool::EllipseMarquee | Tool::Lasso | Tool::PolygonLasso | Tool::MagicWand | Tool::QuickSelection | Tool::ObjectSelection)
+    matches!(
+        t,
+        Tool::RectMarquee
+            | Tool::EllipseMarquee
+            | Tool::SingleRowMarquee
+            | Tool::SingleColumnMarquee
+            | Tool::Lasso
+            | Tool::PolygonLasso
+            | Tool::MagneticLasso
+            | Tool::MagicWand
+            | Tool::QuickSelection
+            | Tool::ObjectSelection
+    )
 }
 
 /// A selection being drawn in a projection view (view device pixels).
@@ -21,6 +33,35 @@ pub struct SelDrag {
     tool: Tool,
     mode: &'static str,
     points: Vec<[f64; 2]>,
+    /// Where the press was (marquees: ⌥ draws from it as the centre).
+    anchor: [f64; 2],
+    /// The camera the shape is drawn in: looking around (the wheel) drops it.
+    cam: [u32; 5],
+    /// The image resampled into the view: live Quick Selection and Magnetic Lasso tracing.
+    pixels: Option<photocraft_engine::projected_select::ViewPixels>,
+    /// Magnetic Lasso: the live segment to the pointer, the pointer's trail since the last
+    /// fastening point, and the fastening points (indices into `points`).
+    live: Vec<[f64; 2]>,
+    trail: Vec<[f64; 2]>,
+    anchors: Vec<usize>,
+    /// Live Quick Selection overlay: texture, its view rect (device px), points it shows, when.
+    quick: Option<(egui::TextureHandle, [f32; 4])>,
+    quick_n: usize,
+    quick_t: f64,
+}
+
+impl SelDrag {
+    #[cfg(test)]
+    pub(crate) fn points_for_test(&self) -> Vec<[f64; 2]> {
+        self.points.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn has_quick_preview(&self) -> bool {
+        self.quick.is_some()
+    }
+    fn new(doc: usize, tool: Tool, mode: &'static str, q: [f64; 2], cam: [u32; 5]) -> Self {
+        SelDrag { doc, tool, mode, points: vec![q], anchor: q, cam, pixels: None, live: Vec::new(), trail: vec![q], anchors: vec![0], quick: None, quick_n: 0, quick_t: 0.0 }
+    }
 }
 
 /// Cached marching ants for one view.
@@ -66,7 +107,11 @@ pub(crate) fn params(app: &PhotocraftApp, tool: Tool, mode: &str, points: &[[f64
             p["rect"] = rect;
             p["feather"] = json!(o.feather);
         }
-        Tool::Lasso | Tool::PolygonLasso => {
+        Tool::SingleRowMarquee | Tool::SingleColumnMarquee => {
+            p["kind"] = json!(if tool == Tool::SingleRowMarquee { "row" } else { "column" });
+            p["points"] = json!([a]);
+        }
+        Tool::Lasso | Tool::PolygonLasso | Tool::MagneticLasso => {
             p["kind"] = json!("lasso");
             p["points"] = json!(points);
             p["feather"] = json!(o.feather);
@@ -98,8 +143,9 @@ fn commit(app: &mut PhotocraftApp, d: SelDrag, cam: Camera, w: f64, h: f64) {
     };
     let r = match d.tool {
         // A click with a marquee or the lasso (no shape) deselects, as on the flat canvas.
-        Tool::RectMarquee | Tool::EllipseMarquee | Tool::Lasso | Tool::PolygonLasso
-            if (matches!(d.tool, Tool::RectMarquee | Tool::EllipseMarquee) && small(&d.points)) || (matches!(d.tool, Tool::Lasso | Tool::PolygonLasso) && d.points.len() < 3) =>
+        Tool::RectMarquee | Tool::EllipseMarquee | Tool::Lasso | Tool::PolygonLasso | Tool::MagneticLasso
+            if (matches!(d.tool, Tool::RectMarquee | Tool::EllipseMarquee) && small(&d.points))
+                || (matches!(d.tool, Tool::Lasso | Tool::PolygonLasso | Tool::MagneticLasso) && d.points.len() < 3) =>
         {
             if d.mode == "replace" { app.run("select.deselect", json!({})).map(|_| ()) } else { Ok(()) }
         }
@@ -119,85 +165,176 @@ fn commit(app: &mut PhotocraftApp, d: SelDrag, cam: Camera, w: f64, h: f64) {
     }
 }
 
+fn magnetic_settings(app: &PhotocraftApp) -> photocraft_algo::magnetic::Settings {
+    let o = &app.ui.tool_options;
+    photocraft_algo::magnetic::Settings::new(f64::from(o.magnetic_width), o.magnetic_contrast / 100.0)
+}
+
 /// Handle a selection tool in the projection canvas.
 #[allow(clippy::too_many_arguments)]
 pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: Camera, idx: usize, tool: Tool) {
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     let to_screen = |q: [f64; 2]| -> Pos2 { rect.min + vec2(q[0] as f32, q[1] as f32) / ppp };
     let (w, h) = (f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
+    let ckey = [cam.yaw as f32, cam.pitch as f32, cam.fov as f32, w as f32, h as f32].map(f32::to_bits);
     let mods = ctx.input(|i| i.modifiers);
-    // Another tool or document: drop a half-drawn shape.
-    if app.projection_select.as_ref().is_some_and(|d| d.doc != idx || d.tool != tool) {
+    // Another tool or document, or the view turned: drop a half-drawn shape.
+    if app.projection_select.as_ref().is_some_and(|d| d.doc != idx || d.tool != tool || d.cam != ckey) {
         app.projection_select = None;
     }
     let pointer = response.interact_pointer_pos().or(response.hover_pos());
-    if tool == Tool::PolygonLasso {
-        // Clicks add corners; a click on the first corner, a double-click or ↩ closes; Esc drops.
-        if (response.clicked() || response.drag_started())
-            && let Some(p) = response.interact_pointer_pos()
-        {
-            let q = to_view(p);
-            match app.projection_select.as_mut() {
-                None => app.projection_select = Some(SelDrag { doc: idx, tool, mode: mode_for(app, tool, mods), points: vec![q] }),
-                Some(d) => {
-                    let first = to_screen(d.points[0]);
-                    if d.points.len() >= 3 && first.distance(p) < 6.0 {
-                        let d = app.projection_select.take().unwrap();
-                        commit(app, d, cam, w, h);
-                    } else {
-                        d.points.push(q);
+    let press = (response.clicked() || response.drag_started_by(egui::PointerButton::Primary)).then(|| response.interact_pointer_pos()).flatten();
+    let projection_params = |app: &PhotocraftApp| json!({"projection": proj_json(cam, w, h), "sampleAllLayers": app.ui.tool_options.sample_all_layers});
+    match tool {
+        Tool::SingleRowMarquee | Tool::SingleColumnMarquee => {
+            if let Some(p) = press {
+                let q = to_view(p);
+                let d = SelDrag::new(idx, tool, mode_for(app, tool, mods), q, ckey);
+                commit(app, d, cam, w, h);
+            }
+        }
+        Tool::PolygonLasso => {
+            // Clicks add corners; a click on the first corner, a double-click or ↩ closes; Esc drops.
+            if let Some(p) = press {
+                let q = to_view(p);
+                match app.projection_select.as_mut() {
+                    None => app.projection_select = Some(SelDrag::new(idx, tool, mode_for(app, tool, mods), q, ckey)),
+                    Some(d) => {
+                        let first = to_screen(d.points[0]);
+                        if d.points.len() >= 3 && first.distance(p) < 6.0 {
+                            let d = app.projection_select.take().unwrap();
+                            commit(app, d, cam, w, h);
+                        } else {
+                            d.points.push(q);
+                        }
                     }
                 }
             }
-        }
-        let close = response.double_clicked() || ctx.input(|i| i.key_pressed(Key::Enter));
-        if close && let Some(d) = app.projection_select.take() {
-            commit(app, d, cam, w, h);
-        }
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            app.projection_select = None;
-        }
-    } else if matches!(tool, Tool::MagicWand) {
-        if response.clicked()
-            && let Some(p) = response.interact_pointer_pos()
-        {
-            let d = SelDrag { doc: idx, tool, mode: mode_for(app, tool, mods), points: vec![to_view(p)] };
-            commit(app, d, cam, w, h);
-        }
-    } else {
-        if response.drag_started_by(egui::PointerButton::Primary)
-            && let Some(p) = response.interact_pointer_pos()
-        {
-            app.projection_select = Some(SelDrag { doc: idx, tool, mode: mode_for(app, tool, mods), points: vec![to_view(p)] });
-        }
-        if response.dragged_by(egui::PointerButton::Primary)
-            && let Some(p) = response.interact_pointer_pos()
-            && let Some(d) = app.projection_select.as_mut()
-        {
-            let mut q = to_view(p);
-            if matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee) {
-                // ⇧ after the press makes a square / circle.
-                if mods.shift && d.mode != "add" {
-                    let a = d.points[0];
-                    let s = (q[0] - a[0]).abs().max((q[1] - a[1]).abs());
-                    q = [a[0] + s * (q[0] - a[0]).signum(), a[1] + s * (q[1] - a[1]).signum()];
-                }
-                d.points.truncate(1);
-                d.points.push(q);
-            } else if d.points.last().is_none_or(|l| (l[0] - q[0]).abs() + (l[1] - q[1]).abs() > 1.0) {
-                d.points.push(q);
+            let close = response.double_clicked() || ctx.input(|i| i.key_pressed(Key::Enter));
+            if close && let Some(d) = app.projection_select.take() {
+                commit(app, d, cam, w, h);
+            }
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                app.projection_select = None;
             }
         }
-        if response.drag_stopped_by(egui::PointerButton::Primary)
-            && let Some(d) = app.projection_select.take()
-        {
-            commit(app, d, cam, w, h);
-        } else if response.clicked()
-            && let Some(p) = response.interact_pointer_pos()
-        {
-            let q = to_view(p);
-            let d = SelDrag { doc: idx, tool, mode: mode_for(app, tool, mods), points: vec![q, q] };
-            commit(app, d, cam, w, h);
+        Tool::MagneticLasso => {
+            let st = magnetic_settings(app);
+            if let Some(p) = press {
+                let q = to_view(p);
+                if app.projection_select.is_none() {
+                    let mut d = SelDrag::new(idx, tool, mode_for(app, tool, mods), q, ckey);
+                    match photocraft_engine::projected_select::ViewPixels::new(&app.session, &projection_params(app)) {
+                        Ok(mut px) => {
+                            let s0 = px.snap(q, st).unwrap_or(q);
+                            d.points = vec![s0];
+                            d.pixels = Some(px);
+                            app.projection_select = Some(d);
+                        }
+                        Err(e) => {
+                            app.ui.status = e.to_string();
+                            app.ui.status_error = true;
+                        }
+                    }
+                } else if let Some(d) = app.projection_select.as_mut() {
+                    if d.points.len() >= 3 && to_screen(d.points[0]).distance(p) < 8.0 {
+                        close_magnetic(app, mods.alt, st, cam, w, h);
+                    } else {
+                        // A click fastens a point (⌥-click: a straight segment to it).
+                        let seg = if mods.alt { vec![q] } else { std::mem::take(&mut d.live) };
+                        d.points.extend(seg);
+                        d.anchors.push(d.points.len() - 1);
+                        d.live.clear();
+                        d.trail = vec![q];
+                    }
+                }
+            } else if let (Some(h), Some(d)) = (response.hover_pos().or(response.interact_pointer_pos()), app.projection_select.as_mut()) {
+                let q = to_view(h);
+                if d.trail.last().is_none_or(|l| (l[0] - q[0]).abs() + (l[1] - q[1]).abs() > 1.0)
+                    && let (Some(&from), Some(px)) = (d.points.last(), d.pixels.as_mut())
+                {
+                    d.trail.push(q);
+                    d.live = px.trace(from, q, &d.trail, st);
+                    // Fasten by itself every so often (Frequency).
+                    let f = f64::from(app.ui.tool_options.magnetic_frequency.clamp(0.0, 100.0));
+                    let spacing = (8.0 + (100.0 - f) * 0.9) * f64::from(ppp);
+                    let len: f64 = d.live.windows(2).map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1])).sum();
+                    if len > spacing {
+                        let live = std::mem::take(&mut d.live);
+                        d.points.extend(live);
+                        d.anchors.push(d.points.len() - 1);
+                        d.trail = vec![q];
+                    }
+                }
+            }
+            if response.double_clicked() || ctx.input(|i| i.key_pressed(Key::Enter)) {
+                close_magnetic(app, mods.alt, st, cam, w, h);
+            }
+            if ctx.input(|i| i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete))
+                && let Some(d) = app.projection_select.as_mut()
+                && d.anchors.len() > 1
+            {
+                d.anchors.pop();
+                let keep = d.anchors.last().copied().unwrap_or(0) + 1;
+                d.points.truncate(keep);
+                d.live.clear();
+            }
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                app.projection_select = None;
+            }
+            ctx.request_repaint();
+        }
+        Tool::MagicWand => {
+            if response.clicked()
+                && let Some(p) = response.interact_pointer_pos()
+            {
+                let d = SelDrag::new(idx, tool, mode_for(app, tool, mods), to_view(p), ckey);
+                commit(app, d, cam, w, h);
+            }
+        }
+        _ => {
+            if response.drag_started_by(egui::PointerButton::Primary)
+                && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos())
+            {
+                let mut d = SelDrag::new(idx, tool, mode_for(app, tool, mods), to_view(p), ckey);
+                if tool == Tool::QuickSelection {
+                    d.pixels = photocraft_engine::projected_select::ViewPixels::new(&app.session, &projection_params(app)).ok();
+                }
+                app.projection_select = Some(d);
+            }
+            if response.dragged_by(egui::PointerButton::Primary)
+                && let Some(p) = response.interact_pointer_pos()
+                && let Some(d) = app.projection_select.as_mut()
+            {
+                let mut q = to_view(p);
+                if matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee) {
+                    let a = d.anchor;
+                    // ⇧ after the press makes a square / circle; ⌥ draws from the centre.
+                    if mods.shift && d.mode != "add" {
+                        let s = (q[0] - a[0]).abs().max((q[1] - a[1]).abs());
+                        q = [a[0] + s * (q[0] - a[0]).signum(), a[1] + s * (q[1] - a[1]).signum()];
+                    }
+                    let from = if mods.alt && d.mode != "subtract" { [2.0 * a[0] - q[0], 2.0 * a[1] - q[1]] } else { a };
+                    d.points = vec![from, q];
+                } else if d.points.last().is_none_or(|l| (l[0] - q[0]).abs() + (l[1] - q[1]).abs() > 1.0) {
+                    d.points.push(q);
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary)
+                && let Some(d) = app.projection_select.take()
+            {
+                commit(app, d, cam, w, h);
+            } else if response.clicked()
+                && let Some(p) = response.interact_pointer_pos()
+            {
+                let q = to_view(p);
+                let mut d = SelDrag::new(idx, tool, mode_for(app, tool, mods), q, ckey);
+                d.points = vec![q, q];
+                commit(app, d, cam, w, h);
+            }
+            if tool == Tool::QuickSelection {
+                live_quick(app, ctx);
+            }
         }
     }
     // Feedback: the shape so far.
@@ -228,7 +365,21 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
                 }
                 dash(pts, false);
             }
-            Tool::QuickSelection => dash(d.points.iter().map(|q| to_screen(*q)).collect(), false),
+            Tool::MagneticLasso => {
+                let pts: Vec<Pos2> = d.points.iter().chain(&d.live).map(|q| to_screen(*q)).collect();
+                dash(pts, false);
+                for &i in &d.anchors {
+                    if let Some(q) = d.points.get(i) {
+                        painter.rect_stroke(Rect::from_center_size(to_screen(*q), vec2(5.0, 5.0)), 0.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Middle);
+                    }
+                }
+            }
+            Tool::QuickSelection => {
+                if let Some((t, r)) = &d.quick {
+                    let at = Rect::from_min_max(to_screen([f64::from(r[0]), f64::from(r[1])]), to_screen([f64::from(r[2]), f64::from(r[3])]));
+                    painter.image(t.id(), at, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+                }
+            }
             _ => {}
         }
         ctx.request_repaint();
@@ -243,6 +394,51 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
         } else {
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
         }
+    }
+}
+
+/// Close the Magnetic Lasso border along the edges (⌥: straight) and commit it.
+fn close_magnetic(app: &mut PhotocraftApp, straight: bool, st: photocraft_algo::magnetic::Settings, cam: Camera, w: f64, h: f64) {
+    let Some(mut d) = app.projection_select.take() else { return };
+    let live = std::mem::take(&mut d.live);
+    d.points.extend(live);
+    if let (false, Some(&first), Some(&last), Some(px)) = (straight, d.points.first(), d.points.last(), d.pixels.as_mut()) {
+        let back = px.trace(last, first, &[], st);
+        d.points.extend(back);
+    }
+    commit(app, d, cam, w, h);
+}
+
+/// Live Quick Selection: the region the stroke so far selects, tinted over the view (at most
+/// every 80 ms, on the view-sized pixels only). The commit on release reprojects it.
+fn live_quick(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let size = app.session.tools.brush.size;
+    let now = ctx.input(|i| i.time);
+    let Some(d) = app.projection_select.as_mut() else { return };
+    if d.points.len() == d.quick_n || now - d.quick_t < 0.08 {
+        return;
+    }
+    let Some(px) = d.pixels.as_ref() else { return };
+    let pts: Vec<(f32, f32)> = d.points.iter().map(|q| (q[0] as f32, q[1] as f32)).collect();
+    d.quick_n = d.points.len();
+    d.quick_t = now;
+    let Some(r) = px.quick(&pts, size) else { return };
+    let (bw, bh) = (r.bbox.width() as usize, r.bbox.height() as usize);
+    if bw == 0 || bh == 0 {
+        return;
+    }
+    let tint = |c: u8| -> Color32 {
+        let a = (u16::from(c) * 110 / 255) as u8;
+        Color32::from_rgba_unmultiplied(70, 140, 255, a)
+    };
+    let img = egui::ColorImage { size: [bw, bh], pixels: r.mask.iter().map(|c| tint(*c)).collect(), source_size: vec2(bw as f32, bh as f32) };
+    let rr = [r.bbox.x0 as f32, r.bbox.y0 as f32, r.bbox.x1 as f32, r.bbox.y1 as f32];
+    match &mut d.quick {
+        Some((t, at)) => {
+            t.set(img, egui::TextureOptions::LINEAR);
+            *at = rr;
+        }
+        None => d.quick = Some((ctx.load_texture("pc-live-projection-quick", img, egui::TextureOptions::LINEAR), rr)),
     }
 }
 

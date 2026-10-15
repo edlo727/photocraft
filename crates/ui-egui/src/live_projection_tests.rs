@@ -179,3 +179,56 @@ fn right_click_opens_the_tool_menu_for_selection_tools_in_projection() {
     click(&mut h, c, PointerButton::Secondary);
     assert!(h.state().ui.brush_picker.is_some());
 }
+
+#[test]
+fn single_row_and_alt_centre_marquee_in_projection() {
+    let mut h = harness(Tool::SingleRowMarquee);
+    let c = h.state().last_canvas_rect.center();
+    click(&mut h, c, PointerButton::Primary);
+    assert!(selected(&h), "a click selects the row: {}", h.state().ui.status);
+    // ⌥ after the press: the marquee grows from its centre, so the press point is inside.
+    let mut h = harness(Tool::RectMarquee);
+    let c = h.state().last_canvas_rect.center();
+    h.event(Event::PointerMoved(c));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    for i in 1..=6 {
+        h.event(Event::PointerMoved(c + vec2(i as f32 * 10.0, i as f32 * 6.0)));
+        h.event(Event::ModifiersChanged(Modifiers::ALT));
+        h.run_steps(1);
+    }
+    let pts = h.state().projection_select.as_ref().map(|d| d.points_for_test()).unwrap();
+    assert!(pts[0][0] < pts[1][0] && pts[0][1] < pts[1][1]);
+    let ppp = h.ctx.pixels_per_point() as f64;
+    let mid = [(pts[0][0] + pts[1][0]) / 2.0 / ppp, (pts[0][1] + pts[1][1]) / 2.0 / ppp];
+    let r = h.state().last_canvas_rect;
+    assert!((mid[0] + r.min.x as f64 - c.x as f64).abs() < 2.0 && (mid[1] + r.min.y as f64 - c.y as f64).abs() < 2.0, "centred on the press");
+}
+
+#[test]
+fn quick_selection_previews_while_dragging_and_magnetic_lasso_closes() {
+    let mut h = harness(Tool::QuickSelection);
+    let c = h.state().last_canvas_rect.center();
+    h.event(Event::PointerMoved(c));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    for i in 1..=6 {
+        h.event(Event::PointerMoved(c + vec2(i as f32 * 6.0, 0.0)));
+        h.run_steps(6);
+    }
+    assert!(h.state().projection_select.as_ref().is_some_and(|d| d.has_quick_preview()), "a live preview while dragging");
+    h.event(Event::PointerButton { pos: c + vec2(36.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(selected(&h), "{}", h.state().ui.status);
+
+    let mut h = harness(Tool::MagneticLasso);
+    let c = h.state().last_canvas_rect.center();
+    for q in [vec2(-40.0, -30.0), vec2(40.0, -30.0), vec2(40.0, 30.0)] {
+        click(&mut h, c + q, PointerButton::Primary);
+        h.run_steps(20);
+    }
+    key(&mut h, Key::Enter);
+    assert!(selected(&h), "{}", h.state().ui.status);
+}

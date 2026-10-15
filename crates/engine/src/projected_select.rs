@@ -147,7 +147,7 @@ fn view_mask(s: &Session, p: &Value, proj: &ViewProjection, view: Rect) -> Resul
             let r = grabcut::object_select(&SurfaceSampler(&px), view, rect, 160_000);
             ("Object Selection", r.map(|r| region_to_mask(&r, view)).unwrap_or_else(|| vec![0.0; view.size().area() as usize]))
         }
-        _ => return Err(bad("`kind` must be rect, ellipse, lasso, wand, quick or object")),
+        _ => return Err(bad("`kind` must be rect, ellipse, lasso, wand, quick, object, row or column")),
     })
 }
 
@@ -245,6 +245,9 @@ fn combine(old: Option<&Surface>, regions: &[Region], mode: SelectionMode) -> Op
 /// and the view's `projection`.
 pub fn select_projected(s: &mut Session, p: &Value) -> Result<Value> {
     let proj = projection(p)?;
+    if let Some(kind @ ("row" | "column")) = p.get("kind").and_then(Value::as_str) {
+        return single_line(s, p, &proj, kind == "row");
+    }
     let view = Rect::new(0, 0, proj.w as i32, proj.h as i32);
     let (label, mut mask) = view_mask(s, p, &proj, view)?;
     let feather = f(p, "feather", 0.0) as f32;
@@ -264,6 +267,60 @@ pub fn select_projected(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(doc.selection.is_some())
     })?;
     Ok(json!({ "selected": selected }))
+}
+
+/// Single Row / Single Column Marquee: the equirect pixel row (a line of latitude) or column (a
+/// meridian) through the clicked direction.
+fn single_line(s: &mut Session, p: &Value, proj: &ViewProjection, row: bool) -> Result<Value> {
+    let &(x, y) = points(p).first().ok_or_else(|| bad("Single Row/Column needs `points`: [[x, y]]"))?;
+    let st = s.active().ok_or(EngineError::NoDocument)?;
+    let (iw, ih) = (st.doc.size.width as i32, st.doc.size.height as i32);
+    let [u, v] = proj.view_to_equirect(f64::from(x), f64::from(y), f64::from(iw), f64::from(ih));
+    let (u, v) = ((u.floor() as i32).rem_euclid(iw.max(1)), (v.floor() as i32).clamp(0, ih - 1));
+    let bbox = if row { Rect::new(0, v, iw, v + 1) } else { Rect::new(u, 0, u + 1, ih) };
+    let region = Region { bbox, mask: vec![255; bbox.size().area() as usize] };
+    let mode = SelectionMode::parse(p.get("mode").and_then(Value::as_str).unwrap_or("replace"));
+    let label = if row { "Single Row Marquee" } else { "Single Column Marquee" };
+    let selected = s.edit(label, |doc, _| {
+        doc.selection = combine(doc.selection.as_ref(), std::slice::from_ref(&region), mode);
+        Ok(doc.selection.is_some())
+    })?;
+    Ok(json!({ "selected": selected }))
+}
+
+/// The pixels the selection tools see, resampled into one view once: the live Quick Selection
+/// preview and the Magnetic Lasso's edge tracing work on this, never on the full equirect.
+pub struct ViewPixels {
+    px: Surface,
+    view: Rect,
+    tracer: photocraft_algo::magnetic::Tracer,
+}
+
+impl ViewPixels {
+    /// From `select.projected`-style params (`projection`, `sampleAllLayers`).
+    pub fn new(s: &Session, p: &Value) -> Result<Self> {
+        let proj = projection(p)?;
+        let view = Rect::new(0, 0, proj.w as i32, proj.h as i32);
+        let px = view_pixels(s, &proj, view, b(p, "sampleAllLayers", false))?;
+        Ok(Self { px, view, tracer: photocraft_algo::magnetic::Tracer::new(view) })
+    }
+
+    /// Quick Selection over `points` (view px) at brush `size`: coverage bytes over the view.
+    pub fn quick(&self, points: &[(f32, f32)], size: f32) -> Option<Region> {
+        quick::quick_select(&SurfaceSampler(&self.px), self.view, points, size.clamp(1.0, 5000.0))
+    }
+
+    /// Magnetic Lasso: snap a fastening point to the nearest edge.
+    pub fn snap(&mut self, p: [f64; 2], st: photocraft_algo::magnetic::Settings) -> Option<[f64; 2]> {
+        let px = &self.px;
+        self.tracer.snap(&mut |r| sel::rgba8_image(px, r), p, st)
+    }
+
+    /// Magnetic Lasso: the border from `from` to `to` along the edges near `guide`.
+    pub fn trace(&mut self, from: [f64; 2], to: [f64; 2], guide: &[[f64; 2]], st: photocraft_algo::magnetic::Settings) -> Vec<[f64; 2]> {
+        let px = &self.px;
+        self.tracer.trace(&mut |r| sel::rgba8_image(px, r), from, to, guide, st)
+    }
 }
 
 /// The active selection resampled into a view (`None` without one): one coverage byte per view
@@ -338,6 +395,28 @@ mod tests {
         // A white canvas: the wand takes the whole view's worth.
         s.execute(CMD, json!({"kind": "wand", "points": [[100, 100]], "projection": view(90.0)})).unwrap();
         assert!(cov(&s, 270, 90) > 0.99 && cov(&s, 180, 90) < 0.01, "replaced by the wand");
+    }
+
+    #[test]
+    fn single_row_is_a_line_of_latitude() {
+        let mut s = doc();
+        s.execute(CMD, json!({"kind": "row", "points": [[100, 100]], "projection": view(0.0)})).unwrap();
+        assert!(cov(&s, 0, 90) > 0.99 && cov(&s, 359, 90) > 0.99, "the whole row, all the way round");
+        assert!(cov(&s, 180, 88) == 0.0);
+        s.execute(CMD, json!({"kind": "column", "points": [[100, 100]], "mode": "add", "projection": view(0.0)})).unwrap();
+        assert!(cov(&s, 180, 0) > 0.99 && cov(&s, 180, 179) > 0.99, "pole to pole");
+    }
+
+    #[test]
+    fn view_pixels_quick_selection_and_trace() {
+        let mut s = doc();
+        let v = ViewPixels::new(&s, &json!({"projection": view(0.0)})).unwrap();
+        let r = v.quick(&[(100.0, 100.0)], 10.0).expect("white canvas: a region");
+        assert!(r.at(100, 100) > 0.5);
+        let mut v = v;
+        let t = v.trace([20.0, 20.0], [80.0, 20.0], &[], photocraft_algo::magnetic::Settings::new(10.0, 0.1));
+        assert!(t.len() >= 2);
+        let _ = &mut s;
     }
 
     #[test]
