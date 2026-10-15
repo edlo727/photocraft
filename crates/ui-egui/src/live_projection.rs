@@ -69,6 +69,11 @@ pub fn toggle(app: &mut PhotocraftApp, idx: usize, on: Option<bool>) -> Result<b
     let v = app.ui.views.get_mut(idx).ok_or("no document")?;
     let on = on.unwrap_or(v.projection.is_none());
     v.projection = if on { Some(ProjectionView { zoom: v.zoom, ..v.projection.unwrap_or_default() }) } else { None };
+    if on && !supported(app.ui.tool) {
+        // Move, marquees, type…: start in the Hand tool so the view responds at once. The
+        // toolbox and tool keys switch tools as usual.
+        crate::tool_memory::select(app, Tool::Hand);
+    }
     if on {
         let size = app.session.documents().get(idx).map(|st| (st.doc.size.width, st.doc.size.height));
         if let Some((w, h)) = size
@@ -78,6 +83,11 @@ pub fn toggle(app: &mut PhotocraftApp, idx: usize, on: Option<bool>) -> Result<b
         }
     }
     Ok(on)
+}
+
+/// Tools that work in the projection view.
+pub fn supported(t: Tool) -> bool {
+    matches!(t, Tool::Brush | Tool::Eraser | Tool::Hand | Tool::Zoom)
 }
 
 /// Whether document `idx`'s view shows the projection.
@@ -108,9 +118,15 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     view.fill_pending = false;
 
     let tool = app.ui.tool;
-    let space = ctx.input(|i| i.key_down(egui::Key::Space));
+    // The app's own temporary-Hand key (Space unless rebound), not a raw key read that can stick
+    // when the window loses focus mid-press.
+    let space = matches!(crate::hold_keys::held_tool(app, &ctx), Some(crate::hold_keys::Temporary::Hand));
     let middle = ctx.input(|i| i.pointer.button_down(PointerButton::Middle));
     let looking = tool == Tool::Hand || space || middle;
+    // A stroke whose release this canvas never saw (released over a panel, focus lost) ends.
+    if !ctx.input(|i| i.pointer.any_down()) && !response.drag_stopped() {
+        ctx.data_mut(|d| d.remove_temp::<Stroke2>(egui::Id::new(("pc-live-projection-stroke", idx))));
+    }
     let paints = matches!(tool, Tool::Brush | Tool::Eraser) && !looking;
 
     // Wheel: field of view about the view centre.
@@ -202,13 +218,18 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             }
         }
         // Brush outline at the pointer.
-        if let Some(h) = response.hover_pos() {
+        if let Some(h) = response.hover_pos().filter(|_| response.hovered()) {
             painter.circle_stroke(h, (size_px / ppp / 2.0).max(1.0), Stroke::new(1.0, Color32::from_white_alpha(200)));
             painter.circle_stroke(h, (size_px / ppp / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
     } else if looking {
-        ctx.set_cursor_icon(if response.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+        // Only over the canvas (or while dragging from it): the cursor is per frame and global.
+        if response.dragged() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if response.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grab);
+        }
     } else if !matches!(tool, Tool::Zoom) && response.hovered() {
         ctx.set_cursor_icon(egui::CursorIcon::NotAllowed);
         if response.clicked() || response.drag_started() {

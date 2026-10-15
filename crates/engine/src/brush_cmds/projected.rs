@@ -98,37 +98,41 @@ fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surface, post: 
     let alpha = target.format().alpha.then(|| n - 1);
     let r = [f64::from(damage.x0), f64::from(damage.y0), f64::from(damage.x1), f64::from(damage.y1)];
     let mut total = Rect::EMPTY;
-    let (mut a, mut b) = (vec![0f32; n], vec![0f32; n]);
     for q in view_rect_to_equirect(proj, r, iw as u32, ih as u32, 1.0) {
         let rect = Rect::new(q[0] as i32, q[1] as i32, q[2] as i32, q[3] as i32);
         if rect.is_empty() {
             continue;
         }
         let mut buf = target.read_region(rect);
-        let mut touched = false;
-        let mut i = 0;
-        for y in rect.y0..rect.y1 {
-            for x in rect.x0..rect.x1 {
-                if let Some([vx, vy]) = proj.equirect_to_view(f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(iw), f64::from(ih))
-                    && vx >= r[0]
-                    && vx < r[2]
-                    && vy >= r[1]
-                    && vy < r[3]
-                {
+        // Rows in parallel: a stroke near a pole touches the full image width.
+        use rayon::prelude::*;
+        let row = rect.width() as usize * n;
+        let touched = buf
+            .par_chunks_mut(row)
+            .enumerate()
+            .map(|(j, line)| {
+                let y = rect.y0 + j as i32;
+                let (mut a, mut b) = (vec![0f32; n], vec![0f32; n]);
+                let mut touched = false;
+                for (i, x) in (rect.x0..rect.x1).enumerate() {
+                    let Some([vx, vy]) = proj.equirect_to_view(f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(iw), f64::from(ih)) else { continue };
+                    if !(vx >= r[0] && vx < r[2] && vy >= r[1] && vy < r[3]) {
+                        continue;
+                    }
                     sample_buf(&pre_b, damage, n, vx, vy, &mut a);
                     sample_buf(&post_b, damage, n, vx, vy, &mut b);
                     for c in 0..n {
                         let d = b[c] - a[c];
                         if d != 0.0 {
                             touched = true;
-                            let v = buf[i + c] + d;
-                            buf[i + c] = if Some(c) == alpha { v.clamp(0.0, 1.0) } else { v.max(0.0) };
+                            let v = line[i * n + c] + d;
+                            line[i * n + c] = if Some(c) == alpha { v.clamp(0.0, 1.0) } else { v.max(0.0) };
                         }
                     }
                 }
-                i += n;
-            }
-        }
+                touched
+            })
+            .reduce(|| false, |x, y| x || y);
         if touched {
             target.write_region(rect, &buf);
             total = if total.is_empty() { rect } else { total.union(&rect) };
