@@ -21,13 +21,19 @@ fn norm(a: [f64; 3]) -> Option<[f64; 3]> {
     (l > 1e-12).then(|| [a[0] / l, a[1] / l, a[2] / l])
 }
 
-/// The sphere gradient frame: start direction `a`, the tangent towards the end `ta`, the
-/// across tangent `tc` (the view's right-hand perpendicular) and the a→b angle.
+/// The live projection's Gradient over the whole sphere, measured by angle so it wraps around
+/// consistently. The axis is the great circle through the start and end directions; `c` is the
+/// unit tangent of that circle at their midpoint, so bands of equal `t` are the small circles
+/// `asin(d·c) = const` crossing the axis at right angles (a vertical drag at the horizon gives
+/// horizontal bands all the way round). `e` is the across direction (the view's right-hand
+/// perpendicular of the drag, for Diamond and Angle).
 pub(crate) struct SphereGradient {
     a: [f64; 3],
-    ta: [f64; 3],
-    tc: [f64; 3],
+    c: [f64; 3],
+    e: [f64; 3],
+    th_a: f64,
     len: f64,
+    radial_len: f64,
     shape: GradientShape,
 }
 
@@ -35,23 +41,27 @@ impl SphereGradient {
     pub(crate) fn new(vp: &ViewProjection, from: [f64; 2], to: [f64; 2], shape: GradientShape) -> Option<Self> {
         let a = vp.view_to_dir(from[0], from[1]);
         let b = vp.view_to_dir(to[0], to[1]);
-        let ta = norm(sub(b, a, dot(a, b)))?;
-        let len = dot(a, b).clamp(-1.0, 1.0).acos().max(1e-9);
-        // Screen perpendicular (−uy, ux) of the drag, as the flat tool measures `across`.
+        let c = norm(sub(b, a, 1.0))?;
+        let (th_a, th_b) = (dot(a, c).clamp(-1.0, 1.0).asin(), dot(b, c).clamp(-1.0, 1.0).asin());
+        let len = (th_b - th_a).max(1e-9);
+        let radial_len = dot(a, b).clamp(-1.0, 1.0).acos().max(1e-9);
+        // Across: the normal of the axis circle, signed like the flat tool's (−uy, ux).
+        let mut e = norm([a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]])?;
         let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
         let l = (dx * dx + dy * dy).sqrt().max(1e-9);
         let p = vp.view_to_dir(from[0] - dy / l, from[1] + dx / l);
-        let tc0 = sub(sub(p, a, dot(p, a)), ta, dot(p, ta));
-        let tc = norm(tc0)?;
-        Some(Self { a, ta, tc, len, shape })
+        if dot(sub(p, a, 1.0), e) < 0.0 {
+            e = [-e[0], -e[1], -e[2]];
+        }
+        Some(Self { a, c, e, th_a, len, radial_len, shape })
     }
 
     pub(crate) fn t(&self, d: [f64; 3]) -> f32 {
-        let along = dot(d, self.ta).atan2(dot(d, self.a));
-        let across = dot(d, self.tc).clamp(-1.0, 1.0).asin();
+        let along = dot(d, self.c).clamp(-1.0, 1.0).asin() - self.th_a;
+        let across = dot(d, self.e).clamp(-1.0, 1.0).asin();
         let t = match self.shape {
             GradientShape::Linear => along / self.len,
-            GradientShape::Radial => dot(d, self.a).clamp(-1.0, 1.0).acos() / self.len,
+            GradientShape::Radial => dot(d, self.a).clamp(-1.0, 1.0).acos() / self.radial_len,
             GradientShape::Reflected => along.abs() / self.len,
             GradientShape::Diamond => (along.abs() + across.abs()) / self.len,
             GradientShape::Angle => (across.atan2(along) / std::f64::consts::TAU).rem_euclid(1.0),
@@ -209,17 +219,64 @@ mod tests {
         d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().pixel(x, y)
     }
 
+    const SHAPES: [GradientShape; 5] = [GradientShape::Linear, GradientShape::Radial, GradientShape::Reflected, GradientShape::Diamond, GradientShape::Angle];
+
     #[test]
-    fn sphere_gradient_matches_the_flat_one_near_the_start() {
+    fn sphere_gradient_is_close_to_the_flat_preview_near_the_drag() {
+        let vp = ViewProjection::new(Camera { yaw: 30.0, pitch: 20.0, fov: 60.0 }, 800.0, 600.0);
+        let g = SphereGradient::new(&vp, [400.0, 400.0], [400.0, 200.0], GradientShape::Linear).unwrap();
+        for (x, y) in [(400.5, 300.5), (400.5, 380.5), (400.5, 220.5)] {
+            let flat = photocraft_algo::paint::tool_gradient_t(GradientShape::Linear, (400.0, 400.0), (400.0, 200.0), x as f32, y as f32);
+            let t = g.t(vp.view_to_dir(x, y));
+            assert!((t - flat).abs() < 0.03, "({x},{y}): {t} vs flat {flat}");
+        }
+    }
+
+    /// Ed's case: a vertical drag across the horizon gives the same band at every longitude.
+    #[test]
+    fn a_vertical_drag_at_the_horizon_wraps_as_horizontal_bands() {
         let vp = ViewProjection::new(Camera { yaw: 0.0, pitch: 0.0, fov: 90.0 }, 800.0, 600.0);
-        let g = SphereGradient::new(&vp, [300.0, 300.0], [500.0, 300.0], GradientShape::Linear).unwrap();
-        assert!(g.t(vp.view_to_dir(300.0, 300.0)) < 0.01);
-        assert!(g.t(vp.view_to_dir(500.0, 300.0)) > 0.99);
-        let mid = g.t(vp.view_to_dir(400.0, 300.0));
-        assert!((mid - 0.5).abs() < 0.05, "{mid}");
-        // Perpendicular to the drag: the same t.
-        let (a, b) = (g.t(vp.view_to_dir(400.0, 250.0)), g.t(vp.view_to_dir(400.0, 350.0)));
-        assert!((a - b).abs() < 0.02, "{a} {b}");
+        let g = SphereGradient::new(&vp, [400.0, 330.0], [400.0, 270.0], GradientShape::Linear).unwrap();
+        for v in [240.0, 250.0, 256.0, 262.0, 270.0] {
+            let t0 = g.t(crate::equirect::equirect_to_dir(256.0, v, 1024.0, 512.0));
+            for u in [0.5, 300.0, 512.0, 700.0, 1023.5] {
+                let t = g.t(crate::equirect::equirect_to_dir(u, v, 1024.0, 512.0));
+                assert!((t - t0).abs() < 1e-3, "row {v}: {t} at u={u} vs {t0}");
+            }
+        }
+    }
+
+    /// The whole latlong has no cliffs: neighbouring pixels differ by little, except at the
+    /// Angle gradient's own wrap and the two horizon points where the flat gradient converges.
+    #[test]
+    fn sphere_gradient_is_continuous_over_the_whole_latlong() {
+        let vp = ViewProjection::new(Camera { yaw: 0.0, pitch: 0.0, fov: 90.0 }, 800.0, 600.0);
+        let (w, h) = (1024usize, 512usize);
+        for shape in SHAPES {
+            let g = SphereGradient::new(&vp, [400.0, 550.0], [400.0, 100.0], shape).unwrap();
+            let img: Vec<f32> = (0..w * h).map(|i| g.t(crate::equirect::equirect_to_dir((i % w) as f64 + 0.5, (i / w) as f64 + 0.5, w as f64, h as f64))).collect();
+            if let Ok(out) = std::env::var("GRADIENT_PGM") {
+                let mut bytes = format!("P5 {w} {h} 255\n").into_bytes();
+                bytes.extend(img.iter().map(|t| (t * 255.0).round() as u8));
+                std::fs::write(format!("{out}-{shape:?}.pgm"), bytes).unwrap();
+            }
+            let mut big = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let a = img[y * w + x];
+                    for b in [img[y * w + (x + 1) % w], img[(y + 1).min(h - 1) * w + x]] {
+                        let mut j = (a - b).abs();
+                        if shape == GradientShape::Angle {
+                            j = j.min(1.0 - j);
+                        }
+                        if j > 0.25 {
+                            big += 1;
+                        }
+                    }
+                }
+            }
+            assert!(big < 40, "{shape:?}: {big} jumps over 0.25");
+        }
     }
 
     #[test]
