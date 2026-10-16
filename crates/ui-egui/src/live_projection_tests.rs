@@ -820,7 +820,7 @@ fn ed_flow_pen_draws_a_path_in_view_that_selects_strokes_and_edits_in_projection
 
 #[test]
 fn ed_flow_rectangle_and_type_render_upright_in_projection_on_f32() {
-    let mut h = ed_harness(Tool::RectangleShape);
+    let mut h = ed_harness(Tool::Rectangle);
     h.state_mut().session.tools.foreground = [1.0, 0.0, 0.0, 1.0];
     let c = h.state().last_canvas_rect.center();
     let layers0 = h.state().session.active().unwrap().doc.layers.len();
