@@ -53,7 +53,7 @@ impl ProjectionView {
         Camera { yaw: f64::from(self.yaw), pitch: f64::from(self.pitch), fov: f64::from(self.fov) }.normalized()
     }
 
-    fn clamp(&mut self) {
+    pub(crate) fn clamp(&mut self) {
         let c = self.camera();
         (self.yaw, self.pitch, self.fov) = (c.yaw as f32, c.pitch as f32, c.fov as f32);
     }
