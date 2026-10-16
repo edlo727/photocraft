@@ -158,6 +158,7 @@ pub mod live_projection_select;
 pub mod live_projection_xform;
 pub mod live_projection_path;
 pub mod live_projection_text;
+pub mod live_projection_misc;
 #[cfg(test)]
 mod live_projection_tests;
 pub mod pattern_preview;

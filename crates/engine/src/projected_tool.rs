@@ -148,6 +148,7 @@ impl ProjectedTool {
         temp.tools = s.tools.clone();
         // The current gradient, patterns and other presets the tools read.
         temp.presets = s.presets.clone();
+        temp.patterns = s.patterns.clone();
         let i = temp.add_document(doc, None);
         temp.set_active(i);
         if let Some(d) = temp.active_mut() {

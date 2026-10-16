@@ -123,7 +123,10 @@ pub fn supported(t: Tool) -> bool {
             | Tool::Move
             | Tool::Gradient
             | Tool::PaintBucket
+            | Tool::BackgroundEraser
+            | Tool::PatternStamp
     ) || crate::live_projection_select::supported(t)
+        || crate::live_projection_misc::supported(t)
         || crate::live_projection_path::supported(t)
         || crate::live_projection_text::supported(t)
 }
@@ -361,6 +364,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             painter.circle_stroke(h, (size_px / ppp / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
+    } else if crate::live_projection_misc::supported(tool) && !looking {
+        crate::live_projection_misc::tool(app, &ctx, &response, &painter, rect, ppp, &mut cam, &vp, idx, tool);
     } else if crate::live_projection_text::supported(tool) && !looking {
         crate::live_projection_text::tool(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx, tool);
     } else if crate::live_projection_path::supported(tool) && !looking {
@@ -396,10 +401,10 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         } else if response.hovered() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
         }
-    } else if !matches!(tool, Tool::Zoom) && response.hovered() {
+    } else if response.hovered() {
         ctx.set_cursor_icon(egui::CursorIcon::NotAllowed);
         if response.clicked() || response.drag_started() {
-            app.ui.status = format!("{} is not available in Equirectangular Live Projection: use the Brush, Eraser, Clone Stamp, a selection tool or the Hand, or turn it off in the View menu.", tool_name(tool));
+            app.ui.status = crate::live_projection_misc::unavailable_message(tool);
             app.ui.status_error = false;
         }
     }
@@ -739,6 +744,15 @@ pub(crate) fn retouch_cmd(app: &PhotocraftApp, tool: Tool, alt: bool) -> Option<
         // Each stroke is one removal here (the pending-strokes mode and New Layer stay on the
         // flat canvas: the projection writes back into the target layer).
         Tool::Remove => ("paint.remove", json!({"sampleAllLayers": o.sample_all_layers, "newLayer": false})),
+        Tool::BackgroundEraser => ("paint.backgroundEraser", json!({"sampling": o.bg_sampling, "limits": o.bg_limits, "tolerance": o.bg_tolerance, "protectForegroundColor": o.bg_protect_fg})),
+        Tool::PatternStamp => {
+            // Aligned phase is per view here: the pattern is laid out in the view.
+            let mut p = json!({"aligned": o.pattern_stamp_aligned, "impressionist": o.pattern_stamp_impressionist, "scale": o.pattern_stamp_scale, "angle": o.pattern_stamp_angle});
+            if let Some(id) = photocraft_engine::presets::patterns::current(&app.session).or(app.session.patterns.items.first()).map(|x| x.id.clone()) {
+                p["pattern"] = json!(id);
+            }
+            ("paint.patternStamp", p)
+        }
         _ => return None,
     })
 }
@@ -799,7 +813,7 @@ fn crosshair(painter: &egui::Painter, p: Pos2, c: Color32) {
     }
 }
 
-fn tool_name(t: Tool) -> String {
+pub(crate) fn tool_name(t: Tool) -> String {
     format!("{t:?}")
 }
 

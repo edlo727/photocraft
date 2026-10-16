@@ -846,3 +846,50 @@ fn ed_flow_rectangle_and_type_render_upright_in_projection_on_f32() {
     assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("layer.projectedRender"));
     assert_eq!(h.state().session.active().unwrap().doc.layers.len(), layers0 + 2, "a text layer");
 }
+
+#[test]
+fn ed_flow_eyedropper_zoom_ruler_and_crop_message_in_projection_on_f32() {
+    let mut h = ed_harness(Tool::Eyedropper);
+    let c = h.state().last_canvas_rect.center();
+    let want = active_px(&h, doc_of_screen(&h, c + vec2(30.0, 10.0)));
+    click(&mut h, c + vec2(30.0, 10.0), PointerButton::Primary);
+    let fg = h.state().session.tools.foreground;
+    assert!((0..3).all(|i| (fg[i] - want[i]).abs() < 0.05), "picked the view pixel: {fg:?} vs {want:?}");
+    // Magic Eraser floods the latlong through the click (journalled as the flat command).
+    h.state_mut().ui.tool = Tool::MagicEraser;
+    h.run_steps(2);
+    click(&mut h, c, PointerButton::Primary);
+    assert!(non_finite(&h) <= 8);
+    // Zoom narrows the field of view.
+    h.state_mut().ui.tool = Tool::Zoom;
+    h.run_steps(2);
+    let fov0 = h.state().ui.views[0].projection.unwrap().fov;
+    click(&mut h, c, PointerButton::Primary);
+    h.run_steps(2);
+    let fov1 = h.state().ui.views[0].projection.unwrap().fov;
+    assert!(fov1 < fov0 * 0.9, "{fov0} -> {fov1}");
+    // Ruler: angle on the sphere.
+    h.state_mut().ui.tool = Tool::Ruler;
+    h.run_steps(2);
+    drag(&mut h, c, c + vec2(100.0, 0.0), Modifiers::NONE);
+    assert!(h.state().ui.status.contains("° on the sphere"), "{}", h.state().ui.status);
+    // Crop: a clear message, nothing changes.
+    h.state_mut().ui.tool = Tool::Crop;
+    h.run_steps(2);
+    let n = h.state().session.journal.len();
+    click(&mut h, c, PointerButton::Primary);
+    assert!(h.state().ui.status.contains("360° panorama"), "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.len(), n);
+}
+
+#[test]
+fn ed_flow_background_eraser_and_pattern_stamp_paint_in_projection_on_f32() {
+    for tool in [Tool::BackgroundEraser, Tool::PatternStamp] {
+        let mut h = ed_harness(tool);
+        let c = h.state().last_canvas_rect.center();
+        drag(&mut h, c + vec2(-40.0, 0.0), c + vec2(40.0, 0.0), Modifiers::NONE);
+        assert!(!h.state().ui.status_error, "{tool:?}: {}", h.state().ui.status);
+        assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("paint.projectedTool"), "{tool:?}");
+        assert!(non_finite(&h) <= 8);
+    }
+}
