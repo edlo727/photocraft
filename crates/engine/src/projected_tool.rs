@@ -201,7 +201,13 @@ impl ProjectedTool {
             p["flow"] = json!(self.temp.tools.brush.flow * 100.0);
             p["sampleLayer"] = json!("current");
         }
-        self.temp.execute(cmd, p.clone())?;
+        if cmd == "paint.gradient" {
+            // The preview is the committed sphere gradient seen through the view.
+            let (a, b) = (points.first().copied().unwrap_or_default(), points.last().copied().unwrap_or_default());
+            crate::projected_fill::gradient_view(&mut self.temp, &p, &self.proj, [a[0], a[1]], [b[0], b[1]])?;
+        } else {
+            self.temp.execute(cmd, p.clone())?;
+        }
         let doc = self.temp.active().ok_or(EngineError::NoDocument)?.doc.clone();
         let post = crate::channel_cmds::read_target_surface(&doc, self.layer, &p)?.clone();
         let damage = diff_bounds(&self.pre, &post, self.view);

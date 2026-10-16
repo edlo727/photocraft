@@ -16,6 +16,9 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 fn sub(a: [f64; 3], b: [f64; 3], k: f64) -> [f64; 3] {
     [a[0] - k * b[0], a[1] - k * b[1], a[2] - k * b[2]]
 }
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
 fn norm(a: [f64; 3]) -> Option<[f64; 3]> {
     let l = dot(a, a).sqrt();
     (l > 1e-12).then(|| [a[0] / l, a[1] / l, a[2] / l])
@@ -41,12 +44,26 @@ impl SphereGradient {
     pub(crate) fn new(vp: &ViewProjection, from: [f64; 2], to: [f64; 2], shape: GradientShape) -> Option<Self> {
         let a = vp.view_to_dir(from[0], from[1]);
         let b = vp.view_to_dir(to[0], to[1]);
-        let c = norm(sub(b, a, 1.0))?;
+        // The axis great circle's normal; `fwd` (the view's forward direction in that circle's
+        // plane) is where the bands are centred, so `c` is the circle's tangent there: a drag
+        // through the view centre's vertical gives bands that are exactly latitudes.
+        let n = norm(cross(a, b))?;
+        let f = vp.view_to_dir(vp.w / 2.0, vp.h / 2.0);
+        let fwd = norm(sub(f, n, dot(f, n))).or_else(|| norm([a[0] + b[0], a[1] + b[1], a[2] + b[2]]))?;
+        // Level bands: where the axis circle crosses the horizon, its tangent is the steepest
+        // climb (world up within the circle's plane), so a vertical drag gives latitudes at any
+        // view pitch. A drag along the horizon itself centres on the view's forward instead.
+        let up = [0.0, 1.0, 0.0];
+        let up_in = sub(up, n, dot(up, n));
+        let mut c = if dot(up_in, up_in) > 0.04 { norm(up_in)? } else { norm(cross(n, fwd))? };
+        if dot(c, sub(b, a, 1.0)) < 0.0 {
+            c = [-c[0], -c[1], -c[2]];
+        }
         let (th_a, th_b) = (dot(a, c).clamp(-1.0, 1.0).asin(), dot(b, c).clamp(-1.0, 1.0).asin());
         let len = (th_b - th_a).max(1e-9);
         let radial_len = dot(a, b).clamp(-1.0, 1.0).acos().max(1e-9);
-        // Across: the normal of the axis circle, signed like the flat tool's (−uy, ux).
-        let mut e = norm([a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]])?;
+        // Across: the axis circle's normal, signed like the flat tool's (−uy, ux).
+        let mut e = n;
         let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
         let l = (dx * dx + dy * dy).sqrt().max(1e-9);
         let p = vp.view_to_dir(from[0] - dy / l, from[1] + dx / l);
@@ -93,6 +110,22 @@ pub(crate) fn gradient(s: &mut Session, params: &Value, vp: &ViewProjection, fro
         let (surf, lock) = crate::channel_cmds::target_surface(doc, *active, params)?;
         photocraft_algo::paint::paint_gradient_by(surf, area, t_at, &g.stops, g.reverse, g.opacity, g.blend, g.dither, sel.as_ref(), lock);
         Ok(area)
+    })
+}
+
+/// The Gradient's live preview on the view-sized scratch: the same sphere formula through each
+/// view pixel's direction, so the preview is the committed result.
+pub(crate) fn gradient_view(s: &mut Session, params: &Value, vp: &ViewProjection, from: [f64; 2], to: [f64; 2]) -> Result<()> {
+    let g = crate::paint_cmds::gradient_setup(s, params)?;
+    let Some(sg) = SphereGradient::new(vp, from, to, g.shape) else { return Ok(()) };
+    let vp = *vp;
+    s.edit("Gradient", |doc, active| {
+        let sel = doc.selection.clone();
+        let area = sel.as_ref().map(|m| m.content_bounds()).filter(|r| !r.is_empty()).unwrap_or_else(|| doc.bounds()).intersect(&doc.bounds());
+        let t_at = |x: i32, y: i32| sg.t(vp.view_to_dir(f64::from(x) + 0.5, f64::from(y) + 0.5));
+        let (surf, lock) = crate::channel_cmds::target_surface(doc, *active, params)?;
+        photocraft_algo::paint::paint_gradient_by(surf, area, t_at, &g.stops, g.reverse, g.opacity, g.blend, g.dither, sel.as_ref(), lock);
+        Ok(())
     })
 }
 
@@ -232,17 +265,34 @@ mod tests {
         }
     }
 
-    /// Ed's case: a vertical drag across the horizon gives the same band at every longitude.
+    /// Ed's case: a vertical drag at yaw 0 from pitch −10° to +10° is level: every latlong row
+    /// is constant (the value depends only on latitude), also from a view pitched down 5°.
     #[test]
-    fn a_vertical_drag_at_the_horizon_wraps_as_horizontal_bands() {
-        let vp = ViewProjection::new(Camera { yaw: 0.0, pitch: 0.0, fov: 90.0 }, 800.0, 600.0);
-        let g = SphereGradient::new(&vp, [400.0, 330.0], [400.0, 270.0], GradientShape::Linear).unwrap();
-        for v in [240.0, 250.0, 256.0, 262.0, 270.0] {
-            let t0 = g.t(crate::equirect::equirect_to_dir(256.0, v, 1024.0, 512.0));
-            for u in [0.5, 300.0, 512.0, 700.0, 1023.5] {
-                let t = g.t(crate::equirect::equirect_to_dir(u, v, 1024.0, 512.0));
-                assert!((t - t0).abs() < 1e-3, "row {v}: {t} at u={u} vs {t0}");
+    fn a_vertical_drag_at_the_horizon_is_level_all_round() {
+        for pitch in [0.0, -5.0] {
+            let vp = ViewProjection::new(Camera { yaw: 0.0, pitch, fov: 90.0 }, 800.0, 600.0);
+            let at = |deg: f64| {
+                let r = deg.to_radians();
+                vp.dir_to_view([0.0, r.sin(), r.cos()]).unwrap()
+            };
+            let g = SphereGradient::new(&vp, at(-10.0), at(10.0), GradientShape::Linear).unwrap();
+            let mut last = -1.0;
+            for v in (0..512).step_by(8) {
+                let v = v as f64 + 0.5;
+                let t0 = g.t(crate::equirect::equirect_to_dir(0.5, v, 1024.0, 512.0));
+                for u in (0..1024).step_by(16) {
+                    let t = g.t(crate::equirect::equirect_to_dir(u as f64 + 0.5, v, 1024.0, 512.0));
+                    assert!((t - t0).abs() < 1e-4, "pitch {pitch}, row {v}: {t} at u={u} vs {t0}");
+                }
+                // Brighter going up: decreasing with the row.
+                if last >= 0.0 {
+                    assert!(t0 <= last + 1e-6);
+                }
+                last = t0;
             }
+            // ±10° are the ends; the horizon is the middle.
+            let lat = |deg: f64| g.t([0.7 * deg.to_radians().cos(), deg.to_radians().sin(), -0.71 * deg.to_radians().cos()]);
+            assert!(lat(-10.0) < 0.01 && lat(10.0) > 0.99 && (lat(0.0) - 0.5).abs() < 0.01, "{} {} {}", lat(-10.0), lat(0.0), lat(10.0));
         }
     }
 

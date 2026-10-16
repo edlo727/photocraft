@@ -969,3 +969,45 @@ mod tests {
         assert_eq!(snap_to_tick(&app, &xf, false, 37.0), 40.0);
     }
 }
+
+/// Live projection: the document guides drawn through the sphere. A vertical guide is a
+/// meridian, a horizontal one a circle of latitude; `to` maps document px to the screen (`None`
+/// behind the camera). View › Show › Guides and each guide's colour apply as on the flat canvas.
+pub fn draw_guides_projected(app: &PhotocraftApp, painter: &egui::Painter, doc: &Document, to: &dyn Fn(f64, f64) -> Option<egui::Pos2>) {
+    if !app.ui.extras.guides || !app.ui.view.shows(app.ui.view.show.canvas_guides) {
+        return;
+    }
+    let g = &app.session.prefs().guides_grid_and_slices;
+    let guide = pref_color(&g.guide_color, Color32::from_rgb(74, 255, 255));
+    let (w, h) = (f64::from(doc.size.width), f64::from(doc.size.height));
+    let jump = painter.clip_rect().size().length().max(1.0) * 0.5;
+    for (vertical, list) in [(true, &doc.guides.vertical), (false, &doc.guides.horizontal)] {
+        for &p in list {
+            let color = doc.guides.color(vertical, p).map_or(guide, |[r, g, b]| Color32::from_rgb(r, g, b));
+            let n = if vertical { 256 } else { 512 };
+            let mut runs: Vec<Vec<egui::Pos2>> = vec![Vec::new()];
+            for i in 0..=n {
+                let s = i as f64 / n as f64;
+                let q = if vertical { to(p, s * h) } else { to(s * w, p) };
+                match q {
+                    Some(q) => {
+                        let cur = runs.last_mut().unwrap();
+                        if cur.last().is_some_and(|l| (*l - q).length() > jump) {
+                            runs.push(vec![q]);
+                        } else {
+                            cur.push(q);
+                        }
+                    }
+                    None => {
+                        if !runs.last().unwrap().is_empty() {
+                            runs.push(Vec::new());
+                        }
+                    }
+                }
+            }
+            for r in runs.into_iter().filter(|r| r.len() > 1) {
+                painter.add(egui::Shape::line(r, Stroke::new(1.0, color)));
+            }
+        }
+    }
+}

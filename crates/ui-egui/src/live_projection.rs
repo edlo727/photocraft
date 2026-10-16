@@ -486,6 +486,13 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             rect.expand(20.0).contains(p).then_some(p)
         };
         crate::analysis_ui::draw_markers(app, &painter, &to);
+        if let Some(doc) = app.session.documents().get(idx).map(|st| st.doc.clone()) {
+            let to = |x: f64, y: f64| -> Option<Pos2> {
+                let [vx, vy] = vp.equirect_to_view(x, y, iw, ih)?;
+                Some(rect.min + vec2(vx as f32, vy as f32) / ppp)
+            };
+            crate::rulers::draw_guides_projected(app, &painter.with_clip_rect(rect), &doc, &to);
+        }
     }
     crate::live_projection_path::draw(app, &ctx, &painter, rect, ppp, &vp, idx, tool);
     // Heads-up: camera readout.
