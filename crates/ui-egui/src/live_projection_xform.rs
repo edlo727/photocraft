@@ -347,7 +347,6 @@ pub fn transform(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::
             painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), egui::StrokeKind::Inside);
         }
     }
-    ctx.request_repaint_after(std::time::Duration::from_millis(50));
     true
 }
 

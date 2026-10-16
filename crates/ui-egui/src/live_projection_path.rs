@@ -18,7 +18,7 @@ pub fn supported(t: Tool) -> bool {
 }
 
 /// A knot being drawn, in view px.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct VKnot {
     a: [f64; 2],
     i: [f64; 2],
@@ -26,7 +26,7 @@ struct VKnot {
     smooth: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Draft {
     knots: Vec<VKnot>,
     /// Pen: the knot whose handle a drag pulls.
@@ -225,8 +225,13 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
             return;
         }
     }
+    // Only repaint when the draft changed: egui already repaints on pointer movement, and a
+    // repaint every frame re-renders the 20k projection continuously while a Pen is selected.
+    let changed = ctx.data(|x| x.get_temp::<Draft>(draft_id(idx))) != Some(d.clone());
     ctx.data_mut(|x| x.insert_temp(draft_id(idx), d));
-    ctx.request_repaint();
+    if changed {
+        ctx.request_repaint();
+    }
 }
 
 /// Path Selection, Direct Selection and the anchor tools on the stored work path.
