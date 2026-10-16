@@ -766,7 +766,7 @@ mod render_tests {
         let view = json!({"yaw": 30.0, "pitch": 40.0, "fov": 60.0, "width": 800, "height": 600});
         let vp = ViewProjection::new(Camera { yaw: 30.0, pitch: 40.0, fov: 60.0 }, 800.0, 600.0);
         let n = s.active().unwrap().doc.walk().len();
-        s.execute("layer.projectedRender", json!({"command": "shape.create", "params": {"kind": "rect", "rect": [300, 250, 500, 350], "fill": "#ff0000"}, "projection": view})).unwrap();
+        s.execute("layer.projectedRender", json!({"command": "shape.create", "params": {"kind": "rect", "rect": [300, 250, 200, 100], "fill": "#ff0000"}, "projection": view})).unwrap();
         assert_eq!(s.active().unwrap().doc.walk().len(), n + 1);
         let d = s.active().unwrap();
         let surf = d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap();
