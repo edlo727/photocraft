@@ -517,7 +517,7 @@ impl Live {
         // Each render redraws the whole stroke so far: on a long stroke wait about as long as
         // the last render took (at least a frame, 50 ms for the retouch tools), so the preview
         // never eats every frame and the pointer stays smooth.
-        let floor = if matches!(self.preview, LivePreview::Tool(_)) { 0.05 } else { 0.0 };
+        let floor: f64 = if matches!(self.preview, LivePreview::Tool(_)) { 0.05 } else { 0.0 };
         let throttled = now - self.last < floor.max(self.cost * 1.5);
         if self.rendered != self.points.len() && !throttled {
             self.rendered = self.points.len();
