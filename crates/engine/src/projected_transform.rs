@@ -112,6 +112,92 @@ fn transpose(q: &Rot) -> Rot {
 }
 
 /// `layer.projectedRotate` — see the module docs.
+/// The pixels a move can change: a set of columns over rows `y0..y1`.
+struct MoveRegion {
+    cols: Vec<bool>,
+    y0: i32,
+    y1: i32,
+}
+
+impl MoveRegion {
+    fn all(iw: i32, ih: i32) -> Self {
+        MoveRegion { cols: vec![true; iw as usize], y0: 0, y1: ih }
+    }
+}
+
+/// Where a selection with bounds `r` is and where sphere rotation `q` takes it, padded.
+fn move_region(r: Rect, q: &Rot, iw: i32, ih: i32) -> MoveRegion {
+    let (fw, fh) = (f64::from(iw), f64::from(ih));
+    let pad = 4.0 + fw / 256.0;
+    let inv = transpose(q);
+    let inside = |d: [f64; 3]| {
+        let [u, v] = dir_to_equirect(d, fw, fh);
+        let (x0, x1) = (f64::from(r.x0) - pad, f64::from(r.x1) + pad);
+        let du = if u < x0 { u + fw } else if u > x1 { u - fw } else { u };
+        du >= x0 && du <= x1 && v >= f64::from(r.y0) - pad && v <= f64::from(r.y1) + pad
+    };
+    // Sample the source rect's edges densely and its inside coarsely.
+    let mut pts = Vec::new();
+    let (ax, ay, bx, by) = (f64::from(r.x0), f64::from(r.y0), f64::from(r.x1), f64::from(r.y1));
+    for i in 0..=512 {
+        let t = f64::from(i) / 512.0;
+        let (x, y) = (ax + (bx - ax) * t, ay + (by - ay) * t);
+        pts.extend([[x, ay], [x, by], [ax, y], [bx, y]]);
+    }
+    for i in 0..=32 {
+        for j in 0..=32 {
+            pts.push([ax + (bx - ax) * f64::from(i) / 32.0, ay + (by - ay) * f64::from(j) / 32.0]);
+        }
+    }
+    let mut us = Vec::with_capacity(pts.len());
+    let (mut vmin, mut vmax) = (f64::from(r.y0), f64::from(r.y1));
+    for [x, y] in pts {
+        let [u, v] = dir_to_equirect(rot(q, equirect_to_dir(x, y, fw, fh)), fw, fh);
+        us.push(u);
+        vmin = vmin.min(v);
+        vmax = vmax.max(v);
+    }
+    let north = inside(rot(&inv, [0.0, 1.0, 0.0]));
+    let south = inside(rot(&inv, [0.0, -1.0, 0.0]));
+    if north {
+        vmin = 0.0;
+    }
+    if south {
+        vmax = fh;
+    }
+    let y0 = ((vmin - pad).floor() as i32).clamp(0, ih);
+    let y1 = ((vmax + pad).ceil() as i32).clamp(0, ih);
+    let mut cols = vec![false; iw as usize];
+    let mut mark = |a: f64, b: f64| {
+        if b - a >= fw {
+            cols.iter_mut().for_each(|c| *c = true);
+            return;
+        }
+        let mut x = a.floor() as i64;
+        while (x as f64) < b.ceil() {
+            cols[x.rem_euclid(i64::from(iw)) as usize] = true;
+            x += 1;
+        }
+    };
+    // Where it is.
+    mark(ax - pad, bx + pad);
+    // Where it lands: the shortest arc holding every mapped u (the complement of the widest gap).
+    us.sort_by(f64::total_cmp);
+    let mut gap = (us[0] + fw - us[us.len() - 1], us[us.len() - 1]);
+    for w in us.windows(2) {
+        if w[1] - w[0] > gap.0 {
+            gap = (w[1] - w[0], w[0]);
+        }
+    }
+    if north || south || gap.0 < fw * 0.25 {
+        mark(0.0, fw);
+    } else {
+        let start = gap.1 + gap.0;
+        mark(start - pad, start + (fw - gap.0) + pad);
+    }
+    MoveRegion { cols, y0, y1 }
+}
+
 pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "layer.projectedRotate";
     let a = p.get("rotation").and_then(Value::as_array).ok_or_else(|| bad(CMD, "missing `rotation`"))?;
@@ -120,6 +206,8 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.active().ok_or(EngineError::NoDocument)?;
     let id = st.active_layer.ok_or_else(|| bad(CMD, "no active layer"))?;
     let label = if st.doc.selection.is_some() { "Move Selection Contents" } else { "Move" };
+    // Tests: the whole sphere, to check the region-limited move against.
+    let full = p.get("_fullSphere").and_then(Value::as_bool).unwrap_or(false);
     s.edit(label, |doc, _| {
         let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
         let sel = doc.selection.clone();
@@ -128,27 +216,41 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
         let fmt = surf.format();
         let n = surf.channels();
         let alpha = fmt.alpha.then(|| n - 1);
-        let src = Band::read(surf, iw, 0, ih);
-        let sb = sel.as_ref().map(|m| Band::read(m, iw, 0, ih));
         let (fw, fh) = (f64::from(iw), f64::from(ih));
+        // With a selection only where it is (cleared) and where it lands change: a 20k latlong
+        // moves a small selection in a fraction of the full-sphere time.
+        let sel_rect = sel.as_ref().map(|m| m.content_bounds()).filter(|r| !r.is_empty());
+        let region = match (&sel, sel_rect) {
+            (Some(_), Some(r)) if !full => move_region(r, &q, iw, ih),
+            (Some(_), Some(_)) => MoveRegion::all(iw, ih),
+            (Some(_), None) => return Ok(()),
+            _ => MoveRegion::all(iw, ih),
+        };
+        let (sy0, sy1) = sel_rect.map_or((0, ih), |r| ((r.y0 - 2).max(0), (r.y1 + 2).min(ih)));
+        let src = Band::read(surf, iw, sy0, sy1);
+        let sb = sel.as_ref().map(|m| Band::read(m, iw, sy0, sy1));
+        let cols: Vec<i32> = (0..iw).filter(|&x| region.cols[x as usize]).collect();
         // Rows in bands: one full output copy of a 20k F32 latlong is 3 GB.
         let band = 256;
-        let mut y0 = 0;
-        while y0 < ih {
-            let y1 = (y0 + band).min(ih);
+        let mut y0 = region.y0;
+        while y0 < region.y1 {
+            let y1 = (y0 + band).min(region.y1);
             let r = Rect::new(0, y0, iw, y1);
             let mut out = surf.read_region(r);
             out.par_chunks_mut(iw as usize * n).enumerate().for_each(|(j, line)| {
                 let y = y0 + j as i32;
                 let (mut c, mut m) = (vec![0f32; n], [0f32; 4]);
-                for x in 0..iw {
+                for &x in &cols {
                     let px = &mut line[x as usize * n..(x as usize + 1) * n];
                     let [u, v] = dir_to_equirect(rot(&inv, equirect_to_dir(f64::from(x) + 0.5, f64::from(y) + 0.5, fw, fh)), fw, fh);
                     match &sb {
                         Some(sb) => {
                             // What stays: the unselected part here; on top, the selected part from there.
-                            let here = sb.buf[sb.tap(i64::from(x), i64::from(y))];
+                            let here = if y >= sy0 && y < sy1 { sb.buf[sb.tap(i64::from(x), i64::from(y))] } else { 0.0 };
                             clear(px, here, alpha);
+                            if v + 1.0 < f64::from(sy0) || v - 1.0 > f64::from(sy1) {
+                                continue;
+                            }
                             sb.sample(u, v, &mut m);
                             if m[0] > 0.0 {
                                 src.sample(u, v, &mut c);
@@ -168,16 +270,21 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
         // The selection moves with its contents.
         if let (Some(m), Some(sb)) = (doc.selection.as_mut(), sb) {
             let mn = m.channels();
-            let mut out = vec![0f32; iw as usize * ih as usize * mn];
-            out.par_chunks_mut(iw as usize * mn).enumerate().for_each(|(y, line)| {
+            let r = Rect::new(0, region.y0, iw, region.y1);
+            let mut out = m.read_region(r);
+            out.par_chunks_mut(iw as usize * mn).enumerate().for_each(|(j, line)| {
+                let y = region.y0 + j as i32;
                 let mut v4 = [0f32; 4];
-                for x in 0..iw as usize {
-                    let [u, v] = dir_to_equirect(rot(&inv, equirect_to_dir(x as f64 + 0.5, y as f64 + 0.5, fw, fh)), fw, fh);
-                    sb.sample(u, v, &mut v4);
-                    line[x * mn] = v4[0];
+                for &x in &cols {
+                    let [u, v] = dir_to_equirect(rot(&inv, equirect_to_dir(f64::from(x) + 0.5, f64::from(y) + 0.5, fw, fh)), fw, fh);
+                    v4[0] = 0.0;
+                    if v + 1.0 >= f64::from(sy0) && v - 1.0 <= f64::from(sy1) {
+                        sb.sample(u, v, &mut v4);
+                    }
+                    line[x as usize * mn] = v4[0];
                 }
             });
-            m.write_region(Rect::new(0, 0, iw, ih), &out);
+            m.write_region(r, &out);
         }
         Ok(())
     })?;
@@ -778,5 +885,56 @@ mod render_tests {
         assert!(inside[0] > 0.9 && inside[3] > 0.99, "{inside:?}");
         assert!(corner[3] > 0.9, "the view rect's corner is filled: {corner:?}");
         assert!(out[3] < 0.01, "{out:?}");
+    }
+}
+
+#[cfg(test)]
+mod move_region_tests {
+    use super::*;
+    use crate::equirect::rotation_between;
+
+    fn run(rotation: &Rot, sel: [i32; 4], full: bool) -> (Vec<f32>, Vec<f32>) {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 1024, "height": 512, "depth": 32})).unwrap();
+        {
+            let st = s.active_mut().unwrap();
+            let id = st.active_layer.unwrap();
+            let surf = std::sync::Arc::make_mut(&mut st.doc).layer_mut(id).unwrap().surface_mut().unwrap();
+            let n = surf.channels();
+            let mut buf = vec![0f32; 1024 * 512 * n];
+            for (i, px) in buf.chunks_mut(n).enumerate() {
+                let (x, y) = ((i % 1024) as f32, (i / 1024) as f32);
+                px[0] = (x * 0.37).sin() * 4.0 + 4.0; // HDR
+                px[1] = (y * 0.11).cos();
+                if n > 2 { px[2] = ((x + y) * 0.05).sin(); }
+                px[n - 1] = 1.0;
+            }
+            buf[(300 * 1024 + 520) * n] = f32::INFINITY;
+            buf[(310 * 1024 + 530) * n + 1] = f32::NAN;
+            surf.write_region(Rect::new(0, 0, 1024, 512), &buf);
+        }
+        s.execute("select.rect", json!({"x": sel[0], "y": sel[1], "width": sel[2], "height": sel[3]})).unwrap();
+        s.execute("layer.projectedRotate", json!({"rotation": rotation.concat(), "_fullSphere": full})).unwrap();
+        let st = s.active().unwrap();
+        let surf = st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap();
+        (surf.read_region(Rect::new(0, 0, 1024, 512)), st.doc.selection.as_ref().unwrap().read_region(Rect::new(0, 0, 1024, 512)))
+    }
+
+    #[test]
+    fn a_selection_move_changes_the_same_pixels_as_the_full_sphere_move_on_f32() {
+        let cases = [
+            // A small nudge, across the seam, and over the north pole.
+            (equirect_to_dir(500.0, 300.0, 1024.0, 512.0), equirect_to_dir(540.0, 280.0, 1024.0, 512.0), [480, 280, 80, 60]),
+            (equirect_to_dir(980.0, 250.0, 1024.0, 512.0), equirect_to_dir(40.0, 260.0, 1024.0, 512.0), [940, 220, 70, 70]),
+            (equirect_to_dir(500.0, 120.0, 1024.0, 512.0), equirect_to_dir(700.0, 10.0, 1024.0, 512.0), [450, 80, 120, 80]),
+        ];
+        for (a, b, sel) in cases {
+            let q = rotation_between(a, b);
+            let (pa, ma) = run(&q, sel, false);
+            let (pb, mb) = run(&q, sel, true);
+            let diff = pa.iter().zip(&pb).filter(|(x, y)| !(x == y || (x.is_nan() && y.is_nan()))).count();
+            let mdiff = ma.iter().zip(&mb).filter(|(x, y)| (*x - *y).abs() > 1e-6).count();
+            assert_eq!((diff, mdiff), (0, 0), "{sel:?}");
+        }
     }
 }

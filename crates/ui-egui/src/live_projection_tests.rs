@@ -893,3 +893,24 @@ fn ed_flow_background_eraser_and_pattern_stamp_paint_in_projection_on_f32() {
         assert!(non_finite(&h) <= 8);
     }
 }
+
+#[test]
+fn arrow_keys_look_around_and_home_resets_the_view_in_projection() {
+    let mut h = ed_harness(Tool::Brush);
+    let c = h.state().last_canvas_rect.center();
+    h.event(Event::PointerMoved(c));
+    h.run_steps(2);
+    let v0 = h.state().ui.views[0].projection.unwrap();
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    let v1 = h.state().ui.views[0].projection.unwrap();
+    assert!((v1.yaw - v0.yaw - 2.0).abs() < 1e-3, "{} -> {}", v0.yaw, v1.yaw);
+    h.key_press_modifiers(Modifiers::SHIFT, egui::Key::ArrowUp);
+    h.run_steps(2);
+    let v2 = h.state().ui.views[0].projection.unwrap();
+    assert!((v2.pitch - v0.pitch - 10.0).abs() < 1e-3, "{} -> {}", v0.pitch, v2.pitch);
+    h.key_press(egui::Key::Home);
+    h.run_steps(2);
+    let v3 = h.state().ui.views[0].projection.unwrap();
+    assert_eq!((v3.yaw, v3.pitch, v3.fov), (0.0, 0.0, 90.0));
+}

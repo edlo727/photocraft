@@ -74,6 +74,26 @@ impl ProjectionView {
     }
 }
 
+/// Arrow keys look around by 2° (Shift 10°, Alt 0.5°); Home resets yaw, pitch and the field
+/// of view. The keys are consumed so they don't also nudge the layer.
+pub(crate) fn look_keys(ctx: &egui::Context, cam: &mut ProjectionView) {
+    use egui::Key;
+    ctx.input_mut(|i| {
+        let m = i.modifiers;
+        let step = if m.shift { 10.0 } else if m.alt { 0.5 } else { 2.0 };
+        for (k, dy, dp) in [(Key::ArrowLeft, -1.0, 0.0), (Key::ArrowRight, 1.0, 0.0), (Key::ArrowUp, 0.0, 1.0), (Key::ArrowDown, 0.0, -1.0)] {
+            if i.consume_key(m, k) {
+                cam.yaw = wrap_deg(f64::from(cam.yaw + dy * step)) as f32;
+                cam.pitch = (cam.pitch + dp * step).clamp(-MAX_PITCH as f32, MAX_PITCH as f32);
+            }
+        }
+        if i.consume_key(egui::Modifiers::NONE, Key::Home) {
+            let d = ProjectionView::default();
+            (cam.yaw, cam.pitch, cam.fov) = (d.yaw, d.pitch, d.fov);
+        }
+    });
+}
+
 /// Toggle the projection of document `idx`'s view; returns whether it is now on.
 pub fn toggle(app: &mut PhotocraftApp, idx: usize, on: Option<bool>) -> Result<bool, String> {
     let v = app.ui.views.get_mut(idx).ok_or("no document")?;
@@ -169,6 +189,10 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         if dy != 0.0 {
             cam.scale_fov((-dy * 0.002).exp());
         }
+    }
+    // Keyboard look: arrows turn the view (Shift ×5, Alt ×¼), Home resets it.
+    if response.hovered() && !ctx.wants_keyboard_input() {
+        look_keys(&ctx, &mut cam);
     }
     if response.dragged() && (looking || !paints) {
         if looking {
