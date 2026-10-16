@@ -762,3 +762,58 @@ fn ed_flow_gradient_and_paint_bucket_fill_in_the_view() {
     let f = active_px(&h, doc_of_screen(&h, c));
     assert!(f[0] > 0.9 && f[2] < 0.05, "the bucket filled with the foreground: {f:?}");
 }
+
+#[test]
+fn ed_flow_pen_draws_a_path_in_view_that_selects_strokes_and_edits_in_projection() {
+    let mut h = ed_harness(Tool::Pen);
+    let c = h.state().last_canvas_rect.center();
+    let sq = [c + vec2(-60.0, -40.0), c + vec2(60.0, -40.0), c + vec2(60.0, 40.0), c + vec2(-60.0, 40.0)];
+    for p in sq.iter().chain(std::iter::once(&sq[0])) {
+        click(&mut h, *p, PointerButton::Primary);
+    }
+    let path = h.state().session.active().unwrap().doc.work_path.clone().expect("the Pen stored a work path");
+    assert!(path.subpaths[0].closed, "closed on its first anchor");
+    // Make Selection: inside the square as seen in the view.
+    h.state_mut().run("path.toSelection", json!({})).unwrap();
+    let sel = h.state().session.active().unwrap().doc.selection.clone().expect("a selection");
+    let mut m = [0f32; 1];
+    let mut at = |p: egui::Pos2| {
+        let d = doc_of_screen(&h, p);
+        sel.read_pixel(d[0] as i32, d[1] as i32, &mut m);
+        m[0]
+    };
+    assert!(at(c) > 0.9 && at(c + vec2(50.0, 30.0)) > 0.9, "inside");
+    assert!(at(c + vec2(80.0, 0.0)) < 0.1, "outside");
+    // Stroke Path paints with the brush along it in the view.
+    h.state_mut().run("select.deselect", json!({})).unwrap();
+    h.state_mut().run("path.stroke", json!({})).unwrap();
+    assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("paint.projectedStroke"));
+    assert!(non_finite(&h) <= 8);
+    // Direct Selection: drag a corner anchor 30 px right.
+    h.state_mut().ui.tool = Tool::DirectSelection;
+    h.run_steps(2);
+    drag(&mut h, sq[1], sq[1] + vec2(30.0, 0.0), Modifiers::NONE);
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    let r = h.state().last_canvas_rect;
+    let ppp = h.ctx.pixels_per_point();
+    let cam = h.state().ui.views[0].projection.unwrap().camera();
+    let vp = photocraft_engine::equirect::ViewProjection::new(cam, f64::from(r.width() * ppp), f64::from(r.height() * ppp));
+    let path = h.state().session.active().unwrap().doc.work_path.clone().unwrap();
+    let anchors: Vec<[f64; 2]> = path.subpaths[0].knots.iter().filter_map(|k| vp.dir_to_view(photocraft_engine::equirect::equirect_to_dir(k.anchor.x, k.anchor.y, 4096.0, 2048.0))).collect();
+    let want = sq[1] + vec2(30.0, 0.0);
+    let want = [f64::from((want.x - r.min.x) * ppp), f64::from((want.y - r.min.y) * ppp)];
+    assert!(anchors.iter().any(|a| (a[0] - want[0]).abs() < 2.0 && (a[1] - want[1]).abs() < 2.0), "the anchor followed the drag: {anchors:?} want {want:?}");
+    // Path Selection: drag the whole path; Delete Anchor: click one away.
+    h.state_mut().ui.tool = Tool::PathSelection;
+    h.run_steps(2);
+    let n0 = path.subpaths[0].knots.len();
+    drag(&mut h, c, c + vec2(0.0, 50.0), Modifiers::NONE);
+    let moved = h.state().session.active().unwrap().doc.work_path.clone().unwrap();
+    assert!(moved.subpaths[0].knots[0].anchor.y > path.subpaths[0].knots[0].anchor.y + 5.0, "the path moved down");
+    h.state_mut().ui.tool = Tool::DeleteAnchorPoint;
+    h.run_steps(2);
+    let k0 = moved.subpaths[0].knots[0].anchor;
+    let v = vp.dir_to_view(photocraft_engine::equirect::equirect_to_dir(k0.x, k0.y, 4096.0, 2048.0)).unwrap();
+    click(&mut h, r.min + vec2(v[0] as f32, v[1] as f32) / ppp, PointerButton::Primary);
+    assert_eq!(h.state().session.active().unwrap().doc.work_path.as_ref().unwrap().subpaths[0].knots.len(), n0 - 1, "one anchor fewer");
+}
