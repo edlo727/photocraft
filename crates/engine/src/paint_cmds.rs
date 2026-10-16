@@ -41,6 +41,35 @@ fn opacity(p: &Value, cmd: &str) -> Result<f32> {
     Ok(crate::eraser_cmds::number(p, cmd, "opacity", 100.0, 1.0..=100.0)? as f32 / 100.0)
 }
 
+/// The Paint Bucket's colour settings (foreground fill): colour, tolerance, contiguous,
+/// anti-alias, opacity, sample-all-layers and CMYK inks. `None` for a pattern fill.
+pub(crate) struct BucketSetup {
+    pub color: [f32; 4],
+    pub tolerance: f32,
+    pub contiguous: bool,
+    pub anti_alias: bool,
+    pub opacity: f32,
+    pub all: bool,
+    pub inks: Option<[f32; 4]>,
+}
+
+pub(crate) fn bucket_setup(s: &Session, p: &Value) -> Result<Option<BucketSetup>> {
+    let source = p.get("contents").or_else(|| p.get("source")).and_then(Value::as_str).unwrap_or("foreground");
+    if source == "pattern" {
+        return Ok(None);
+    }
+    let c = color(p.get("color"), s.tools.foreground);
+    Ok(Some(BucketSetup {
+        color: c,
+        tolerance: f(p, "tolerance", 32.0),
+        contiguous: b(p, "contiguous", true),
+        anti_alias: b(p, "antiAlias", true),
+        opacity: opacity(p, "paint.bucket")?,
+        all: b(p, "sampleAllLayers", false) && crate::channel_cmds::target_of(p) == crate::channel_cmds::Target::Pixels,
+        inks: s.tools.picked_cmyk([c[0], c[1], c[2]]).filter(|_| c[3] >= 1.0),
+    }))
+}
+
 fn bucket(s: &mut Session, p: &Value) -> Result<Value> {
     let fg = s.tools.foreground;
     let c = color(p.get("color"), fg);
@@ -100,9 +129,31 @@ fn bucket(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "filled": filled }))
 }
 
+/// The Gradient tool's settings from its params (everything but `from`/`to`).
+pub(crate) struct GradientSetup {
+    pub shape: GradientShape,
+    pub stops: Vec<(f32, [f32; 4])>,
+    pub reverse: bool,
+    pub opacity: f32,
+    pub blend: photocraft_color::BlendMode,
+    pub dither: bool,
+}
+
 fn gradient(s: &mut Session, p: &Value) -> Result<Value> {
     let from = point(p, "from").ok_or_else(|| EngineError::BadParams { cmd: "paint.gradient".into(), msg: "missing from".into() })?;
     let to = point(p, "to").ok_or_else(|| EngineError::BadParams { cmd: "paint.gradient".into(), msg: "missing to".into() })?;
+    let GradientSetup { shape, stops, reverse, opacity, blend, dither } = gradient_setup(s, p)?;
+    s.edit("Gradient", |doc, active| {
+        let sel = doc.selection.clone();
+        let area = sel.as_ref().map(|m| m.content_bounds()).filter(|r| !r.is_empty()).unwrap_or_else(|| doc.bounds()).intersect(&doc.bounds());
+        let (surf, lock) = crate::channel_cmds::target_surface(doc, *active, p)?;
+        paint_gradient(surf, area, from, to, shape, &stops, reverse, opacity, blend, dither, sel.as_ref(), lock);
+        Ok(())
+    })?;
+    Ok(Value::Null)
+}
+
+pub(crate) fn gradient_setup(s: &Session, p: &Value) -> Result<GradientSetup> {
     let shape = match p.get("style").and_then(Value::as_str).unwrap_or("linear") {
         "radial" => GradientShape::Radial,
         "angle" => GradientShape::Angle,
@@ -144,14 +195,7 @@ fn gradient(s: &mut Session, p: &Value) -> Result<Value> {
     let opacity = opacity(p, "paint.gradient")?;
     let blend = p.get("mode").and_then(Value::as_str).and_then(blend_from_str).unwrap_or(photocraft_color::BlendMode::Normal);
     let dither = b(p, "dither", true); // Photoshop dithers gradients by default (reduces banding).
-    s.edit("Gradient", |doc, active| {
-        let sel = doc.selection.clone();
-        let area = sel.as_ref().map(|m| m.content_bounds()).filter(|r| !r.is_empty()).unwrap_or_else(|| doc.bounds()).intersect(&doc.bounds());
-        let (surf, lock) = crate::channel_cmds::target_surface(doc, *active, p)?;
-        paint_gradient(surf, area, from, to, shape, &stops, reverse, opacity, blend, dither, sel.as_ref(), lock);
-        Ok(())
-    })?;
-    Ok(Value::Null)
+    Ok(GradientSetup { shape, stops, reverse, opacity, blend, dither })
 }
 
 /// Paint helper command specs.

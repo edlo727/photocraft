@@ -99,11 +99,16 @@ fn over(base: &mut [f32], top: &[f32], ka: f32, alpha: Option<usize>) {
     }
 }
 
-/// Clear coverage `k` of `px` (alpha layers lose it; opaque ones keep their pixels, Photoshop
-/// fills the Background with the background colour, here they stay under the moved content).
-fn clear(px: &mut [f32], k: f32, alpha: Option<usize>) {
+/// Clear coverage `k` of `px`: alpha layers lose it; opaque ones (the Background) take the
+/// background colour `bg` (encoded in the layer's format), as Photoshop's Move does.
+fn clear(px: &mut [f32], k: f32, alpha: Option<usize>, bg: &[f32]) {
+    let k = k.clamp(0.0, 1.0);
     if let Some(a) = alpha {
-        px[a] *= 1.0 - k.clamp(0.0, 1.0);
+        px[a] *= 1.0 - k;
+    } else if bg.len() >= px.len() && k > 0.0 {
+        for (c, b) in px.iter_mut().zip(bg) {
+            *c += (*b - *c) * k;
+        }
     }
 }
 
@@ -228,6 +233,7 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
     let label = if st.doc.selection.is_some() { "Move Selection Contents" } else { "Move" };
     // Tests: the whole sphere, to check the region-limited move against.
     let full = p.get("_fullSphere").and_then(Value::as_bool).unwrap_or(false);
+    let bgc = s.tools.background;
     s.edit(label, |doc, _| {
         let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
         let sel = doc.selection.clone();
@@ -236,6 +242,7 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
         let fmt = surf.format();
         let n = surf.channels();
         let alpha = fmt.alpha.then(|| n - 1);
+        let bg = photocraft_raster::from_rgba(&fmt, bgc);
         let (fw, fh) = (f64::from(iw), f64::from(ih));
         // With a selection only where it is (cleared) and where it lands change: a 20k latlong
         // moves a small selection in a fraction of the full-sphere time.
@@ -252,12 +259,13 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
         let cols: Vec<i32> = (0..iw).filter(|&x| region.cols[x as usize]).collect();
         let trig = Trig::new(iw, ih);
         // Rows in bands: one full output copy of a 20k F32 latlong is 3 GB.
-        let band = 256;
+        let band = if sel.is_none() { 1024 } else { 256 };
         let mut y0 = region.y0;
         while y0 < region.y1 {
             let y1 = (y0 + band).min(region.y1);
             let r = Rect::new(0, y0, iw, y1);
-            let mut out = surf.read_region(r);
+            // A whole-layer move rewrites every pixel: no need to read the old band first.
+            let mut out = if sb.is_none() && cols.len() == iw as usize { vec![0f32; iw as usize * (y1 - y0) as usize * n] } else { surf.read_region(r) };
             out.par_chunks_mut(iw as usize * n).enumerate().for_each(|(j, line)| {
                 let y = y0 + j as i32;
                 let (mut c, mut m) = (vec![0f32; n], [0f32; 4]);
@@ -268,7 +276,7 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
                         Some(sb) => {
                             // What stays: the unselected part here; on top, the selected part from there.
                             let here = if y >= sy0 && y < sy1 { sb.buf[sb.tap(i64::from(x), i64::from(y))] } else { 0.0 };
-                            clear(px, here, alpha);
+                            clear(px, here, alpha, &bg);
                             if v + 1.0 < f64::from(sy0) || v - 1.0 > f64::from(sy1) {
                                 continue;
                             }
@@ -502,6 +510,7 @@ pub fn projected_place(s: &mut Session, p: &Value) -> Result<Value> {
     let src = [0, 1, 2, 3].map(|i| r[i].as_f64().unwrap_or(0.0));
     let warp = Warp::new(src, quad).ok_or_else(|| bad(CMD, "the quad is degenerate"))?;
     let id = st.active_layer.ok_or_else(|| bad(CMD, "no active layer"))?;
+    let bgc = s.tools.background;
     let dmg = s.edit("Free Transform", |doc, _| {
         let sel = doc.selection.clone();
         let Some((y0, y1)) = rows_of(&proj, &[src, warp.quad_bbox()], iw as u32, ih as u32) else { return Ok(Rect::EMPTY) };
@@ -509,6 +518,7 @@ pub fn projected_place(s: &mut Session, p: &Value) -> Result<Value> {
         let surf = layer.surface_mut().ok_or_else(|| bad(CMD, "the active layer has no pixels (rasterize it first)"))?;
         let n = surf.channels();
         let alpha = surf.format().alpha.then(|| n - 1);
+        let bg = photocraft_raster::from_rgba(&surf.format(), bgc);
         // Every source position maps back into the same view: its rows are the source rows.
         let (sy0, sy1) = rows_of(&proj, &[src], iw as u32, ih as u32).unwrap_or((y0, y1));
         let (sy0, sy1) = (sy0.min(y0), sy1.max(y1));
@@ -526,7 +536,7 @@ pub fn projected_place(s: &mut Session, p: &Value) -> Result<Value> {
                 let px = &mut line[x as usize * n..(x as usize + 1) * n];
                 if inside(v) {
                     let k = mband.as_ref().map_or(1.0, |mb| mb.buf[mb.tap(i64::from(x), i64::from(y))]);
-                    clear(px, k, alpha);
+                    clear(px, k, alpha, &bg);
                 }
                 if let Some(sv) = warp.back(v) {
                     let [u, vv] = proj.view_to_equirect(sv[0], sv[1], fw, fh);
@@ -618,6 +628,8 @@ pub struct XformPreview {
     f: f64,
     iw: i32,
     ih: i32,
+    /// The background colour in the layer's format (cleared opaque pixels).
+    bg: Vec<f32>,
 }
 
 impl XformPreview {
@@ -634,7 +646,8 @@ impl XformPreview {
         let f = ((iw + 4095) / 4096).max(1);
         let lb = reduced(layer, iw, ih, f);
         let mb = st.doc.selection.as_ref().map(|m| reduced(m, iw, ih, f));
-        Ok(Self { proj, view, pre, sel, lb, mb, f: f64::from(f), iw, ih })
+        let bg = photocraft_raster::from_rgba(&layer.format(), s.tools.background);
+        Ok(Self { proj, view, pre, sel, lb, mb, f: f64::from(f), iw, ih, bg })
     }
 
     /// The view-space bounds of what a transform would take: the selection, else the layer's
@@ -661,6 +674,7 @@ impl XformPreview {
     fn render(&self, at: impl Fn([f64; 2]) -> (bool, Option<[f64; 3]>) + Sync) -> Option<crate::brush_cmds::projected::PreviewOverlay> {
         let n = self.pre.channels();
         let alpha = self.pre.format().alpha.then(|| n - 1);
+        let bg = &self.bg;
         let w = self.view.width() as usize;
         let pre = self.pre.read_region(self.view);
         let selv = self.sel.as_ref().map(|m| (m.read_region(self.view), m.channels()));
@@ -674,7 +688,7 @@ impl XformPreview {
                 let (cleared, from) = at([x as f64 + 0.5, y as f64 + 0.5]);
                 if cleared {
                     let k = selv.as_ref().map_or(1.0, |(s, ch)| s[(y * w + x) * ch]);
-                    clear(px, k, alpha);
+                    clear(px, k, alpha, bg);
                 }
                 let Some(d) = from else { continue };
                 let [u, v] = dir_to_equirect(d, rw, rh);
@@ -781,6 +795,23 @@ mod tests {
         assert!(bad <= 2, "inf / NaN stay single pixels: {bad}");
         s.execute("edit.undo", json!({})).unwrap();
         assert!(px(&s, 1020, 520)[0] > 4.0);
+    }
+
+    #[test]
+    fn move_on_the_opaque_background_leaves_the_background_colour() {
+        let mut s = doc();
+        let opaque = { let d = s.active().unwrap(); !d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().format().alpha };
+        s.tools.background = [0.0, 1.0, 0.0, 1.0];
+        s.execute("select.rect", json!({"x": 1000, "y": 500, "width": 40, "height": 40})).unwrap();
+        let q = rotation_between(equirect_to_dir(1020.0, 520.0, 2048.0, 1024.0), equirect_to_dir(1300.0, 520.0, 2048.0, 1024.0));
+        s.execute("layer.projectedRotate", json!({"rotation": q.concat()})).unwrap();
+        let c = px(&s, 1020, 520);
+        if opaque {
+            assert!(c[0] < 0.01 && (c[1] - 1.0).abs() < 1e-3, "the old place shows the background colour: {c:?}");
+        } else {
+            assert!(c[3] < 0.01, "the old place is transparent: {c:?}");
+        }
+        assert!(px(&s, 1300, 520)[0] > 4.0, "and the square arrived");
     }
 
     #[test]

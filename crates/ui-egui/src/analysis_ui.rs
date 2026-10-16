@@ -413,7 +413,6 @@ fn handle(painter: &egui::Painter, p: Pos2) {
 /// Ruler line (while the Ruler tool is active), count markers and note icons.
 pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform) {
     let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
-    let v = &app.ui.view;
     if app.ui.tool == Tool::Ruler
         && let Some(r) = doc.measurement.ruler
     {
@@ -430,11 +429,19 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         }
         handle(painter, s);
     }
+    draw_markers(app, painter, &|x, y| Some(xf.to_screen(x as f32, y as f32)));
+}
+
+/// Count markers, notes and Color Sampler points through `to` (document px → screen; `None`
+/// hides the marker). The live projection view draws them through the sphere.
+pub fn draw_markers(app: &PhotocraftApp, painter: &egui::Painter, to: &dyn Fn(f64, f64) -> Option<Pos2>) {
+    let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
+    let v = &app.ui.view;
     if v.shows(v.show.count) {
         for g in doc.measurement.count_groups.iter().filter(|g| g.visible) {
             let c = color32(g.color.to_rgb());
             for (i, p) in g.points.iter().enumerate() {
-                let at = xf.to_screen(p[0] as f32, p[1] as f32);
+                let Some(at) = to(p[0] as f64, p[1] as f64) else { continue };
                 painter.circle_filled(at, 1.0 + g.marker_size as f32, c);
                 let font = FontId::proportional(g.label_size as f32);
                 painter.text(at + vec2(2.0 + g.marker_size as f32, -1.0), Align2::LEFT_BOTTOM, format!("{}", i + 1), font, c);
@@ -443,7 +450,7 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
     }
     if v.shows(v.show.notes) {
         for (i, n) in doc.notes.iter().enumerate() {
-            let p = xf.to_screen(n.position[0] as f32, n.position[1] as f32);
+            let Some(p) = to(n.position[0] as f64, n.position[1] as f64) else { continue };
             let r = egui::Rect::from_min_size(p, vec2(16.0, 20.0));
             let fill = color32(n.color.to_rgb());
             painter.rect_filled(r, CornerRadius::same(2), fill);
@@ -465,7 +472,7 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
     }
     // Color Sampler points (#1046): persistent numbered markers, drawn whatever the active tool is.
     for (i, p) in app.session.active().map(|d| d.color_samplers.clone()).unwrap_or_default().iter().enumerate() {
-        let at = xf.to_screen(p[0] as f32, p[1] as f32);
+        let Some(at) = to(p[0] as f64, p[1] as f64) else { continue };
         // A small target reticle, double-stroked so it reads on any pixel.
         for (w, c) in [(3.0, Color32::from_black_alpha(170)), (1.0, Color32::WHITE)] {
             painter.circle_stroke(at, 5.0, Stroke::new(w, c));

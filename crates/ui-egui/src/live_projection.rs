@@ -478,6 +478,15 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     }
     crate::live_projection_select::ants(app, &ctx, &painter, rect, ppp, cam.camera(), idx);
     app.projection_view_px = Some((idx, vp.w, vp.h));
+    // Count, Note and Color Sampler markers, through the sphere (hidden behind the camera).
+    if let Some((iw, ih)) = app.session.documents().get(idx).map(|st| (f64::from(st.doc.size.width), f64::from(st.doc.size.height))) {
+        let to = |x: f64, y: f64| -> Option<Pos2> {
+            let [vx, vy] = vp.equirect_to_view(x, y, iw, ih)?;
+            let p = rect.min + vec2(vx as f32, vy as f32) / ppp;
+            rect.expand(20.0).contains(p).then_some(p)
+        };
+        crate::analysis_ui::draw_markers(app, &painter, &to);
+    }
     crate::live_projection_path::draw(app, &ctx, &painter, rect, ppp, &vp, idx, tool);
     // Heads-up: camera readout.
     let label = format!("Live Projection   yaw {:.1}°   pitch {:.1}°   FOV {:.1}°", cam.yaw, cam.pitch, cam.fov);

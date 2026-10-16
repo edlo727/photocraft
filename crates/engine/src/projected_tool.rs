@@ -252,6 +252,27 @@ pub fn projected_tool(s: &mut Session, p: &Value) -> Result<Value> {
                 .collect()
         })
         .unwrap_or_default();
+    // Gradient and Paint Bucket cover the whole latlong, not just the view.
+    if let Some(cmd @ ("paint.gradient" | "paint.bucket")) = p.get("command").and_then(Value::as_str)
+        && !points.is_empty()
+    {
+        let params = p.get("params").cloned().unwrap_or_else(|| json!({}));
+        let q = p.get("projection").ok_or_else(|| bad("missing `projection`"))?;
+        let g = |k: &str, d: f64| q.get(k).and_then(Value::as_f64).unwrap_or(d);
+        let vp = ViewProjection::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, g("width", 1.0).max(1.0), g("height", 1.0).max(1.0));
+        let (a, b) = (points[0], points[points.len() - 1]);
+        let dmg = if cmd == "paint.gradient" {
+            crate::projected_fill::gradient(s, &params, &vp, [a[0], a[1]], [b[0], b[1]])?
+        } else {
+            let (iw, ih) = s.active().map(|d| (d.doc.size.width as f64, d.doc.size.height as f64)).ok_or(EngineError::NoDocument)?;
+            let [u, v] = vp.view_to_equirect(a[0].floor() + 0.5, a[1].floor() + 0.5, iw, ih);
+            crate::projected_fill::bucket(s, &params, ((u.floor() as i32).clamp(0, iw as i32 - 1), (v.floor() as i32).clamp(0, ih as i32 - 1)))?
+        };
+        if let Some(st) = s.active_mut() {
+            st.last_damage = Some(dmg);
+        }
+        return Ok(json!({"damage": [dmg.x0, dmg.y0, dmg.width(), dmg.height()]}));
+    }
     let mut t = ProjectedTool::new(s, p)?;
     if points.is_empty() && !matches!(t.cmd.as_str(), "paint.patch" | "paint.contentAwareMove") {
         return Err(bad("no points"));

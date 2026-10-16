@@ -135,13 +135,31 @@ pub fn paint_gradient(
     selection: Option<&Surface>,
     lock_transparency: bool,
 ) {
+    paint_gradient_by(s, area, |x, y| tool_gradient_t(shape, from, to, x as f32 + 0.5, y as f32 + 0.5), stops, reverse, opacity, blend_mode, dither, selection, lock_transparency);
+}
+
+/// [`paint_gradient`] with the gradient position `t(x, y)` (0..=1) given per pixel: the live
+/// projection's Gradient measures it on the sphere so it covers the whole latlong.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_gradient_by(
+    s: &mut Surface,
+    area: Rect,
+    t_at: impl Fn(i32, i32) -> f32 + Sync,
+    stops: &[(f32, [f32; 4])],
+    reverse: bool,
+    opacity: f32,
+    blend_mode: BlendMode,
+    dither: bool,
+    selection: Option<&Surface>,
+    lock_transparency: bool,
+) {
     composite_area(
         s,
         area,
         blend_mode,
         |x, y| opacity * selection.map_or(1.0, |m| m.sample_channel(x, y, 0)),
         |x, y| {
-            let t = tool_gradient_t(shape, from, to, x as f32 + 0.5, y as f32 + 0.5);
+            let t = t_at(x, y).clamp(0.0, 1.0);
             let mut c = sample_stops(stops, if reverse { 1.0 - t } else { t });
             if dither {
                 // One quantisation step of monochromatic noise breaks 8-bit banding without speckle.
