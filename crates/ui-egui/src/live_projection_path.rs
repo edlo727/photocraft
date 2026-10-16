@@ -113,7 +113,14 @@ pub fn draw(app: &PhotocraftApp, ctx: &egui::Context, painter: &egui::Painter, r
         }
     };
     let live = live_path(ctx, idx);
-    if let Some(st) = app.session.documents().get(idx)
+    // As on the flat canvas (vector_ui): the stored path shows only while a path/shape tool is
+    // active (or Direct Selection / the Pen with Ctrl), and View › Show › Target Path is on.
+    let path_tool = matches!(tool, Tool::Pen | Tool::FreeformPen | Tool::CurvaturePen | Tool::PathSelection)
+        || crate::vector_ui::is_shape_tool(tool)
+        || crate::direct_select::shows(app, ctx.input(|i| i.modifiers));
+    let show = live.is_some() || (path_tool && app.ui.view.shows(app.ui.view.show.target_path));
+    if show
+        && let Some(st) = app.session.documents().get(idx)
         && let Some(path) = live.as_ref().or(st.doc.work_path.as_ref())
     {
         let (iw, ih) = (f64::from(st.doc.size.width), f64::from(st.doc.size.height));
