@@ -438,6 +438,7 @@ pub fn handles(id: &str) -> bool {
             | "view.patternPreview"
             | "view.pixelArtPreview"
             | "view.equirectLiveProjection"
+            | "view.projectionBrushDocumentPixels"
             | "view.rotateView"
             | "view.resetView"
             | "window.panel.layers"
@@ -527,6 +528,9 @@ pub fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
     }
     if let Some(c) = type_checked(app, id) {
         return Some(c);
+    }
+    if id == "view.projectionBrushDocumentPixels" {
+        return Some(app.ui.tool_options.projection_brush_doc_px);
     }
     if id == crate::live_projection::COMMAND {
         return Some(app.session.active_index().is_some_and(|i| crate::live_projection::active(app, i)));
@@ -663,6 +667,11 @@ fn run(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, p: &Value) -> Res
     }
     if id == "view.resetView" {
         return crate::rotate_view::reset(app);
+    }
+    if id == "view.projectionBrushDocumentPixels" {
+        let cur = app.ui.tool_options.projection_brush_doc_px;
+        app.ui.tool_options.projection_brush_doc_px = flag_param(p, cur);
+        return Ok(json!(app.ui.tool_options.projection_brush_doc_px));
     }
     if id == crate::live_projection::COMMAND {
         let i = app.session.active_index().ok_or("no document")?;

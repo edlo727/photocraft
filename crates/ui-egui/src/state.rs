@@ -511,6 +511,9 @@ pub struct DocWindow {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolOptions {
+    /// Equirectangular Live Projection: the brush Size is in document (equirect) pixels at the
+    /// view centre rather than view pixels, so a stroke covers the same image area at any field of view.
+    pub projection_brush_doc_px: bool,
     pub tolerance: f32,
     pub contiguous: bool,
     pub anti_alias: bool,
@@ -767,6 +770,7 @@ fn default_eyedropper_sample() -> String {
 impl Default for ToolOptions {
     fn default() -> Self {
         Self {
+            projection_brush_doc_px: false,
             tolerance: 32.0,
             contiguous: true,
             anti_alias: true,

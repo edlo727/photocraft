@@ -927,3 +927,26 @@ fn reset_view_looks_straight_ahead_again_in_projection() {
     let v = h.state().ui.views[0].projection.unwrap();
     assert_eq!((v.yaw, v.pitch, v.fov), (0.0, 0.0, 90.0));
 }
+
+#[test]
+fn brush_size_in_document_pixels_scales_the_projected_brush_with_the_fov() {
+    let mut h = ed_harness(Tool::Brush);
+    let ctx = h.ctx.clone();
+    crate::menus::invoke(h.state_mut(), &ctx, "view.projectionBrushDocumentPixels", json!({})).unwrap();
+    assert!(h.state().ui.tool_options.projection_brush_doc_px);
+    let r = h.state().last_canvas_rect;
+    let ppp = h.ctx.pixels_per_point();
+    let cam = h.state().ui.views[0].projection.unwrap();
+    let vp = photocraft_engine::equirect::ViewProjection::new(cam.camera(), f64::from(r.width() * ppp), f64::from(r.height() * ppp));
+    let k = crate::live_projection::brush_scale(h.state(), &cam, &vp, 0);
+    // One equirect px of a 4096-wide latlong at FOV 90 in this view.
+    let want = std::f64::consts::TAU / 4096.0 * vp.h / 2.0;
+    assert!((f64::from(k) - want).abs() < 1e-3, "{k} vs {want}");
+    // A stroke paints and the Size option is unchanged afterwards.
+    let size = h.state().session.tools.brush.size;
+    let c = r.center();
+    drag(&mut h, c, c + vec2(60.0, 0.0), Modifiers::NONE);
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert_eq!(h.state().session.tools.brush.size, size);
+    assert!(non_finite(&h) <= 8);
+}

@@ -74,6 +74,30 @@ impl ProjectionView {
     }
 }
 
+/// View pixels per brush Size unit: 1, or with View › Projection Brush Size in Document Pixels
+/// the view pixels one equirect pixel covers at the view centre.
+pub(crate) fn brush_scale(app: &PhotocraftApp, cam: &ProjectionView, vp: &ViewProjection, idx: usize) -> f32 {
+    if !app.ui.tool_options.projection_brush_doc_px {
+        return 1.0;
+    }
+    let iw = app.session.documents().get(idx).map_or(1.0, |d| f64::from(d.doc.size.width.max(1)));
+    let half = (cam.camera().fov.to_radians() / 2.0).tan();
+    let s = std::f64::consts::TAU / iw * (vp.h / 2.0) / half;
+    if s.is_finite() && s > 0.0 { s as f32 } else { 1.0 }
+}
+
+/// Run `f` with the brush Size scaled by `k` (restored after).
+fn with_brush_scale<R>(app: &mut PhotocraftApp, k: f32, f: impl FnOnce(&mut PhotocraftApp) -> R) -> R {
+    if k == 1.0 {
+        return f(app);
+    }
+    let saved = app.session.tools.brush.size;
+    app.session.tools.brush.size = (saved * k).max(1.0);
+    let r = f(app);
+    app.session.tools.brush.size = saved;
+    r
+}
+
 /// Arrow keys look around by 2° (Shift 10°, Alt 0.5°); Home resets yaw, pitch and the field
 /// of view. The keys are consumed so they don't also nudge the layer.
 pub(crate) fn look_keys(ctx: &egui::Context, cam: &mut ProjectionView) {
@@ -231,8 +255,9 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
 
     // Painting: collect the stroke in view device pixels, commit it on release.
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
-    let size_px = app.session.tools.brush.size;
     let vp = ViewProjection::new(cam.camera(), f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
+    let brush_scale = brush_scale(app, &cam, &vp, idx);
+    let size_px = app.session.tools.brush.size * brush_scale;
     let cloning = matches!(tool, Tool::CloneStamp | Tool::Healing);
     let alt = ctx.input(|i| i.modifiers.alt);
     // Free Transform's handles take the pointer while it is up, whatever the tool.
@@ -308,7 +333,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             && let Some(p) = response.interact_pointer_pos()
         {
             let [x, y] = to_view(p);
-            app.projection_live = start(app, &cam, [x, y, pressure]);
+            app.projection_live = with_brush_scale(app, brush_scale, |app| start(app, &cam, [x, y, pressure]));
         } else if response.dragged_by(PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
             && let Some(l) = app.projection_live.as_mut().filter(|l| l.doc == idx)
@@ -324,7 +349,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             && let Some(p) = response.interact_pointer_pos()
         {
             let [x, y] = to_view(p);
-            start(app, &cam, [x, y, pressure])
+            with_brush_scale(app, brush_scale, |app| start(app, &cam, [x, y, pressure]))
         } else {
             None
         };
@@ -338,7 +363,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             l.draw(&ctx, &painter, rect, ppp);
             l.params["points"] = json!(l.points);
             let cmd = l.cmd;
-            match app.run(l.cmd, l.params) {
+            match with_brush_scale(app, brush_scale, |app| app.run(l.cmd, l.params)) {
                 Ok(v) => {
                     if cloning {
                         cam.clone_rotation = l.rotation.filter(|_| app.ui.tool_options.clone_aligned).map(|q| flat(&q));
