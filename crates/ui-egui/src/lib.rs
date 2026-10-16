@@ -156,6 +156,7 @@ pub(crate) mod pattern_fill_ui;
 pub mod live_projection;
 pub mod live_projection_select;
 pub mod live_projection_xform;
+pub mod live_projection_path;
 #[cfg(test)]
 mod live_projection_tests;
 pub mod pattern_preview;
@@ -539,6 +540,8 @@ pub struct PhotocraftApp {
     pub(crate) projection_ants: Option<live_projection_select::Ants>,
     /// A Move drag or Free Transform in the projection view.
     pub(crate) projection_xform: Option<live_projection_xform::Xform>,
+    /// The projection view last drawn: (document, width, height) in device px.
+    pub(crate) projection_view_px: Option<(usize, f64, f64)>,
     /// Brush/Eraser stroke being drawn, rendered by the engine (see `canvas::LiveStroke`).
     live_stroke: Option<canvas::LiveStroke>,
     /// A live stroke just committed with its own pixels: the canvas caches that showed it
@@ -804,6 +807,7 @@ impl PhotocraftApp {
             projection_select: None,
             projection_ants: None,
             projection_xform: None,
+            projection_view_px: None,
             live_stroke: None,
             committed_stroke: None,
             trail: None,
@@ -990,6 +994,10 @@ impl PhotocraftApp {
             return result;
         }
         if let Some(result) = mask_trash_prompt::intercept(self, id, &params) {
+            return result;
+        }
+        // Make Selection / Fill / Stroke Path in View › Equirectangular Live Projection.
+        if let Some(result) = live_projection_path::intercept_run(self, id, &params) {
             return result;
         }
         // Automation input also gates every step a command runs on its behalf (`actions.play`).

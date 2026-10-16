@@ -10,7 +10,7 @@
 
 use photocraft_doc::{Knot, Path, Subpath};
 use photocraft_geom::Point;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::equirect::{ViewProjection, equirect_to_dir};
 use crate::{EngineError, Result, Session};
@@ -92,7 +92,7 @@ pub fn view_path_to_equirect(path: &Path, proj: &ViewProjection, iw: f64, ih: f6
             }
         } else {
             let a = to_eq(proj, last, iw, ih, near);
-            let nk = sp.knots.last().copied().unwrap_or_default();
+            let nk = sp.knots.last().copied().unwrap_or_else(|| Knot::corner(last.x, last.y));
             near = Some(a.x);
             knots.push(Knot { anchor: a, in_ctrl: pending_in.unwrap_or(a), out_ctrl: to_eq(proj, nk.out_ctrl, iw, ih, near), smooth: nk.smooth });
         }
@@ -171,6 +171,7 @@ pub fn view_polylines(path: &Path, proj: &ViewProjection, iw: f64, ih: f64) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use crate::equirect::Camera;
 
     fn session() -> Session {
@@ -209,4 +210,32 @@ mod tests {
         assert!(at(350.0, 300.0) > 0.9 && at(450.0, 300.0) > 0.9, "both sides of the seam");
         assert!(at(250.0, 300.0) < 0.1 && at(550.0, 300.0) < 0.1 && at(400.0, 150.0) < 0.1, "only inside");
     }
+}
+
+/// `path` (equirect px) turned across the sphere by `q` (the Path Selection drag in projection):
+/// every anchor and handle moves as a direction, x unwrapped along each subpath.
+pub fn rotate_path(path: &Path, q: &crate::equirect::Rot, iw: f64, ih: f64) -> Path {
+    let turn = |p: Point, near: Option<f64>| -> Point {
+        let [mut u, v] = crate::equirect::dir_to_equirect(crate::equirect::rot(q, equirect_to_dir(p.x, p.y, iw, ih)), iw, ih);
+        if let Some(n) = near {
+            u += iw * ((n - u) / iw).round();
+        }
+        Point::new(u, v)
+    };
+    let mut out = path.clone();
+    for sp in &mut out.subpaths {
+        let mut near = None;
+        for k in &mut sp.knots {
+            let a = turn(k.anchor, near);
+            near = Some(a.x);
+            *k = Knot { anchor: a, in_ctrl: turn(k.in_ctrl, near), out_ctrl: turn(k.out_ctrl, near), smooth: k.smooth };
+        }
+    }
+    out
+}
+
+/// View px → equirect px with x unwrapped next to `near` (Direct Selection drags).
+pub fn view_to_equirect_near(proj: &ViewProjection, v: [f64; 2], iw: f64, ih: f64, near: f64) -> [f64; 2] {
+    let p = to_eq(proj, Point::new(v[0], v[1]), iw, ih, Some(near));
+    [p.x, p.y]
 }

@@ -124,6 +124,7 @@ pub fn supported(t: Tool) -> bool {
             | Tool::Gradient
             | Tool::PaintBucket
     ) || crate::live_projection_select::supported(t)
+        || crate::live_projection_path::supported(t)
 }
 
 /// Whether document `idx`'s view shows the projection.
@@ -359,6 +360,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             painter.circle_stroke(h, (size_px / ppp / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
+    } else if crate::live_projection_path::supported(tool) && !looking {
+        crate::live_projection_path::tool(app, &ctx, &response, rect, ppp, &cam, &vp, idx, tool);
     } else if tool == Tool::Move && !looking {
         crate::live_projection_xform::move_tool(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx);
     } else if matches!(tool, Tool::Patch | Tool::ContentAwareMove) && !looking {
@@ -417,6 +420,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         }
     }
     crate::live_projection_select::ants(app, &ctx, &painter, rect, ppp, cam.camera(), idx);
+    app.projection_view_px = Some((idx, vp.w, vp.h));
+    crate::live_projection_path::draw(app, &ctx, &painter, rect, ppp, &vp, idx, tool);
     // Heads-up: camera readout.
     let label = format!("Live Projection   yaw {:.1}°   pitch {:.1}°   FOV {:.1}°", cam.yaw, cam.pitch, cam.fov);
     let at = rect.left_bottom() + vec2(8.0, -8.0);
