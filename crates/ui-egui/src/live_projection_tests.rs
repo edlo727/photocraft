@@ -24,7 +24,7 @@ fn harness(tool: Tool) -> Harness<'static, PhotocraftApp> {
 
 #[test]
 fn enabling_with_an_unsupported_tool_picks_the_hand() {
-    let h = harness(Tool::Move);
+    let h = harness(Tool::Crop);
     assert_eq!(h.state().ui.tool, Tool::Hand);
     let h = harness(Tool::Brush);
     assert_eq!(h.state().ui.tool, Tool::Brush, "a supported tool stays");
