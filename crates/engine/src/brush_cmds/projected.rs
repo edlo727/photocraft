@@ -97,8 +97,48 @@ pub(crate) fn to_view(target: &Surface, proj: &ViewProjection, r: Rect, iw: i32,
 /// equirect `selection` coverage when there is one. Returns the equirect damage.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surface, post: &Surface, damage: Rect, iw: i32, ih: i32, selection: Option<&Surface>) -> Rect {
+    if damage.is_empty() {
+        return Rect::EMPTY;
+    }
     let n = target.channels();
-    let (pre_b, post_b) = (pre.read_region(damage), post.read_region(damage));
+    // The change once, in view space (bilinear is linear: sampling post − pre is sampling post
+    // minus sampling pre); non-finite differences (inf/NaN pixels) change nothing.
+    let mut diff = post.read_region(damage);
+    for (d, p) in diff.iter_mut().zip(pre.read_region(damage)) {
+        *d -= p;
+        if !d.is_finite() {
+            *d = 0.0;
+        }
+    }
+    // Which 8 × 8 view blocks changed at all: most of a long stroke's bounding box didn't.
+    const B: i64 = 8;
+    let (dw, dh) = (i64::from(damage.width()), i64::from(damage.height()));
+    let (bw, bh) = ((dw + B - 1) / B, (dh + B - 1) / B);
+    let mut blocks = vec![false; (bw * bh).max(0) as usize];
+    for (i, px) in diff.chunks(n).enumerate() {
+        if px.iter().any(|v| *v != 0.0) {
+            let (x, y) = (i as i64 % dw, i as i64 / dw);
+            blocks[((y / B) * bw + x / B) as usize] = true;
+        }
+    }
+    // A sample reads the 2 × 2 taps around it: grow the marks by one block.
+    let marked = blocks.clone();
+    for by in 0..bh {
+        for bx in 0..bw {
+            if marked[(by * bw + bx) as usize] {
+                for (ox, oy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                    let (x, y) = (bx + ox, by + oy);
+                    if x >= 0 && y >= 0 && x < bw && y < bh {
+                        blocks[(y * bw + x) as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+    let changed = |vx: f64, vy: f64| {
+        let (x, y) = ((vx.floor() as i64 - i64::from(damage.x0)).clamp(0, dw - 1), (vy.floor() as i64 - i64::from(damage.y0)).clamp(0, dh - 1));
+        blocks[((y / B) * bw + x / B) as usize]
+    };
     let alpha = target.format().alpha.then(|| n - 1);
     let r = [f64::from(damage.x0), f64::from(damage.y0), f64::from(damage.x1), f64::from(damage.y1)];
     let mut total = Rect::EMPTY;
@@ -108,6 +148,7 @@ pub(crate) fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surf
             continue;
         }
         let mut buf = target.read_region(rect);
+        let sel_buf = selection.map(|m| (m.read_region(rect), m.channels()));
         // Rows in parallel: a stroke near a pole touches the full image width.
         use rayon::prelude::*;
         let row = rect.width() as usize * n;
@@ -116,28 +157,23 @@ pub(crate) fn write_back(target: &mut Surface, proj: &ViewProjection, pre: &Surf
             .enumerate()
             .map(|(j, line)| {
                 let y = rect.y0 + j as i32;
-                let (mut a, mut b) = (vec![0f32; n], vec![0f32; n]);
+                let mut b = vec![0f32; n];
                 let mut touched = false;
-                let mut m = vec![0f32; selection.map_or(1, Surface::channels)];
                 for (i, x) in (rect.x0..rect.x1).enumerate() {
                     let Some([vx, vy]) = proj.equirect_to_view(f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(iw), f64::from(ih)) else { continue };
-                    if !(vx >= r[0] && vx < r[2] && vy >= r[1] && vy < r[3]) {
+                    if !(vx >= r[0] && vx < r[2] && vy >= r[1] && vy < r[3]) || !changed(vx, vy) {
                         continue;
                     }
-                    let k = match selection {
-                        Some(sel) => {
-                            sel.read_pixel(x, y, &mut m);
-                            m[0].clamp(0.0, 1.0)
-                        }
+                    let k = match &sel_buf {
+                        Some((m, mn)) => m[(j * rect.width() as usize + i) * mn].clamp(0.0, 1.0),
                         None => 1.0,
                     };
                     if k <= 0.0 {
                         continue;
                     }
-                    sample_buf(&pre_b, damage, n, vx, vy, &mut a);
-                    sample_buf(&post_b, damage, n, vx, vy, &mut b);
+                    sample_buf(&diff, damage, n, vx, vy, &mut b);
                     for c in 0..n {
-                        let d = (b[c] - a[c]) * k;
+                        let d = b[c] * k;
                         if d != 0.0 && d.is_finite() {
                             touched = true;
                             let v = line[i * n + c] + d;
