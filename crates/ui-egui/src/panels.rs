@@ -1951,6 +1951,7 @@ fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let vr = Rect::from_center_size(c, vec2(vw, vh)).intersect(frame.shrink(1.0));
         ui.painter().rect_stroke(vr, 2.0, Stroke::new(1.5, Color32::from_rgb(255, 84, 84)), StrokeKind::Middle);
     }
+    let v = app.ui.views[idx].clone();
     // Photoshop's one row under the preview (#4840): the zoom, typed in percent, then Zoom Out,
     // the slider and Zoom In.
     let controls = ui.vertical(|ui| {
