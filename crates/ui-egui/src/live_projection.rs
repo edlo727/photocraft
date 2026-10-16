@@ -300,7 +300,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
                     None
                 };
                 return match photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
-                    Ok(t) => Some(Live { doc: idx, cmd: "paint.projectedTool", params: p, rotation: q, points: vec![first], preview: LivePreview::Tool(Box::new(t)), texture: None, shown: None, rendered: 0, last: 0.0 }),
+                    Ok(t) => Some(Live { doc: idx, cmd: "paint.projectedTool", params: p, rotation: q, points: vec![first], preview: LivePreview::Tool(Box::new(t)), texture: None, shown: None, rendered: 0, last: 0.0, cost: 0.0 }),
                     Err(e) => {
                         app.ui.status = e.to_string();
                         app.ui.status_error = true;
@@ -321,7 +321,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             }
             .map(LivePreview::Stroke);
             match preview {
-                Ok(preview) => Some(Live { doc: idx, cmd, params: p, rotation: q, points: vec![first], preview, texture: None, shown: None, rendered: 0, last: 0.0 }),
+                Ok(preview) => Some(Live { doc: idx, cmd, params: p, rotation: q, points: vec![first], preview, texture: None, shown: None, rendered: 0, last: 0.0, cost: 0.0 }),
                 Err(e) => {
                     app.ui.status = e.to_string();
                     app.ui.status_error = true;
@@ -496,6 +496,8 @@ pub struct Live {
     preview: LivePreview,
     /// When the preview last rendered (the flat tools re-run at most every 50 ms).
     last: f64,
+    /// Seconds the last preview render took (the adaptive throttle).
+    cost: f64,
     texture: Option<egui::TextureHandle>,
     /// The overlay's view rect (device px) when it was uploaded.
     shown: Option<photocraft_geom::Rect>,
@@ -512,14 +514,20 @@ impl Live {
     /// Render new points with the real brush engine and draw the overlay over the view.
     fn draw(&mut self, ctx: &egui::Context, painter: &egui::Painter, rect: Rect, ppp: f32) {
         let now = ctx.input(|i| i.time);
-        let throttled = matches!(self.preview, LivePreview::Tool(_)) && now - self.last < 0.05;
+        // Each render redraws the whole stroke so far: on a long stroke wait about as long as
+        // the last render took (at least a frame, 50 ms for the retouch tools), so the preview
+        // never eats every frame and the pointer stays smooth.
+        let floor = if matches!(self.preview, LivePreview::Tool(_)) { 0.05 } else { 0.0 };
+        let throttled = now - self.last < floor.max(self.cost * 1.5);
         if self.rendered != self.points.len() && !throttled {
             self.rendered = self.points.len();
             self.last = now;
+            let t0 = crate::gpu_canvas::now_ms();
             let o = match &mut self.preview {
                 LivePreview::Stroke(p) => p.render(&self.points),
                 LivePreview::Tool(t) => t.preview(&self.points),
             };
+            self.cost = (crate::gpu_canvas::now_ms() - t0) / 1000.0;
             if let Some(o) = o {
                 let size = [o.rect.width() as usize, o.rect.height() as usize];
                 let img = egui::ColorImage::from_rgba_unmultiplied(size, bytemuck_flat(&o.px));
@@ -678,7 +686,7 @@ fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
                 match photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
                     Ok(tool) => {
                         let texture = app.projection_live.take().and_then(|l| l.texture);
-                        let mut l = Live { doc: idx, cmd: "paint.projectedTool", params: p, rotation: None, points: vec![[now[0], now[1], 1.0]], preview: LivePreview::Tool(Box::new(tool)), texture, shown: None, rendered: 0, last: 0.0 };
+                        let mut l = Live { doc: idx, cmd: "paint.projectedTool", params: p, rotation: None, points: vec![[now[0], now[1], 1.0]], preview: LivePreview::Tool(Box::new(tool)), texture, shown: None, rendered: 0, last: 0.0, cost: 0.0 };
                         // Patch takes no points: render once now.
                         l.draw(ctx, painter, rect, ppp);
                         l.last = t;
@@ -728,7 +736,7 @@ fn fill_tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Resp
     {
         let [x, y] = to_view(at);
         app.projection_live = match photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
-            Ok(t) => Some(Live { doc: idx, cmd: "paint.projectedTool", params: p.clone(), rotation: None, points: vec![[x, y, 1.0]], preview: LivePreview::Tool(Box::new(t)), texture: None, shown: None, rendered: 0, last: 0.0 }),
+            Ok(t) => Some(Live { doc: idx, cmd: "paint.projectedTool", params: p.clone(), rotation: None, points: vec![[x, y, 1.0]], preview: LivePreview::Tool(Box::new(t)), texture: None, shown: None, rendered: 0, last: 0.0, cost: 0.0 }),
             Err(e) => {
                 app.ui.status = e.to_string();
                 app.ui.status_error = true;
