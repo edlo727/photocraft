@@ -112,6 +112,26 @@ fn transpose(q: &Rot) -> Rot {
 }
 
 /// `layer.projectedRotate` — see the module docs.
+/// Pixel-centre directions of an equirect grid from per-column and per-row sines and cosines:
+/// the same values as `equirect_to_dir`, without two of its four trig calls per pixel.
+struct Trig {
+    lon: Vec<(f64, f64)>,
+    lat: Vec<(f64, f64)>,
+}
+
+impl Trig {
+    fn new(iw: i32, ih: i32) -> Self {
+        let (fw, fh) = (f64::from(iw), f64::from(ih));
+        let lon = (0..iw).map(|x| ((f64::from(x) + 0.5) / fw - 0.5) * std::f64::consts::TAU).map(f64::sin_cos).collect();
+        let lat = (0..ih).map(|y| ((0.5 - (f64::from(y) + 0.5) / fh) * std::f64::consts::PI).clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2)).map(f64::sin_cos).collect();
+        Trig { lon, lat }
+    }
+    fn dir(&self, x: i32, y: i32) -> [f64; 3] {
+        let ((so, co), (sl, cl)) = (self.lon[x as usize], self.lat[y as usize]);
+        [cl * so, sl, cl * co]
+    }
+}
+
 /// The pixels a move can change: a set of columns over rows `y0..y1`.
 struct MoveRegion {
     cols: Vec<bool>,
@@ -230,6 +250,7 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
         let src = Band::read(surf, iw, sy0, sy1);
         let sb = sel.as_ref().map(|m| Band::read(m, iw, sy0, sy1));
         let cols: Vec<i32> = (0..iw).filter(|&x| region.cols[x as usize]).collect();
+        let trig = Trig::new(iw, ih);
         // Rows in bands: one full output copy of a 20k F32 latlong is 3 GB.
         let band = 256;
         let mut y0 = region.y0;
@@ -242,7 +263,7 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
                 let (mut c, mut m) = (vec![0f32; n], [0f32; 4]);
                 for &x in &cols {
                     let px = &mut line[x as usize * n..(x as usize + 1) * n];
-                    let [u, v] = dir_to_equirect(rot(&inv, equirect_to_dir(f64::from(x) + 0.5, f64::from(y) + 0.5, fw, fh)), fw, fh);
+                    let [u, v] = dir_to_equirect(rot(&inv, trig.dir(x, y)), fw, fh);
                     match &sb {
                         Some(sb) => {
                             // What stays: the unselected part here; on top, the selected part from there.
@@ -276,7 +297,7 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
                 let y = region.y0 + j as i32;
                 let mut v4 = [0f32; 4];
                 for &x in &cols {
-                    let [u, v] = dir_to_equirect(rot(&inv, equirect_to_dir(f64::from(x) + 0.5, f64::from(y) + 0.5, fw, fh)), fw, fh);
+                    let [u, v] = dir_to_equirect(rot(&inv, trig.dir(x, y)), fw, fh);
                     v4[0] = 0.0;
                     if v + 1.0 >= f64::from(sy0) && v - 1.0 <= f64::from(sy1) {
                         sb.sample(u, v, &mut v4);
@@ -918,6 +939,16 @@ mod move_region_tests {
         let st = s.active().unwrap();
         let surf = st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap();
         (surf.read_region(Rect::new(0, 0, 1024, 512)), st.doc.selection.as_ref().unwrap().read_region(Rect::new(0, 0, 1024, 512)))
+    }
+
+    #[test]
+    fn trig_tables_match_equirect_to_dir() {
+        let t = Trig::new(1000, 500);
+        for (x, y) in [(0, 0), (999, 499), (517, 233), (250, 1)] {
+            let a = t.dir(x, y);
+            let b = equirect_to_dir(f64::from(x) + 0.5, f64::from(y) + 0.5, 1000.0, 500.0);
+            assert!((0..3).all(|i| (a[i] - b[i]).abs() < 1e-12), "{a:?} {b:?}");
+        }
     }
 
     #[test]
