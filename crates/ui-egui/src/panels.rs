@@ -1916,38 +1916,41 @@ fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.painter().image(tex, rect, Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
     }
     let s = rect.width() / size.width.max(1) as f32;
-    if (resp.clicked() || resp.dragged())
-        && let Some(pp) = resp.interact_pointer_pos()
-    {
-        let d = (pp - rect.min) / s;
-        app.ui.views[idx].center = [d.x.clamp(0.0, size.width as f32), d.y.clamp(0.0, size.height as f32)];
-        app.ui.views[idx].fit_pending = false;
-    }
-    // The Navigator has its own zoom target: an unmodified wheel over the preview
-    // should zoom even when the document canvas is configured to scroll on wheel.
-    // Use the canvas wheel classifier to honour one ×1.1 step per notch without
-    // applying egui's smoothed wheel tail a second time.
-    let pinch_zooms = app.session.prefs().enhanced_controls.zoom_with_trackpad_pinch;
-    if resp.hovered()
-        && let Some(crate::wheel_nav::Wheel::Zoom(factor)) = crate::wheel_nav::read(&ctx, true, pinch_zooms, egui::Id::new("pc-navigator-wheel"), true)
-    {
-        let view = &mut app.ui.views[idx];
-        let next = crate::zoom_levels::clamp(view.zoom * factor, view.doc_size);
-        if next != view.zoom {
-            view.zoom = next;
-            view.fit_pending = false;
+    // Live projection: the view's frustum on the latlong; a click looks there.
+    if !crate::live_projection_misc::navigator(app, ui, &ctx, &resp, idx, rect) {
+        if (resp.clicked() || resp.dragged())
+            && let Some(pp) = resp.interact_pointer_pos()
+        {
+            let d = (pp - rect.min) / s;
+            app.ui.views[idx].center = [d.x.clamp(0.0, size.width as f32), d.y.clamp(0.0, size.height as f32)];
+            app.ui.views[idx].fit_pending = false;
         }
+        // The Navigator has its own zoom target: an unmodified wheel over the preview
+        // should zoom even when the document canvas is configured to scroll on wheel.
+        // Use the canvas wheel classifier to honour one ×1.1 step per notch without
+        // applying egui's smoothed wheel tail a second time.
+        let pinch_zooms = app.session.prefs().enhanced_controls.zoom_with_trackpad_pinch;
+        if resp.hovered()
+            && let Some(crate::wheel_nav::Wheel::Zoom(factor)) = crate::wheel_nav::read(&ctx, true, pinch_zooms, egui::Id::new("pc-navigator-wheel"), true)
+        {
+            let view = &mut app.ui.views[idx];
+            let next = crate::zoom_levels::clamp(view.zoom * factor, view.doc_size);
+            if next != view.zoom {
+                view.zoom = next;
+                view.fit_pending = false;
+            }
+        }
+        // Visible-area rectangle.
+        let v = app.ui.views[idx].clone();
+        let canvas = app.last_canvas_rect;
+        let point_zoom = (v.zoom / app.canvas_ppp()).max(1e-6);
+        // Pixel aspect correction shows fewer document columns across the same canvas width.
+        let vw = canvas.width() / point_zoom / app.ui.view.display_aspect() * s;
+        let vh = canvas.height() / point_zoom * s;
+        let c = pos2(rect.min.x + v.center[0] * s, rect.min.y + v.center[1] * s);
+        let vr = Rect::from_center_size(c, vec2(vw, vh)).intersect(frame.shrink(1.0));
+        ui.painter().rect_stroke(vr, 2.0, Stroke::new(1.5, Color32::from_rgb(255, 84, 84)), StrokeKind::Middle);
     }
-    // Visible-area rectangle.
-    let v = app.ui.views[idx].clone();
-    let canvas = app.last_canvas_rect;
-    let point_zoom = (v.zoom / app.canvas_ppp()).max(1e-6);
-    // Pixel aspect correction shows fewer document columns across the same canvas width.
-    let vw = canvas.width() / point_zoom / app.ui.view.display_aspect() * s;
-    let vh = canvas.height() / point_zoom * s;
-    let c = pos2(rect.min.x + v.center[0] * s, rect.min.y + v.center[1] * s);
-    let vr = Rect::from_center_size(c, vec2(vw, vh)).intersect(frame.shrink(1.0));
-    ui.painter().rect_stroke(vr, 2.0, Stroke::new(1.5, Color32::from_rgb(255, 84, 84)), StrokeKind::Middle);
     // Photoshop's one row under the preview (#4840): the zoom, typed in percent, then Zoom Out,
     // the slider and Zoom In.
     let controls = ui.vertical(|ui| {

@@ -950,3 +950,18 @@ fn brush_size_in_document_pixels_scales_the_projected_brush_with_the_fov() {
     assert_eq!(h.state().session.tools.brush.size, size);
     assert!(non_finite(&h) <= 8);
 }
+
+#[test]
+fn navigator_frustum_outlines_the_view_and_splits_at_the_seam() {
+    let mut h = ed_harness(Tool::Hand);
+    let nav = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(400.0, 200.0));
+    let lines = crate::live_projection_misc::frustum(h.state(), 0, nav);
+    assert_eq!(lines.len(), 1, "one closed outline facing forward");
+    let xs: Vec<f32> = lines[0].iter().map(|p| p.x).collect();
+    let (lo, hi) = (xs.iter().copied().fold(f32::MAX, f32::min), xs.iter().copied().fold(f32::MIN, f32::max));
+    assert!(lo < 200.0 && hi > 200.0 && hi - lo > 60.0 && hi - lo < 200.0, "{lo}..{hi}");
+    // Looking back across the ±180° seam: the outline is split in two.
+    h.state_mut().ui.views[0].projection.as_mut().unwrap().yaw = 180.0;
+    let lines = crate::live_projection_misc::frustum(h.state(), 0, nav);
+    assert!(lines.len() >= 2, "{}", lines.len());
+}

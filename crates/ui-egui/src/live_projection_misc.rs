@@ -114,3 +114,74 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
         }
     }
 }
+
+/// The view's outline (its four edges through the projection) on the Navigator's latlong
+/// `rect`, as polylines split where they cross the seam.
+pub(crate) fn frustum(app: &PhotocraftApp, idx: usize, rect: Rect) -> Vec<Vec<Pos2>> {
+    let Some(cam) = app.ui.views.get(idx).and_then(|v| v.projection) else { return Vec::new() };
+    let c = app.last_canvas_rect;
+    let ppp = app.canvas_ppp();
+    let vp = ViewProjection::new(cam.camera(), f64::from(c.width() * ppp), f64::from(c.height() * ppp));
+    let (w, h) = doc_size(app, idx);
+    let n = 64;
+    let mut border = Vec::with_capacity(4 * n + 1);
+    for i in 0..n {
+        let t = i as f64 / n as f64;
+        border.push([vp.w * t, 0.0]);
+    }
+    for i in 0..n {
+        let t = i as f64 / n as f64;
+        border.push([vp.w, vp.h * t]);
+    }
+    for i in 0..n {
+        let t = i as f64 / n as f64;
+        border.push([vp.w * (1.0 - t), vp.h]);
+    }
+    for i in 0..=n {
+        let t = i as f64 / n as f64;
+        border.push([0.0, vp.h * (1.0 - t)]);
+    }
+    let (sx, sy) = (rect.width() / w as f32, rect.height() / h as f32);
+    let mut lines: Vec<Vec<Pos2>> = vec![Vec::new()];
+    let mut last: Option<f64> = None;
+    for [x, y] in border {
+        let [u, v] = vp.view_to_equirect(x, y, w, h);
+        if last.is_some_and(|l| (u - l).abs() > w / 2.0) {
+            lines.push(Vec::new());
+        }
+        last = Some(u);
+        lines.last_mut().unwrap().push(rect.min + vec2(u as f32 * sx, v as f32 * sy));
+    }
+    lines.retain(|l| l.len() > 1);
+    lines
+}
+
+/// The Navigator in live projection: draws the frustum; a click or drag turns the view to look
+/// at that point and the wheel changes the field of view. Returns false when the view is flat.
+pub(crate) fn navigator(app: &mut PhotocraftApp, ui: &egui::Ui, ctx: &egui::Context, resp: &egui::Response, idx: usize, rect: Rect) -> bool {
+    if !crate::live_projection::active(app, idx) {
+        return false;
+    }
+    if (resp.clicked() || resp.dragged())
+        && let Some(pp) = resp.interact_pointer_pos()
+        && let Some(cam) = app.ui.views[idx].projection.as_mut()
+    {
+        let (fx, fy) = ((pp.x - rect.min.x) / rect.width().max(1.0), (pp.y - rect.min.y) / rect.height().max(1.0));
+        cam.yaw = (fx.clamp(0.0, 1.0) - 0.5) * 360.0;
+        cam.pitch = (0.5 - fy.clamp(0.0, 1.0)) * 180.0;
+        cam.clamp();
+    }
+    if resp.hovered() {
+        let dy = ctx.input(|i| i.smooth_scroll_delta.y);
+        if dy != 0.0
+            && let Some(cam) = app.ui.views[idx].projection.as_mut()
+        {
+            cam.scale_fov((-dy * 0.002).exp());
+        }
+    }
+    let red = Stroke::new(1.5, Color32::from_rgb(255, 84, 84));
+    for l in frustum(app, idx, rect) {
+        ui.painter().add(egui::Shape::line(l, red));
+    }
+    true
+}
