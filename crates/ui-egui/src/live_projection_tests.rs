@@ -914,3 +914,16 @@ fn arrow_keys_look_around_and_home_resets_the_view_in_projection() {
     let v3 = h.state().ui.views[0].projection.unwrap();
     assert_eq!((v3.yaw, v3.pitch, v3.fov), (0.0, 0.0, 90.0));
 }
+
+#[test]
+fn reset_view_looks_straight_ahead_again_in_projection() {
+    let mut h = ed_harness(Tool::Hand);
+    let c = h.state().last_canvas_rect.center();
+    drag(&mut h, c, c + vec2(120.0, 60.0), Modifiers::NONE);
+    assert_ne!(h.state().ui.views[0].projection.unwrap().yaw, 0.0);
+    let ctx = h.ctx.clone();
+    crate::menus::invoke(h.state_mut(), &ctx, "view.resetView", json!({})).unwrap();
+    h.run_steps(2);
+    let v = h.state().ui.views[0].projection.unwrap();
+    assert_eq!((v.yaw, v.pitch, v.fov), (0.0, 0.0, 90.0));
+}

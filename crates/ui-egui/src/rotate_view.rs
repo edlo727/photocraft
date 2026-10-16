@@ -170,6 +170,11 @@ pub fn reset(app: &mut PhotocraftApp) -> Result<Value, String> {
     let i = app.session.active_index().ok_or("no document open")?;
     let v = app.ui.views.get_mut(i).ok_or("no document open")?;
     v.rotation = 0.0;
+    // Equirectangular Live Projection: back to looking straight ahead at the default field of view.
+    if let Some(cam) = v.projection.as_mut() {
+        let d = crate::live_projection::ProjectionView::default();
+        (cam.yaw, cam.pitch, cam.fov) = (d.yaw, d.pitch, d.fov);
+    }
     Ok(json!({"rotation": 0.0, "zoom": v.zoom, "center": v.center}))
 }
 
