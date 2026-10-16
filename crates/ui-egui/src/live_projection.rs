@@ -121,6 +121,8 @@ pub fn supported(t: Tool) -> bool {
             | Tool::Hand
             | Tool::Zoom
             | Tool::Move
+            | Tool::Gradient
+            | Tool::PaintBucket
     ) || crate::live_projection_select::supported(t)
 }
 
@@ -361,6 +363,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         crate::live_projection_xform::move_tool(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx);
     } else if matches!(tool, Tool::Patch | Tool::ContentAwareMove) && !looking {
         patch(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx, tool);
+    } else if matches!(tool, Tool::Gradient | Tool::PaintBucket) && !looking {
+        fill_tool(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx, tool);
     } else if tool == Tool::RedEye && !looking {
         if response.hovered() {
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -630,6 +634,75 @@ fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
                 l.draw(ctx, painter, rect, ppp);
             }
             ctx.request_repaint();
+        }
+    }
+}
+
+/// Gradient (drag, with a live preview) and Paint Bucket (click) in the view: the flat tools
+/// on the resampled view through `paint.projectedTool`, with the options bar's settings.
+#[allow(clippy::too_many_arguments)]
+fn fill_tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: &ProjectionView, vp: &ViewProjection, idx: usize, tool: Tool) {
+    let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
+    if response.hovered() {
+        ctx.set_cursor_icon(if tool == Tool::PaintBucket { crate::canvas::paint_bucket_cursor(ctx, response.hover_pos().unwrap_or_default()) } else { egui::CursorIcon::Crosshair });
+    }
+    let o = app.ui.tool_options.clone();
+    let target = crate::canvas::paint_target(app);
+    if tool == Tool::PaintBucket {
+        if response.clicked()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let [x, y] = to_view(p);
+            let contents = if o.bucket_fill_pattern { "pattern" } else { "foreground" };
+            let fp = json!({"tolerance": o.tolerance, "contiguous": o.contiguous, "antiAlias": o.anti_alias, "sampleAllLayers": o.sample_all_layers, "opacity": o.fill_opacity, "contents": contents, "target": target});
+            if let Err(e) = app.run("paint.projectedTool", json!({"command": "paint.bucket", "params": fp, "points": [[x, y, 1.0]], "projection": view_json(cam, vp)})) {
+                app.ui.status = e;
+                app.ui.status_error = true;
+            }
+        }
+        return;
+    }
+    let fp = json!({"style": o.gradient_style, "reverse": o.gradient_reverse, "dither": o.gradient_dither, "opacity": o.fill_opacity, "mode": o.gradient_blend_mode.label(), "target": target});
+    let p = json!({"command": "paint.gradient", "params": fp, "projection": view_json(cam, vp)});
+    if response.drag_started_by(PointerButton::Primary)
+        && let Some(at) = ctx.input(|i| i.pointer.press_origin())
+    {
+        let [x, y] = to_view(at);
+        app.projection_live = match photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
+            Ok(t) => Some(Live { doc: idx, cmd: "paint.projectedTool", params: p.clone(), rotation: None, points: vec![[x, y, 1.0]], preview: LivePreview::Tool(Box::new(t)), texture: None, shown: None, rendered: 0, last: 0.0 }),
+            Err(e) => {
+                app.ui.status = e.to_string();
+                app.ui.status_error = true;
+                None
+            }
+        };
+    }
+    let Some(l) = app.projection_live.as_mut().filter(|l| l.doc == idx && l.params["command"] == "paint.gradient") else { return };
+    if let Some(at) = response.interact_pointer_pos() {
+        let [x, y] = to_view(at);
+        if l.points.len() < 2 {
+            l.points.push([x, y, 1.0]);
+        } else if l.points[1][0] != x || l.points[1][1] != y {
+            l.points[1] = [x, y, 1.0];
+            // A new end point: render again.
+            l.rendered = 0;
+        }
+    }
+    if l.points.len() == 2 {
+        l.draw(ctx, painter, rect, ppp);
+        let s = |q: [f64; 3]| rect.min + vec2(q[0] as f32, q[1] as f32) / ppp;
+        painter.line_segment([s(l.points[0]), s(l.points[1])], Stroke::new(3.0, Color32::from_black_alpha(140)));
+        painter.line_segment([s(l.points[0]), s(l.points[1])], Stroke::new(1.0, Color32::WHITE));
+    }
+    ctx.request_repaint();
+    if response.drag_stopped() {
+        let Some(mut l) = app.projection_live.take() else { return };
+        if l.points.len() == 2 && (l.points[0][0] - l.points[1][0]).abs() + (l.points[0][1] - l.points[1][1]).abs() >= 2.0 {
+            l.params["points"] = json!(l.points);
+            if let Err(e) = app.run(l.cmd, l.params) {
+                app.ui.status = e;
+                app.ui.status_error = true;
+            }
         }
     }
 }

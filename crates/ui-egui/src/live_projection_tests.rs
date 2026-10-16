@@ -728,3 +728,37 @@ fn ed_flow_paste_places_the_clipboard_upright_in_the_middle_of_the_view() {
     let off = active_px(&h, doc_of_screen(&h, h.state().last_canvas_rect.center() + vec2(200.0, 0.0)));
     assert!(off[3] < 0.01, "only there: {off:?}");
 }
+
+#[test]
+fn ed_flow_gradient_and_paint_bucket_fill_in_the_view() {
+    let mut h = ed_harness(Tool::Gradient);
+    h.state_mut().run("tools.setColors", json!({"foreground": "#ff0000", "background": "#0000ff"})).unwrap();
+    let c = h.state().last_canvas_rect.center();
+    let (a, b) = (c - vec2(200.0, 0.0), c + vec2(200.0, 0.0));
+    h.event(Event::PointerMoved(a));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    let mut previewed = false;
+    for i in 1..=8 {
+        h.event(Event::PointerMoved(a + (b - a) * (i as f32 / 8.0)));
+        h.run_steps(4);
+        previewed |= h.state().projection_live.as_ref().is_some_and(|l| l.has_preview());
+    }
+    h.event(Event::PointerButton { pos: b, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(previewed, "the gradient previews while dragging");
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("paint.projectedTool"));
+    let (l, r) = (active_px(&h, doc_of_screen(&h, a + vec2(10.0, 0.0))), active_px(&h, doc_of_screen(&h, b - vec2(10.0, 0.0))));
+    assert!(l[0] > 0.7 && r[2] > 0.7, "foreground to background across the view: {l:?} {r:?}");
+    assert!(non_finite(&h) <= 8);
+    h.state_mut().ui.tool = Tool::PaintBucket;
+    h.state_mut().ui.tool_options.tolerance = 255.0 as _;
+    h.run_steps(2);
+    click(&mut h, c, PointerButton::Primary);
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("paint.projectedTool"));
+    let f = active_px(&h, doc_of_screen(&h, c));
+    assert!(f[0] > 0.9 && f[2] < 0.05, "the bucket filled with the foreground: {f:?}");
+}

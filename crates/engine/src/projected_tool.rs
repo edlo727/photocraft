@@ -46,6 +46,8 @@ fn label_of(cmd: &str) -> Option<&'static str> {
         "paint.remove" => "Remove",
         "paint.contentAwareMove" => "Content-Aware Move",
         "paint.redEye" => "Red Eye",
+        "paint.gradient" => "Gradient",
+        "paint.bucket" => "Paint Bucket",
         _ => return None,
     })
 }
@@ -144,6 +146,8 @@ impl ProjectedTool {
         doc.size.height = view.y1 as u32;
         let mut temp = Session::new();
         temp.tools = s.tools.clone();
+        // The current gradient, patterns and other presets the tools read.
+        temp.presets = s.presets.clone();
         let i = temp.add_document(doc, None);
         temp.set_active(i);
         if let Some(d) = temp.active_mut() {
@@ -174,7 +178,13 @@ impl ProjectedTool {
         match self.cmd.as_str() {
             // Selection-driven: the selection (and the offset in the params) say where.
             "paint.patch" | "paint.contentAwareMove" => {}
-            "paint.redEye" => {
+            // Drawn in the view: from the first point to the last.
+            "paint.gradient" => {
+                let (a, b) = (points.first().copied().unwrap_or_default(), points.last().copied().unwrap_or_default());
+                p["from"] = json!([a[0], a[1]]);
+                p["to"] = json!([b[0], b[1]]);
+            }
+            "paint.redEye" | "paint.bucket" => {
                 let [x, y, _] = points.first().copied().unwrap_or_default();
                 p["x"] = json!(x.floor());
                 p["y"] = json!(y.floor());
@@ -394,6 +404,35 @@ mod tests {
     }
 
 
+}
+
+#[cfg(test)]
+mod fills {
+    use super::*;
+
+    #[test]
+    fn gradient_and_bucket_run_in_the_view_on_f32() {
+        let mut s = crate::projected_tool::realistic::hdr_session();
+        let view = json!({"yaw": 0.0, "pitch": 0.0, "fov": 70.0, "width": 800, "height": 600});
+        let vp = ViewProjection::new(Camera { yaw: 0.0, pitch: 0.0, fov: 70.0 }, 800.0, 600.0);
+        s.execute("tools.setColors", json!({"foreground": "#ff0000", "background": "#0000ff"})).unwrap();
+        let p = json!({"command": "paint.gradient", "params": {"target": "pixels", "colors": ["#ff0000", "#0000ff"]}, "projection": view, "points": [[100, 300, 1.0], [700, 300, 1.0]]});
+        let mut t = ProjectedTool::new(&s, &p).unwrap();
+        assert!(t.preview(&[[100.0, 300.0, 1.0], [700.0, 300.0, 1.0]]).is_some(), "a live preview");
+        s.execute(CMD, p).unwrap();
+        let px = |s: &Session, vx: f64| {
+            let [u, v] = vp.view_to_equirect(vx, 300.0, 4096.0, 2048.0);
+            let d = s.active().unwrap();
+            d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().rgba(u as i32, v as i32)
+        };
+        let (l, r) = (px(&s, 120.0), px(&s, 680.0));
+        assert!(l[0] > 0.8 && l[2] < 0.1 && r[2] > 0.8 && r[0] < 0.1, "red to blue across the view: {l:?} {r:?}");
+        // The bucket fills in the view.
+        let p = json!({"command": "paint.bucket", "params": {"target": "pixels", "tolerance": 255, "contiguous": true, "contents": "foreground"}, "projection": view, "points": [[400, 300, 1.0]]});
+        s.execute(CMD, p).unwrap();
+        let c = px(&s, 400.0);
+        assert!(c[0] > 0.8 && c[2] < 0.1 && c.iter().all(|v| v.is_finite()), "filled: {c:?}");
+    }
 }
 
 #[cfg(test)]
