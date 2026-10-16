@@ -191,7 +191,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         }
     }
     // Keyboard look: arrows turn the view (Shift ×5, Alt ×¼), Home resets it.
-    if response.hovered() && !ctx.wants_keyboard_input() {
+    if response.hovered() && !ctx.egui_wants_keyboard_input() {
         look_keys(&ctx, &mut cam);
     }
     if response.dragged() && (looking || !paints) {
