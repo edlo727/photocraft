@@ -173,6 +173,19 @@ pub fn abandon(app: &mut PhotocraftApp) {
 /// was used.
 pub fn arrow_keys(app: &mut PhotocraftApp, ctx: &egui::Context) -> bool {
     use egui::{Key, Modifiers};
+    // Equirectangular Live Projection: the arrows turn the view (flat nudges would land in the
+    // wrong place on the sphere).
+    if let Some(i) = app.session.active_index()
+        && app.ui.text_edit.is_none()
+        && let Some(cam) = app.ui.views.get_mut(i).and_then(|v| v.projection.as_mut())
+    {
+        let before = (cam.yaw, cam.pitch, cam.fov);
+        crate::live_projection::look_keys(ctx, cam);
+        if before != (cam.yaw, cam.pitch, cam.fov) {
+            ctx.request_repaint();
+            return true;
+        }
+    }
     let cmd = ctx.input(|i| i.modifiers.command) && crate::hold_keys::cmd_nudges(app);
     if app.ui.tool != Tool::Move && app.ui.transform.is_none() && !cmd {
         return selection_arrow_keys(app, ctx) || crate::direct_select::arrow_keys(app, ctx) || brush_arrow_keys(app, ctx);
