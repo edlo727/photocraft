@@ -120,6 +120,7 @@ pub fn supported(t: Tool) -> bool {
             | Tool::RedEye
             | Tool::Hand
             | Tool::Zoom
+            | Tool::Move
     ) || crate::live_projection_select::supported(t)
 }
 
@@ -168,6 +169,12 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         }
     }
     cam.clamp();
+    // A Free Transform holds the view: its handles live in it.
+    if crate::live_projection_xform::holds_view(app, idx)
+        && let Some(held) = view.projection
+    {
+        cam = ProjectionView { zoom: cam.zoom, ..held };
+    }
 
     // GPU drawing.
     let doc = app.session.documents()[idx].doc.clone();
@@ -200,7 +207,10 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
     let vp = ViewProjection::new(cam.camera(), f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
     let cloning = matches!(tool, Tool::CloneStamp | Tool::Healing);
     let alt = ctx.input(|i| i.modifiers.alt);
-    if paints && cloning && alt {
+    // Free Transform's handles take the pointer while it is up, whatever the tool.
+    let transforming = crate::live_projection_xform::transform(app, &ctx, &response, &painter, rect, ppp, idx);
+    if transforming {
+    } else if paints && cloning && alt {
         // ⌥/Alt-click (or press) sets the source: a direction, so looking around keeps it.
         if (response.clicked() || response.drag_started())
             && let Some(p) = response.interact_pointer_pos()
@@ -347,6 +357,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             painter.circle_stroke(h, (size_px / ppp / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
+    } else if tool == Tool::Move && !looking {
+        crate::live_projection_xform::move_tool(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx);
     } else if matches!(tool, Tool::Patch | Tool::ContentAwareMove) && !looking {
         patch(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx, tool);
     } else if tool == Tool::RedEye && !looking {

@@ -630,3 +630,101 @@ fn ed_flow_patch_draws_its_selection_then_drags_it_with_ants_and_preview() {
     assert_canvas_refreshed(&h, Tool::Patch, rev);
     assert!(h.ctx.data(|d| d.get_temp::<egui::Vec2>(crate::live_projection::ants_shift_id(0))).is_none(), "ants back in place");
 }
+
+fn doc_of_screen(h: &Harness<'_, PhotocraftApp>, p: egui::Pos2) -> [f64; 2] {
+    let r = h.state().last_canvas_rect;
+    let ppp = h.ctx.pixels_per_point();
+    let st = h.state().session.active().unwrap();
+    let (w, hh) = (f64::from(st.doc.size.width), f64::from(st.doc.size.height));
+    let cam = h.state().ui.views[0].projection.unwrap().camera();
+    let vp = photocraft_engine::equirect::ViewProjection::new(cam, f64::from(r.width() * ppp), f64::from(r.height() * ppp));
+    vp.view_to_equirect(f64::from((p.x - r.min.x) * ppp), f64::from((p.y - r.min.y) * ppp), w, hh)
+}
+
+fn active_px(h: &Harness<'_, PhotocraftApp>, at: [f64; 2]) -> [f32; 4] {
+    let d = h.state().session.active().unwrap();
+    d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().rgba(at[0] as i32, at[1] as i32)
+}
+
+fn non_finite(h: &Harness<'_, PhotocraftApp>) -> usize {
+    let d = h.state().session.active().unwrap();
+    let s = d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap();
+    // Pixels, not values (the sun is inf in R, G and B).
+    let n = s.channels();
+    s.read_region(photocraft_geom::Rect::new(0, 0, 4096, 2048)).chunks_exact(n).filter(|p| p.iter().any(|v| !v.is_finite())).count()
+}
+
+#[test]
+fn ed_flow_move_turns_the_layer_across_the_sphere_with_a_live_preview() {
+    let mut h = ed_harness(Tool::Move);
+    let dot = screen_of_doc(&h, 2100.5, 1020.5);
+    let to = dot + vec2(120.0, -60.0);
+    h.event(Event::PointerMoved(dot));
+    h.run_steps(2);
+    h.event(Event::PointerButton { pos: dot, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    let mut previewed = false;
+    for i in 1..=8 {
+        h.event(Event::PointerMoved(dot + (to - dot) * (i as f32 / 8.0)));
+        h.run_steps(4);
+        previewed |= h.state().projection_xform.as_ref().is_some_and(|x| x.texture.is_some());
+    }
+    assert!(previewed, "the move previews while dragging");
+    h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("layer.projectedRotate"));
+    assert!(h.state().projection_xform.is_none(), "the preview is gone");
+    let c = active_px(&h, doc_of_screen(&h, to));
+    assert!(c[0] < 0.01 && c[1] < 0.01, "the blemish is where the pointer let go: {c:?}");
+    let bad = non_finite(&h);
+    assert!(bad <= 8, "inf / NaN moved as (near) single pixels, not spread: {bad}");
+}
+
+#[test]
+fn ed_flow_free_transform_moves_and_scales_the_selection_in_view() {
+    let mut h = ed_harness(Tool::RectMarquee);
+    h.state_mut().run("select.rect", json!({"x": 2090, "y": 1010, "width": 20, "height": 20})).unwrap();
+    let ctx = h.ctx.clone();
+    crate::menus::invoke(h.state_mut(), &ctx, "edit.freeTransform", json!({})).unwrap();
+    h.run_steps(2);
+    let q0 = crate::live_projection_xform::quad_for_test(h.state()).expect("handles around the selection");
+    let dot = screen_of_doc(&h, 2100.5, 1020.5);
+    // Inside: move it 100 px right.
+    drag(&mut h, dot, dot + vec2(100.0, 0.0), Modifiers::NONE);
+    let q1 = crate::live_projection_xform::quad_for_test(h.state()).unwrap();
+    assert!((q1[0][0] - q0[0][0]) > 50.0, "moved: {q0:?} -> {q1:?}");
+    // A corner: scale it up.
+    let r = h.state().last_canvas_rect;
+    let ppp = h.ctx.pixels_per_point();
+    let corner = r.min + vec2(q1[2][0] as f32, q1[2][1] as f32) / ppp;
+    drag(&mut h, corner, corner + vec2(30.0, 30.0), Modifiers::NONE);
+    let q2 = crate::live_projection_xform::quad_for_test(h.state()).unwrap();
+    assert!(q2[2][0] - q2[0][0] > q1[2][0] - q1[0][0] + 20.0, "scaled: {q1:?} -> {q2:?}");
+    assert!(h.state().projection_xform.as_ref().is_some_and(|x| x.texture.is_some()), "a live preview");
+    key(&mut h, Key::Enter);
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("layer.projectedPlace"));
+    let mid = r.min + vec2(((q2[0][0] + q2[2][0]) / 2.0) as f32, ((q2[0][1] + q2[2][1]) / 2.0) as f32) / ppp;
+    let c = active_px(&h, doc_of_screen(&h, mid));
+    assert!(c[0] < 0.01, "the blemish is in the transformed box: {c:?}");
+    let bad = non_finite(&h);
+    assert!(bad <= 8, "inf / NaN not spread: {bad}");
+}
+
+#[test]
+fn ed_flow_paste_places_the_clipboard_upright_in_the_middle_of_the_view() {
+    let mut h = ed_harness(Tool::Hand);
+    h.state_mut().run("select.rect", json!({"x": 2090, "y": 1010, "width": 20, "height": 20})).unwrap();
+    h.state_mut().run("edit.copy", json!({})).unwrap();
+    let layers = h.state().session.active().unwrap().doc.walk().len();
+    let ctx = h.ctx.clone();
+    crate::menus::invoke(h.state_mut(), &ctx, "edit.paste", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("layer.projectedPlace"));
+    assert_eq!(h.state().session.active().unwrap().doc.walk().len(), layers + 1, "a new layer");
+    let c = active_px(&h, doc_of_screen(&h, h.state().last_canvas_rect.center()));
+    assert!(c[3] > 0.99 && c[0] < 0.01, "the pasted blemish sits in the middle of the view: {c:?}");
+    let off = active_px(&h, doc_of_screen(&h, h.state().last_canvas_rect.center() + vec2(200.0, 0.0)));
+    assert!(off[3] < 0.01, "only there: {off:?}");
+}

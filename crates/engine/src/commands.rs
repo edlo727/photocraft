@@ -1038,6 +1038,24 @@ fn build() -> Vec<CommandSpec> {
             crate::projected_tool::projected_tool
         ),
         cmd!(
+            "layer.projectedRotate",
+            "Move (Live Projection)",
+            [],
+            None,
+            r##"{"rotation":[9 numbers] (row-major, from where the drag started to where it ended)} — View › Equirectangular Live Projection: the Move tool turns the active layer (or the selected part, with the selection) across the sphere"##,
+            has_paintable,
+            crate::projected_transform::projected_rotate
+        ),
+        cmd!(
+            "layer.projectedPlace",
+            "Free Transform / Paste (Live Projection)",
+            [],
+            None,
+            r##"{"source":"layer|clipboard","rect":[x0,y0,x1,y1] (layer: the view-px source),"quad":[[x,y]×4] (tl,tr,br,bl view px),"projection":{"yaw","pitch","fov","width","height"}} — View › Equirectangular Live Projection: Free Transform of the active layer's content, or Paste as a new layer, mapped through the view onto the equirect pixels"##,
+            has_doc,
+            crate::projected_transform::projected_place
+        ),
+        cmd!(
             "select.projected",
             "Projected Selection",
             [],

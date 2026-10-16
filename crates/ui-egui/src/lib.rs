@@ -155,6 +155,7 @@ pub mod patch_preview;
 pub(crate) mod pattern_fill_ui;
 pub mod live_projection;
 pub mod live_projection_select;
+pub mod live_projection_xform;
 #[cfg(test)]
 mod live_projection_tests;
 pub mod pattern_preview;
@@ -536,6 +537,8 @@ pub struct PhotocraftApp {
     /// A selection shape being drawn in a projection view, and the projected marching ants.
     pub(crate) projection_select: Option<live_projection_select::SelDrag>,
     pub(crate) projection_ants: Option<live_projection_select::Ants>,
+    /// A Move drag or Free Transform in the projection view.
+    pub(crate) projection_xform: Option<live_projection_xform::Xform>,
     /// Brush/Eraser stroke being drawn, rendered by the engine (see `canvas::LiveStroke`).
     live_stroke: Option<canvas::LiveStroke>,
     /// A live stroke just committed with its own pixels: the canvas caches that showed it
@@ -800,6 +803,7 @@ impl PhotocraftApp {
             projection_live: None,
             projection_select: None,
             projection_ants: None,
+            projection_xform: None,
             live_stroke: None,
             committed_stroke: None,
             trail: None,

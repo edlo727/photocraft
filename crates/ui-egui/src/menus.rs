@@ -172,6 +172,10 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
         crate::tool_memory::select(app, tool);
         return Ok(json!({"tool": tool}));
     }
+    // Paste and Free Transform in View › Equirectangular Live Projection.
+    if let Some(r) = crate::live_projection_xform::intercept(app, ctx, id, &params) {
+        return r;
+    }
     if id == "ui.symmetryTransform" {
         return crate::symmetry_ui::begin(app).map(|_| Value::Null);
     }
