@@ -817,3 +817,32 @@ fn ed_flow_pen_draws_a_path_in_view_that_selects_strokes_and_edits_in_projection
     click(&mut h, r.min + vec2(v[0] as f32, v[1] as f32) / ppp, PointerButton::Primary);
     assert_eq!(h.state().session.active().unwrap().doc.work_path.as_ref().unwrap().subpaths[0].knots.len(), n0 - 1, "one anchor fewer");
 }
+
+#[test]
+fn ed_flow_rectangle_and_type_render_upright_in_projection_on_f32() {
+    let mut h = ed_harness(Tool::RectangleShape);
+    h.state_mut().session.tools.foreground = [1.0, 0.0, 0.0, 1.0];
+    let c = h.state().last_canvas_rect.center();
+    let layers0 = h.state().session.active().unwrap().doc.layers.len();
+    drag(&mut h, c + vec2(-40.0, -30.0), c + vec2(40.0, 30.0), Modifiers::NONE);
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("layer.projectedRender"));
+    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), layers0 + 1, "a new layer");
+    let f = active_px(&h, doc_of_screen(&h, c));
+    assert!(f[0] > 0.9 && f[1] < 0.1 && f[3] > 0.9, "the rectangle is filled where it was drawn: {f:?}");
+    assert!(active_px(&h, doc_of_screen(&h, c + vec2(70.0, 0.0)))[3] < 0.1, "nothing outside");
+    assert!(non_finite(&h) <= 8);
+    // Type: click, type, Ctrl+Enter.
+    h.state_mut().ui.tool = Tool::Type;
+    h.run_steps(2);
+    click(&mut h, c + vec2(-100.0, 80.0), PointerButton::Primary);
+    let id = crate::live_projection_text::typing_id(0);
+    let mut t = h.ctx.data(|d| d.get_temp::<crate::live_projection_text::Typing>(id)).expect("typing started");
+    t.text = "HELLO".into();
+    h.ctx.data_mut(|d| d.insert_temp(id, t));
+    h.key_press_modifiers(Modifiers::COMMAND, egui::Key::Enter);
+    h.run_steps(3);
+    assert!(!h.state().ui.status_error, "{}", h.state().ui.status);
+    assert_eq!(h.state().session.journal.last().map(|j| j.0.as_str()), Some("layer.projectedRender"));
+    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), layers0 + 2, "a text layer");
+}

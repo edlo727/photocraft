@@ -125,6 +125,7 @@ pub fn supported(t: Tool) -> bool {
             | Tool::PaintBucket
     ) || crate::live_projection_select::supported(t)
         || crate::live_projection_path::supported(t)
+        || crate::live_projection_text::supported(t)
 }
 
 /// Whether document `idx`'s view shows the projection.
@@ -360,6 +361,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             painter.circle_stroke(h, (size_px / ppp / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_black_alpha(160)));
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
+    } else if crate::live_projection_text::supported(tool) && !looking {
+        crate::live_projection_text::tool(app, &ctx, &response, &painter, rect, ppp, &cam, &vp, idx, tool);
     } else if crate::live_projection_path::supported(tool) && !looking {
         crate::live_projection_path::tool(app, &ctx, &response, rect, ppp, &cam, &vp, idx, tool);
     } else if tool == Tool::Move && !looking {

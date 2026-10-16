@@ -279,26 +279,22 @@ fn rows_of(proj: &ViewProjection, rects: &[[f64; 4]], iw: u32, ih: u32) -> Optio
     (v.0 < v.1).then(|| (v.0.max(0) as i32, v.1.min(i64::from(ih)) as i32))
 }
 
-/// `layer.projectedPlace` — see the module docs.
-pub fn projected_place(s: &mut Session, p: &Value) -> Result<Value> {
+/// A new layer above the active one holding `src` over `cb` mapped onto the view `quad`
+/// (Paste, and the Type and shape tools' rendered layers).
+pub(crate) fn place_new_layer(s: &mut Session, src: &Surface, cb: Rect, quad: [[f64; 2]; 4], proj: &ViewProjection, label: &str, name: Option<String>) -> Result<photocraft_doc::LayerId> {
     const CMD: &str = "layer.projectedPlace";
-    let proj = projection_of(p, CMD)?;
-    let quad = quad_of(p, "quad", CMD)?;
-    let from_clip = p.get("source").and_then(Value::as_str) == Some("clipboard");
+    let proj = *proj;
     let st = s.active().ok_or(EngineError::NoDocument)?;
     let (iw, ih) = (st.doc.size.width as i32, st.doc.size.height as i32);
     let (fw, fh) = (f64::from(iw), f64::from(ih));
-    if from_clip {
-        let clip = s.clipboard.clone().ok_or_else(|| EngineError::Other("the clipboard is empty".into()))?;
-        let cb = clip.surface.content_bounds();
-        let cb = if cb.is_empty() { clip.bounds } else { cb };
+    {
         if cb.is_empty() {
             return Err(EngineError::Other("the clipboard is empty".into()));
         }
         let warp = Warp::new([f64::from(cb.x0), f64::from(cb.y0), f64::from(cb.x1), f64::from(cb.y1)], quad).ok_or_else(|| bad(CMD, "the quad is degenerate"))?;
         let fmt = st.doc.pixel_format();
         let target = PixelFormat::new(fmt.mode, fmt.sample, true);
-        let img = if clip.surface.format() == target { clip.surface.clone() } else { clip.surface.convert(target) };
+        let img = if src.format() == target { src.clone() } else { src.convert(target) };
         let n = img.channels();
         let ibuf = img.read_region(cb);
         let (cw, ch) = (i64::from(cb.width()), i64::from(cb.height()));
@@ -344,8 +340,8 @@ pub fn projected_place(s: &mut Session, p: &Value) -> Result<Value> {
             out.write_region(r, &buf);
         }
         let before = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
-        let id = s.edit("Paste", |doc, active| {
-            let mut l = Layer::raster(doc.next_layer_name("Layer"), target);
+        let id = s.edit(label, |doc, active| {
+            let mut l = Layer::raster(name.clone().unwrap_or_else(|| doc.next_layer_name("Layer")), target);
             *crate::pixels_mut(&mut l)? = out;
             let id = doc.insert_above(*active, l);
             *active = Some(id);
@@ -353,6 +349,24 @@ pub fn projected_place(s: &mut Session, p: &Value) -> Result<Value> {
             Ok(id)
         })?;
         crate::layer_multi_cmds::note_insert(s, &before);
+        Ok(id)
+    }
+}
+
+/// `layer.projectedPlace` — see the module docs.
+pub fn projected_place(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "layer.projectedPlace";
+    let proj = projection_of(p, CMD)?;
+    let quad = quad_of(p, "quad", CMD)?;
+    let from_clip = p.get("source").and_then(Value::as_str) == Some("clipboard");
+    let st = s.active().ok_or(EngineError::NoDocument)?;
+    let (iw, ih) = (st.doc.size.width as i32, st.doc.size.height as i32);
+    let (fw, fh) = (f64::from(iw), f64::from(ih));
+    if from_clip {
+        let clip = s.clipboard.clone().ok_or_else(|| EngineError::Other("the clipboard is empty".into()))?;
+        let cb = clip.surface.content_bounds();
+        let cb = if cb.is_empty() { clip.bounds } else { cb };
+        let id = place_new_layer(s, &clip.surface, cb, quad, &proj, "Paste", None)?;
         return Ok(json!({"layer": id.0}));
     }
     // The active layer's content inside `rect` (view px).
@@ -686,5 +700,83 @@ mod tests {
         assert!(p[0] > 4.0 && p[3] > 0.99, "the paste is in the middle of the view: {p:?}");
         let off = vp.view_to_equirect(470.0, 300.0, 2048.0, 1024.0);
         assert!(px(&s, off[0] as i32, off[1] as i32)[3] < 0.01, "and only inside its quad");
+    }
+}
+
+/// `layer.projectedRender`: the Type and shape tools in projection. `command` (`type.create` or
+/// `shape.create`) runs with its `params` in view px on a transparent view-sized scratch
+/// document; the layer it makes is rasterized there and placed upright in the view as a new
+/// pixel layer named after it (the equirect can't hold an editable flat text or shape layer
+/// that looks right on the sphere).
+pub fn projected_render(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "layer.projectedRender";
+    let proj = projection_of(p, CMD)?;
+    let cmd = p.get("command").and_then(Value::as_str).ok_or_else(|| bad(CMD, "missing `command`"))?;
+    let raster = match cmd {
+        "type.create" => "type.rasterize",
+        "shape.create" => "shape.rasterize",
+        _ => return Err(bad(CMD, "`command` must be type.create or shape.create")),
+    };
+    let st = s.active().ok_or(EngineError::NoDocument)?;
+    let fmt = st.doc.pixel_format();
+    let (w, h) = (proj.w as i32, proj.h as i32);
+    let mut temp = Session::new();
+    temp.tools = s.tools.clone();
+    temp.presets = s.presets.clone();
+    let depth = match fmt.sample {
+        photocraft_color::SampleType::F32 => 32,
+        photocraft_color::SampleType::U16 => 16,
+        _ => 8,
+    };
+    temp.execute("file.new", json!({"width": w, "height": h, "depth": depth, "background": "transparent"}))?;
+    let r = temp.execute(cmd, p.get("params").cloned().unwrap_or_else(|| json!({})))?;
+    let id = r.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::Other(format!("{cmd} made no layer")))?;
+    temp.execute(raster, json!({"layer": id}))?;
+    let td = temp.active().ok_or(EngineError::NoDocument)?;
+    let lid = td.active_layer.ok_or_else(|| EngineError::Other("no layer".into()))?;
+    let layer = td.doc.layer(lid).ok_or(EngineError::NoLayer(lid))?;
+    let name = layer.name.clone();
+    let surf = layer.surface().ok_or_else(|| EngineError::Other("nothing rendered".into()))?.clone();
+    let cb = surf.content_bounds();
+    if cb.is_empty() {
+        return Err(EngineError::Other("nothing to place (empty text or shape)".into()));
+    }
+    let quad = [[f64::from(cb.x0), f64::from(cb.y0)], [f64::from(cb.x1), f64::from(cb.y0)], [f64::from(cb.x1), f64::from(cb.y1)], [f64::from(cb.x0), f64::from(cb.y1)]];
+    let label = if cmd == "type.create" { "Type" } else { "Shape" };
+    let keep = s.active().and_then(|d| d.doc.selection.clone());
+    let id = place_new_layer(s, &surf, cb, quad, &proj, label, Some(name))?;
+    if keep.is_some()
+        && let Some(d) = s.active_mut()
+    {
+        let mut doc = (*d.doc).clone();
+        doc.selection = keep;
+        d.doc = std::sync::Arc::new(doc);
+    }
+    Ok(json!({"layer": id.0}))
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn a_shape_drawn_in_the_view_lands_upright_on_an_f32_latlong() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 2048, "height": 1024, "depth": 32})).unwrap();
+        let view = json!({"yaw": 30.0, "pitch": 40.0, "fov": 60.0, "width": 800, "height": 600});
+        let vp = ViewProjection::new(Camera { yaw: 30.0, pitch: 40.0, fov: 60.0 }, 800.0, 600.0);
+        let n = s.active().unwrap().doc.walk().len();
+        s.execute("layer.projectedRender", json!({"command": "shape.create", "params": {"kind": "rect", "rect": [300, 250, 500, 350], "fill": "#ff0000"}, "projection": view})).unwrap();
+        assert_eq!(s.active().unwrap().doc.walk().len(), n + 1);
+        let d = s.active().unwrap();
+        let surf = d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap();
+        let at = |x: f64, y: f64| {
+            let [u, v] = vp.view_to_equirect(x, y, 2048.0, 1024.0);
+            surf.rgba(u as i32, v as i32)
+        };
+        let (inside, corner, out) = (at(400.0, 300.0), at(305.0, 255.0), at(520.0, 300.0));
+        assert!(inside[0] > 0.9 && inside[3] > 0.99, "{inside:?}");
+        assert!(corner[3] > 0.9, "the view rect's corner is filled: {corner:?}");
+        assert!(out[3] < 0.01, "{out:?}");
     }
 }

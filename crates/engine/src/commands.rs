@@ -1047,6 +1047,15 @@ fn build() -> Vec<CommandSpec> {
             crate::projected_path::projected_set
         ),
         cmd!(
+            "layer.projectedRender",
+            "Type / Shape (Live Projection)",
+            [],
+            None,
+            r##"{"command":"type.create|shape.create","params":{…that command's params in view px…},"projection":{"yaw","pitch","fov","width","height"}} — View › Equirectangular Live Projection: text or a shape made in the perspective view, rendered upright there and placed on the equirect as a new pixel layer"##,
+            has_doc,
+            crate::projected_transform::projected_render
+        ),
+        cmd!(
             "layer.projectedRotate",
             "Move (Live Projection)",
             [],

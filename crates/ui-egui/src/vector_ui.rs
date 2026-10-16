@@ -121,6 +121,18 @@ pub fn finish_shape(app: &mut PhotocraftApp, tool: Tool, start: [f64; 2], end: [
     }
 }
 
+/// `shape.create` params for a drag from `start` to `end` with the options bar's fill and
+/// stroke (Live Projection draws it in view px); `None` for the Custom Shape or a click.
+pub(crate) fn shape_params(app: &PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<Value> {
+    if tool == Tool::CustomShape {
+        return None;
+    }
+    let mut g = shape_geometry(&app.ui.tool_options, tool, start, end, mods)?;
+    g["fill"] = fill_param(app);
+    g["stroke"] = stroke_param(app);
+    Some(g)
+}
+
 fn fill_param(app: &PhotocraftApp) -> Value {
     if app.ui.tool_options.shape_fill { json!(app.session.tools.foreground) } else { Value::Null }
 }

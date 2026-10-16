@@ -161,6 +161,22 @@ pub(crate) fn offset_at(app: &mut PhotocraftApp, id: LayerId, x: f64, y: f64) ->
     photocraft_text::hit_char(&l, &text, tx, ty).0
 }
 
+/// `type.create` params for point text `text` at (x, y) with the options bar's settings.
+pub(crate) fn point_text_params(app: &PhotocraftApp, x: f64, y: f64, text: &str) -> serde_json::Value {
+    let o = &app.ui.tool_options;
+    json!({
+        "text": text,
+        "orientation": if app.ui.tool.is_vertical_type() { "vertical" } else { "horizontal" },
+        "font": o.type_font,
+        "fontStyle": o.type_style,
+        "size": o.type_size,
+        "align": o.type_align,
+        "color": hex(app.session.tools.foreground),
+        "x": x.round(),
+        "y": y.round(),
+    })
+}
+
 fn hex(c: [f32; 4]) -> String {
     let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     format!("#{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]))
