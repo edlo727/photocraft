@@ -48,6 +48,8 @@ fn label_of(cmd: &str) -> Option<&'static str> {
         "paint.redEye" => "Red Eye",
         "paint.gradient" => "Gradient",
         "paint.bucket" => "Paint Bucket",
+        "paint.backgroundEraser" => "Background Eraser",
+        "paint.patternStamp" => "Pattern Stamp",
         _ => return None,
     })
 }
