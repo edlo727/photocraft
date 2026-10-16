@@ -43,6 +43,15 @@ const FORMAT_HIGH: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// documents (a 14000² one would need 2.1 GB) use `Rgba8Unorm`, so they stay on the GPU like
 /// 8-bit ones. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas off, `=1` ignores this budget.
 pub const F16_BUDGET_PX: u64 = 100_000_000;
+/// View › Float Display for Large Documents: high-bit documents over [`F16_BUDGET_PX`] get the
+/// `Rgba16Float` canvas too (a 20k × 10k latlong takes about 2.1 GB of GPU memory with mips),
+/// so big 32-bit HDR panoramas don't band or clip at 8 bits.
+static FLOAT_LARGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set [`FLOAT_LARGE`]; returns whether it changed.
+pub fn set_float_large(on: bool) -> bool {
+    FLOAT_LARGE.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
 const VIEW_UNIFORM_SIZE: u64 = 160;
 const VIEW_FLOATS: usize = 40;
 const TILE_UNIFORM_SIZE: u64 = 16;
@@ -227,7 +236,7 @@ impl GpuCanvas {
         let px = size[0] as u64 * size[1] as u64;
         let high = match self.high {
             HighPolicy::Off => false,
-            HighPolicy::Budget => px <= F16_BUDGET_PX,
+            HighPolicy::Budget => px <= F16_BUDGET_PX || FLOAT_LARGE.load(std::sync::atomic::Ordering::Relaxed),
             HighPolicy::Always => true,
         };
         if high && depth != photocraft_doc::SampleType::U8 { FORMAT_HIGH } else { FORMAT }

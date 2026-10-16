@@ -2822,6 +2822,8 @@ pub(crate) fn hdr_preview(app: &PhotocraftApp, doc: &photocraft_doc::Document) -
 
 /// Draw one canvas view and handle its input. `primary` = main window (tools active).
 pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect, mut view: View, primary: bool) -> View {
+    // The option is saved with the tool options; the GPU canvas reads a process-wide flag.
+    crate::view_cmds::sync_float_display(app);
     let ctx = ui.ctx().clone();
     // The camera as the app holds it before this frame's input. The canvas works on its own copy
     // (`view`) and writes it back at the end; a tool that moves the camera itself meanwhile (the

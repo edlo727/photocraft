@@ -439,6 +439,7 @@ pub fn handles(id: &str) -> bool {
             | "view.pixelArtPreview"
             | "view.equirectLiveProjection"
             | "view.projectionBrushDocumentPixels"
+            | "view.floatDisplayLargeDocuments"
             | "view.rotateView"
             | "view.resetView"
             | "window.panel.layers"
@@ -528,6 +529,9 @@ pub fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
     }
     if let Some(c) = type_checked(app, id) {
         return Some(c);
+    }
+    if id == "view.floatDisplayLargeDocuments" {
+        return Some(app.ui.tool_options.float_display_large);
     }
     if id == "view.projectionBrushDocumentPixels" {
         return Some(app.ui.tool_options.projection_brush_doc_px);
@@ -667,6 +671,12 @@ fn run(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, p: &Value) -> Res
     }
     if id == "view.resetView" {
         return crate::rotate_view::reset(app);
+    }
+    if id == "view.floatDisplayLargeDocuments" {
+        let cur = app.ui.tool_options.float_display_large;
+        app.ui.tool_options.float_display_large = flag_param(p, cur);
+        sync_float_display(app);
+        return Ok(json!(app.ui.tool_options.float_display_large));
     }
     if id == "view.projectionBrushDocumentPixels" {
         let cur = app.ui.tool_options.projection_brush_doc_px;
@@ -1510,3 +1520,11 @@ fn export_contents(app: &mut PhotocraftApp) -> Result<Value, String> {
 #[cfg(test)]
 #[path = "view_cmds/tests.rs"]
 mod tests;
+
+/// Apply View › Float Display for Large Documents to the GPU canvas; the canvases re-upload in
+/// the new format when it changes.
+pub(crate) fn sync_float_display(app: &mut crate::PhotocraftApp) {
+    if crate::gpu_canvas::set_float_large(app.ui.tool_options.float_display_large) {
+        app.canvases.clear();
+    }
+}

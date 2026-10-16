@@ -965,3 +965,15 @@ fn navigator_frustum_outlines_the_view_and_splits_at_the_seam() {
     let lines = crate::live_projection_misc::frustum(h.state(), 0, nav);
     assert!(lines.len() >= 2, "{}", lines.len());
 }
+
+#[test]
+fn float_display_for_large_documents_toggles_and_is_checked() {
+    let mut h = ed_harness(Tool::Hand);
+    let ctx = h.ctx.clone();
+    assert_eq!(crate::menus::invoke(h.state_mut(), &ctx, "view.floatDisplayLargeDocuments", json!({})).unwrap(), json!(true));
+    assert!(h.state().ui.tool_options.float_display_large);
+    h.run_steps(2);
+    assert_eq!(crate::menus::invoke(h.state_mut(), &ctx, "view.floatDisplayLargeDocuments", json!({})).unwrap(), json!(false));
+    h.run_steps(2);
+    assert!(!h.state().ui.tool_options.float_display_large);
+}
