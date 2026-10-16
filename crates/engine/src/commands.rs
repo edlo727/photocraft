@@ -1038,6 +1038,15 @@ fn build() -> Vec<CommandSpec> {
             crate::projected_tool::projected_tool
         ),
         cmd!(
+            "path.projectedSet",
+            "Projected Path",
+            [],
+            None,
+            r##"{…path.set params, with "path" in view px…,"projection":{"yaw","pitch","fov","width","height"}} — View › Equirectangular Live Projection: a path drawn in the perspective view (Pen, Freeform, Curvature Pen) stored on the document in equirect pixels"##,
+            has_doc,
+            crate::projected_path::projected_set
+        ),
+        cmd!(
             "layer.projectedRotate",
             "Move (Live Projection)",
             [],

@@ -835,7 +835,7 @@ fn paths_list(s: &Session) -> Result<Value> {
     }))
 }
 
-fn path_set(s: &mut Session, p: &Value) -> Result<Value> {
+pub(crate) fn path_set(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "path.set";
     let path = parse_path(p.get("path").ok_or_else(|| bad(CMD, "missing `path`"))?).map_err(|e| bad(CMD, e))?;
     let name = p.get("name").and_then(Value::as_str).map(str::to_string);
@@ -1089,8 +1089,30 @@ fn path_rename(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "name": to }))
 }
 
+/// With `"wrap": true` (Live Projection's paths on an equirect image), the path also counts one
+/// image width to the left and right, so a path across the ±180° seam fills both sides.
+fn wrapped(s: &Session, p: &Value, path: Path) -> Path {
+    if p.get("wrap").and_then(Value::as_bool) != Some(true) {
+        return path;
+    }
+    let iw = s.active().map_or(0.0, |d| f64::from(d.doc.size.width));
+    let mut out = path.clone();
+    for dx in [-iw, iw] {
+        for sp in &path.subpaths {
+            let mut sp = sp.clone();
+            for k in &mut sp.knots {
+                for q in [&mut k.anchor, &mut k.in_ctrl, &mut k.out_ctrl] {
+                    q.x += dx;
+                }
+            }
+            out.subpaths.push(sp);
+        }
+    }
+    out
+}
+
 fn path_to_selection(s: &mut Session, p: &Value) -> Result<Value> {
-    let path = resolve_path(s, p.get("name").and_then(Value::as_str))?;
+    let path = wrapped(s, p, resolve_path(s, p.get("name").and_then(Value::as_str))?);
     let feather = f64p(p, "feather").unwrap_or(0.0) as f32;
     let aa = p.get("antiAlias").and_then(Value::as_bool).unwrap_or(true);
     let mode = SelectionMode::parse(p.get("mode").and_then(Value::as_str).unwrap_or("replace"));
@@ -1128,7 +1150,7 @@ fn select_to_work_path(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn path_fill(s: &mut Session, p: &Value) -> Result<Value> {
-    let path = resolve_path(s, p.get("name").and_then(Value::as_str))?;
+    let path = wrapped(s, p, resolve_path(s, p.get("name").and_then(Value::as_str))?);
     let fg = s.tools.foreground;
     let c = p.get("color").and_then(color).unwrap_or(Color::rgba(fg[0], fg[1], fg[2], fg[3]));
     let rgb = c.to_rgb();
