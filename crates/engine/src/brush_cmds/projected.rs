@@ -425,3 +425,10 @@ mod tests {
         assert!(rgba(&s, 718, 180)[3] > 0.9, "right edge painted: {:?}", rgba(&s, 718, 180));
     }
 }
+
+/// The view projection from `projection` params (QA benchmark).
+#[cfg(test)]
+pub(crate) fn bench_view(q: &Value) -> ViewProjection {
+    let g = |k: &str, d: f64| q.get(k).and_then(Value::as_f64).unwrap_or(d);
+    ViewProjection::new(crate::equirect::Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, g("width", 1.0), g("height", 1.0))
+}

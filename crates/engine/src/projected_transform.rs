@@ -233,6 +233,8 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
     let label = if st.doc.selection.is_some() { "Move Selection Contents" } else { "Move" };
     // Tests: the whole sphere, to check the region-limited move against.
     let full = p.get("_fullSphere").and_then(Value::as_bool).unwrap_or(false);
+    // Tests: the per-pixel path even for a pure yaw turn.
+    let generic = p.get("_generic").and_then(Value::as_bool).unwrap_or(false);
     let bgc = s.tools.background;
     s.edit(label, |doc, _| {
         let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
@@ -258,6 +260,10 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
         let sb = sel.as_ref().map(|m| Band::read(m, iw, sy0, sy1));
         let cols: Vec<i32> = (0..iw).filter(|&x| region.cols[x as usize]).collect();
         let trig = Trig::new(iw, ih);
+        // A turn about the vertical axis (a horizontal Move drag) is a pure longitude shift:
+        // every row slides by the same amount, so no per-pixel trig is needed.
+        let yaw_shift = (!generic && (q[1][1] - 1.0).abs() < 1e-12 && q[0][1].abs() < 1e-12 && q[2][1].abs() < 1e-12)
+            .then(|| dir_to_equirect(rot(&inv, trig.dir(0, ih / 2)), fw, fh)[0] - 0.5);
         // Rows in bands: one full output copy of a 20k F32 latlong is 3 GB.
         let band = if sel.is_none() { 1024 } else { 256 };
         let mut y0 = region.y0;
@@ -271,7 +277,10 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
                 let (mut c, mut m) = (vec![0f32; n], [0f32; 4]);
                 for &x in &cols {
                     let px = &mut line[x as usize * n..(x as usize + 1) * n];
-                    let [u, v] = dir_to_equirect(rot(&inv, trig.dir(x, y)), fw, fh);
+                    let [u, v] = match yaw_shift {
+                        Some(sh) => [(f64::from(x) + 0.5 + sh).rem_euclid(fw), f64::from(y) + 0.5],
+                        None => dir_to_equirect(rot(&inv, trig.dir(x, y)), fw, fh),
+                    };
                     match &sb {
                         Some(sb) => {
                             // What stays: the unselected part here; on top, the selected part from there.
@@ -795,6 +804,21 @@ mod tests {
         assert!(bad <= 2, "inf / NaN stay single pixels: {bad}");
         s.execute("edit.undo", json!({})).unwrap();
         assert!(px(&s, 1020, 520)[0] > 4.0);
+    }
+
+    #[test]
+    fn a_yaw_move_fast_path_matches_the_per_pixel_path_on_f32() {
+        let q = rotation_between(equirect_to_dir(1020.0, 512.0, 2048.0, 1024.0), equirect_to_dir(1500.3, 512.0, 2048.0, 1024.0));
+        let run = |generic: bool| {
+            let mut s = doc();
+            s.execute("layer.projectedRotate", json!({"rotation": q.concat(), "_generic": generic})).unwrap();
+            let d = s.active().unwrap();
+            d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().read_region(Rect::new(0, 0, 2048, 1024))
+        };
+        let (a, b) = (run(false), run(true));
+        let worst = a.iter().zip(&b).filter(|(x, y)| x.is_finite() && y.is_finite()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-3, "worst difference {worst}");
+        assert_eq!(a.iter().filter(|v| !v.is_finite()).count(), b.iter().filter(|v| !v.is_finite()).count());
     }
 
     #[test]

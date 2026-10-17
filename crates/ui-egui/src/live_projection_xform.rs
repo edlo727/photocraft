@@ -177,7 +177,16 @@ pub fn move_tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::
         && response.dragged()
     {
         let [vx, vy] = to_view(p);
-        let nq = rotation_between(*start, vp.view_to_dir(vx, vy));
+        let end = vp.view_to_dir(vx, vy);
+        // Shift: turn about the vertical axis only (a pure longitude shift, which the commit
+        // also does fastest on a 20k latlong).
+        let nq = if ctx.input(|i| i.modifiers.shift) {
+            let a = (end[0].atan2(end[2]) - start[0].atan2(start[2])) as f64;
+            let (sn, cs) = a.sin_cos();
+            [[cs, 0.0, sn], [0.0, 1.0, 0.0], [-sn, 0.0, cs]]
+        } else {
+            rotation_between(*start, end)
+        };
         if nq != *q {
             *q = nq;
             x.dirty = true;

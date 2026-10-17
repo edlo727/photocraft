@@ -850,6 +850,7 @@ mod tests {
                 | "path.list"
                 | "path.info"
                 | "path.set"
+                | "path.projectedSet"
                 | "path.transform"
                 | "path.moveAnchors"
                 | "path.moveHandle"

@@ -106,6 +106,7 @@ pub mod selection_cmds;
 pub mod projected_select;
 pub mod projected_tool;
 pub(crate) mod projected_fill;
+mod projected_bench;
 pub mod projected_transform;
 pub mod projected_path;
 pub mod slice_cmds;
