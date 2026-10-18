@@ -233,8 +233,19 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
 
     // GPU drawing.
     let doc = app.session.documents()[idx].doc.clone();
+    // What the view shows on the latlong: the GPU budget focuses there and a background
+    // redraw (large documents, v0.10) finishes those blocks first.
+    let seen = {
+        let vp = ViewProjection::new(cam.camera(), f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
+        let rects = photocraft_engine::equirect::view_rect_to_equirect(&vp, [0.0, 0.0, vp.w, vp.h], doc.size.width, doc.size.height, 2.0);
+        rects.iter().fold(photocraft_geom::Rect::EMPTY, |acc, r| {
+            let r = photocraft_geom::Rect::new(r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32);
+            if acc.is_empty() { r } else { acc.union(&r) }
+        })
+    };
     let full = photocraft_geom::Rect::new(0, 0, doc.size.width as i32, doc.size.height as i32);
-    let drawn = app.gpu.is_some() && crate::canvas::ensure_gpu(app, &ctx, idx, full);
+    let seen = if seen.is_empty() { full } else { seen.intersect(&full) };
+    let drawn = app.gpu.is_some() && crate::canvas::ensure_gpu(app, &ctx, idx, seen);
     if drawn {
         let params = crate::gpu_canvas::ViewParams {
             doc: doc.id.0,
@@ -253,7 +264,14 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         };
         crate::gpu_canvas::GpuCanvas::paint(&painter, rect, params);
     } else {
-        painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Equirectangular Live Projection needs the GPU canvas", egui::FontId::proportional(14.0), Color32::LIGHT_GRAY);
+        // Over the GPU budget (Preferences › Performance › GPU Memory) or no GPU canvas.
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Equirectangular Live Projection needs the GPU canvas: raise Preferences › Performance › GPU Memory, or turn off View › Float Display for Large Documents",
+            egui::FontId::proportional(14.0),
+            Color32::LIGHT_GRAY,
+        );
     }
 
     // Painting: collect the stroke in view device pixels, commit it on release.

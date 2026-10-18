@@ -656,6 +656,37 @@ fn ruler_units_round_to_their_own_decimal_places() {
     assert_eq!(r.format(100.0, 300.0, 1500.0), "0.333");
 }
 
+/// #2259: arrow-key nudges bundle into one History state by default, within a pause long enough
+/// for a held key's auto-repeat delay; both are Tools preferences with a validated range.
+#[test]
+fn nudge_bundling_preferences() {
+    let p = Preferences::default();
+    assert!(p.tools.bundle_nudges);
+    assert_eq!(p.tools.nudge_bundle_pause_ms, 1000);
+    // Preferences saved before these existed load with the defaults.
+    let old: Preferences = serde_json::from_value(json!({"tools": {"showTooltips": false}})).unwrap();
+    assert!(old.tools.bundle_nudges && !old.tools.show_tooltips);
+    assert_eq!(old.tools.nudge_bundle_pause_ms, 1000);
+
+    let mut s = session();
+    assert_eq!(s.execute("prefs.get", json!({"path": "tools.bundleNudges"})).unwrap(), json!(true));
+    s.execute("prefs.set", json!({"values": {"tools.bundleNudges": false, "tools.nudgeBundlePauseMs": 250}})).unwrap();
+    assert!(!s.prefs().tools.bundle_nudges);
+    assert_eq!(s.prefs().tools.nudge_bundle_pause_ms, 250);
+    for edge in [100, 10_000] {
+        s.execute("prefs.set", json!({"path": "tools.nudgeBundlePauseMs", "value": edge})).unwrap();
+        assert_eq!(s.prefs().tools.nudge_bundle_pause_ms, edge);
+    }
+    for bad in [json!(0), json!(99), json!(10_001), json!(-1), json!(1.5e300), json!("long"), json!(null)] {
+        assert!(s.execute("prefs.set", json!({"path": "tools.nudgeBundlePauseMs", "value": bad.clone()})).is_err(), "{bad}");
+    }
+    assert!(s.execute("prefs.set", json!({"path": "tools.bundleNudges", "value": "yes"})).is_err());
+    assert_eq!(s.prefs().tools.nudge_bundle_pause_ms, 10_000, "a rejected value changes nothing");
+    s.execute("prefs.reset", json!({"path": "tools"})).unwrap();
+    assert!(s.prefs().tools.bundle_nudges);
+    assert_eq!(s.prefs().tools.nudge_bundle_pause_ms, 1000);
+}
+
 /// #3665: Photoshop's second default keys (F2/F3/F4, Shift+F7, Cmd++) are a command's
 /// alternates, beside the main key its menu shows.
 #[test]
@@ -795,4 +826,92 @@ fn shift_key_tool_switch_is_on_by_default_and_a_stored_false_is_kept() {
     assert!(missing.use_shift_key_for_tool_switch, "a settings file without the key gets the new default");
     let stored: Tools = serde_json::from_value(json!({"useShiftKeyForToolSwitch": false})).unwrap();
     assert!(!stored.use_shift_key_for_tool_switch);
+}
+
+/// Shortcut exports are all or nothing (#5801): a rename that fails after the first file was
+/// moved in puts the user's files back as they were and leaves nothing staged.
+#[test]
+fn exports_are_written_all_or_nothing() {
+    use super::write_files_atomically;
+    let dir = std::env::temp_dir().join(format!("photocraft-atomic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.kys"), dir.join("b.html"));
+    std::fs::write(&a, "old A").unwrap();
+    std::fs::write(&b, "old B").unwrap();
+    let (pa, pb) = (a.to_str().unwrap(), b.to_str().unwrap());
+    let staged_moves = std::cell::Cell::new(0);
+    let failing = |from: &std::path::Path, to: &std::path::Path| {
+        if from.to_string_lossy().ends_with("photocraft-tmp") {
+            staged_moves.set(staged_moves.get() + 1);
+            if staged_moves.get() == 2 {
+                return Err(std::io::Error::other("disk gone"));
+            }
+        }
+        std::fs::rename(from, to)
+    };
+    assert!(write_files_atomically(&[(pa, "new A"), (pb, "new B")], &failing).is_err());
+    assert_eq!((std::fs::read_to_string(&a).unwrap(), std::fs::read_to_string(&b).unwrap()), ("old A".into(), "old B".into()));
+    let leftovers = || std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".photocraft-")).count();
+    assert_eq!(leftovers(), 0);
+    // A backup move that fails leaves no empty placeholder behind.
+    let backups = std::cell::Cell::new(0);
+    let failing_backup = |from: &std::path::Path, to: &std::path::Path| {
+        if to.to_string_lossy().ends_with("photocraft-bak") {
+            backups.set(backups.get() + 1);
+            if backups.get() == 2 {
+                return Err(std::io::Error::other("locked"));
+            }
+        }
+        std::fs::rename(from, to)
+    };
+    assert!(write_files_atomically(&[(pa, "new A"), (pb, "new B")], &failing_backup).is_err());
+    assert_eq!((std::fs::read_to_string(&a).unwrap(), std::fs::read_to_string(&b).unwrap()), ("old A".into(), "old B".into()));
+    assert_eq!(leftovers(), 0);
+    // The same target twice is refused before anything is written.
+    assert!(write_files_atomically(&[(pa, "x"), (pa, "y")], &|f, t| std::fs::rename(f, t)).is_err());
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "old A");
+    // A target named like a staging file is just a file.
+    let odd = dir.join("c.kys.photocraft-tmp");
+    std::fs::write(&odd, "old C").unwrap();
+    write_files_atomically(&[(pa, "new A"), (odd.to_str().unwrap(), "new C")], &|f, t| std::fs::rename(f, t)).unwrap();
+    assert_eq!((std::fs::read_to_string(&a).unwrap(), std::fs::read_to_string(&odd).unwrap()), ("new A".into(), "new C".into()));
+    assert_eq!(leftovers(), 1, "only c.kys.photocraft-tmp itself");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A backup that can't be put back after a failed export is named in the error, and stays where
+/// it is with the user's previous text.
+#[test]
+fn a_stranded_backup_is_named_in_the_error() {
+    use super::write_files_atomically;
+    let dir = std::env::temp_dir().join(format!("photocraft-stranded-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.kys"), dir.join("b.html"));
+    std::fs::write(&a, "old A").unwrap();
+    std::fs::write(&b, "old B").unwrap();
+    let (pa, pb) = (a.to_str().unwrap(), b.to_str().unwrap());
+    let staged = std::cell::Cell::new(0);
+    // The second staged move fails, and so does putting a.kys's backup back.
+    let rename = |from: &std::path::Path, to: &std::path::Path| {
+        let f = from.to_string_lossy();
+        if f.ends_with("photocraft-tmp") {
+            staged.set(staged.get() + 1);
+            if staged.get() == 2 {
+                return Err(std::io::Error::other("disk gone"));
+            }
+        }
+        if f.ends_with("photocraft-bak") && to == a.as_path() {
+            return Err(std::io::Error::other("locked"));
+        }
+        std::fs::rename(from, to)
+    };
+    let e = write_files_atomically(&[(pa, "new A"), (pb, "new B")], &rename).unwrap_err();
+    assert!(e.contains(&format!("the previous {} is at", a.display())), "{e}");
+    let backup: Vec<_> =
+        std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with("photocraft-bak")).collect();
+    assert_eq!(backup.len(), 1, "{backup:?}");
+    assert!(e.contains(&backup[0].display().to_string()), "{e}");
+    assert_eq!(std::fs::read_to_string(&backup[0]).unwrap(), "old A");
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "old B");
+    let _ = std::fs::remove_dir_all(&dir);
 }
