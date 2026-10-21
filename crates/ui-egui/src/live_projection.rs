@@ -761,7 +761,7 @@ fn fill_tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Resp
         {
             let [x, y] = to_view(p);
             let contents = if o.bucket_fill_pattern { "pattern" } else { "foreground" };
-            let fp = json!({"tolerance": o.tolerance, "contiguous": o.contiguous, "antiAlias": o.anti_alias, "sampleAllLayers": o.sample_all_layers, "opacity": o.fill_opacity, "contents": contents, "target": target});
+            let fp = json!({"tolerance": o.tolerance, "contiguous": o.contiguous, "antiAlias": o.anti_alias, "sampleAllLayers": o.sample_all.get(tool), "opacity": o.fill_opacity, "contents": contents, "target": target});
             if let Err(e) = app.run("paint.projectedTool", json!({"command": "paint.bucket", "params": fp, "points": [[x, y, 1.0]], "projection": view_json(cam, vp)})) {
                 app.ui.status = e;
                 app.ui.status_error = true;
@@ -829,7 +829,7 @@ pub(crate) fn retouch_cmd(app: &PhotocraftApp, tool: Tool, alt: bool) -> Option<
     let o = &app.ui.tool_options;
     Some(match tool {
         Tool::Healing => ("paint.healingBrush", json!({"aligned": o.clone_aligned, "sampleLayer": o.clone_sample})),
-        Tool::SpotHealing => ("paint.spotHealing", json!({"type": o.spot_type, "sampleAllLayers": o.sample_all_layers})),
+        Tool::SpotHealing => ("paint.spotHealing", json!({"type": o.spot_type, "sampleAllLayers": o.sample_all.get(tool)})),
         Tool::Blur | Tool::Sharpen | Tool::Smudge | Tool::Dodge | Tool::Burn | Tool::Sponge => crate::retouch_ui::dab_params(app, crate::retouch_ui::alt_flipped(tool, alt))?,
         Tool::Pencil => ("paint.pencil", json!({})),
         Tool::MixerBrush => ("paint.mixerBrush", json!({})),
@@ -837,7 +837,7 @@ pub(crate) fn retouch_cmd(app: &PhotocraftApp, tool: Tool, alt: bool) -> Option<
         Tool::HistoryBrush => ("paint.historyBrush", json!({})),
         // Each stroke is one removal here (the pending-strokes mode and New Layer stay on the
         // flat canvas: the projection writes back into the target layer).
-        Tool::Remove => ("paint.remove", json!({"sampleAllLayers": o.sample_all_layers, "newLayer": false})),
+        Tool::Remove => ("paint.remove", json!({"sampleAllLayers": o.sample_all.get(tool), "newLayer": false})),
         Tool::BackgroundEraser => ("paint.backgroundEraser", json!({"sampling": o.bg_sampling, "limits": o.bg_limits, "tolerance": o.bg_tolerance, "protectForegroundColor": o.bg_protect_fg})),
         Tool::PatternStamp => {
             // Aligned phase is per view here: the pattern is laid out in the view.

@@ -98,7 +98,7 @@ fn proj_json(cam: Camera, w: f64, h: f64) -> Value {
 /// `select.projected` params for `tool` with `points` (view device px).
 pub(crate) fn params(app: &PhotocraftApp, tool: Tool, mode: &str, points: &[[f64; 2]], cam: Camera, w: f64, h: f64) -> Option<Value> {
     let o = &app.ui.tool_options;
-    let mut p = json!({"mode": mode, "antiAlias": o.anti_alias, "sampleAllLayers": o.sample_all_layers, "projection": proj_json(cam, w, h)});
+    let mut p = json!({"mode": mode, "antiAlias": o.anti_alias, "sampleAllLayers": o.sample_all.get(tool), "projection": proj_json(cam, w, h)});
     let (a, b) = (points.first().copied()?, points.last().copied()?);
     let rect = json!([a[0], a[1], b[0], b[1]]);
     match tool {
@@ -184,7 +184,7 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
     }
     let pointer = response.interact_pointer_pos().or(response.hover_pos());
     let press = (response.clicked() || response.drag_started_by(egui::PointerButton::Primary)).then(|| response.interact_pointer_pos()).flatten();
-    let projection_params = |app: &PhotocraftApp| json!({"projection": proj_json(cam, w, h), "sampleAllLayers": app.ui.tool_options.sample_all_layers});
+    let projection_params = |app: &PhotocraftApp| json!({"projection": proj_json(cam, w, h), "sampleAllLayers": app.ui.tool_options.sample_all.get(tool)});
     match tool {
         Tool::SingleRowMarquee | Tool::SingleColumnMarquee => {
             if let Some(p) = press {
