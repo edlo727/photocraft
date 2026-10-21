@@ -248,7 +248,9 @@ mod tests {
         let all = serde_json::to_value(ToolOptions::default()).unwrap();
         let all = all.as_object().unwrap();
         let listed: std::collections::BTreeSet<&str> = Tool::ALL.iter().flat_map(|t| option_keys(*t).iter().copied()).collect();
-        for k in all.keys().filter(|k| *k != "sample_all") {
+        // Live Projection's Brush Size unit and View › Float Display for Large Documents are kept
+        // with the tool options only to persist: they are view settings no tool's Reset touches.
+        for k in all.keys().filter(|k| !matches!(k.as_str(), "sample_all" | "float_display_large" | "projection_brush_doc_px")) {
             assert!(listed.contains(k.as_str()), "{k} is no tool's option");
         }
         for k in listed {
