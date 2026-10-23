@@ -78,7 +78,7 @@ pub fn intercept(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params:
 }
 
 fn paste(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize) -> Result<serde_json::Value, String> {
-    app.import_os_clipboard();
+    app.import_os_clipboard()?;
     app.clip_read_for_paste = true;
     let (cam, vp) = current(app, ctx, idx).ok_or("no projection view")?;
     let clip = app.session.clipboard.as_ref().ok_or("the clipboard is empty")?;
