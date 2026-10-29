@@ -704,7 +704,7 @@ pub static CATALOG: &[(&[&str], &str, Option<&str>, &str)] = &[
     (&["View"], "---", None, "---"),
     (&["View"], "Pattern Preview", None, "view.patternPreview"),
     (&["View"], "Pixel Art Preview", None, "view.pixelArtPreview"),
-    (&["View"], "Equirectangular Live Projection", Some("Alt+Shift+P"), "view.equirectLiveProjection"),
+    (&["View"], "Equirectangular Live Projection", Some("Cmd+Alt+Shift+J"), "view.equirectLiveProjection"),
     (&["View"], "Projection Brush Size in Document Pixels", None, "view.projectionBrushDocumentPixels"),
     (&["View"], "Float Display for Large Documents", None, "view.floatDisplayLargeDocuments"),
     (&["Window", "Arrange"], "Tile All Vertically", None, "window.arrange.tileAllVertically"),
