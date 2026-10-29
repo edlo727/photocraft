@@ -23,8 +23,12 @@ pub fn supported(t: Tool) -> bool {
 pub fn unavailable_message(tool: Tool) -> String {
     let name = crate::live_projection::tool_name(tool);
     match tool {
-        Tool::Crop | Tool::PerspectiveCrop => format!("{name}: cropping a latlong breaks the 360° panorama. Turn off Equirectangular Live Projection (View menu) to crop the flat image."),
-        Tool::Slice | Tool::SliceSelect => format!("{name}: slices are web-export rectangles on the flat image. Turn off Equirectangular Live Projection (View menu) to use them."),
+        Tool::Crop | Tool::PerspectiveCrop => {
+            format!("{name}: cropping a latlong breaks the 360° panorama. Turn off Equirectangular Live Projection (View menu) to crop the flat image.")
+        }
+        Tool::Slice | Tool::SliceSelect => {
+            format!("{name}: slices are web-export rectangles on the flat image. Turn off Equirectangular Live Projection (View menu) to use them.")
+        }
         Tool::Artboard | Tool::Frame => format!("{name}: artboards and frames are flat layout tools and aren't available in Equirectangular Live Projection."),
         _ => format!("{name} is not available in Equirectangular Live Projection: turn it off in the View menu to use it."),
     }
@@ -49,7 +53,18 @@ pub(crate) fn angle_deg(vp: &ViewProjection, a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: &mut ProjectionView, vp: &ViewProjection, idx: usize, tool: Tool) {
+pub fn tool(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    rect: Rect,
+    ppp: f32,
+    cam: &mut ProjectionView,
+    vp: &ViewProjection,
+    idx: usize,
+    tool: Tool,
+) {
     let mods = ctx.input(|i| i.modifiers);
     if response.hovered() {
         ctx.set_cursor_icon(match tool {
@@ -80,7 +95,7 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
             }
         }
         Tool::Ruler => {
-            let id = egui::Id::new(("pc-live-projection-ruler", idx));
+            let id = egui::Id::unique(("pc-live-projection-ruler", idx));
             if response.drag_started()
                 && let Some(p) = ctx.input(|i| i.pointer.press_origin())
             {

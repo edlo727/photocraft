@@ -150,7 +150,7 @@ pub(crate) fn bucket(s: &mut Session, params: &Value, seed: (i32, i32)) -> Resul
         };
         let Some(region) = seam_region(&mut img, rarea, seed, b.tolerance, b.contiguous, b.anti_alias) else { return Ok(Rect::EMPTY) };
         let bbox = region.bbox;
-        photocraft_algo::paint::bucket_fill_region_inks(surf, &region, b.opacity, sel.as_ref(), lock, |_, _| b.color, b.inks);
+        photocraft_algo::paint::bucket_fill_region_inks(surf, &region, b.opacity, sel.as_ref(), lock, |_, _| b.color, b.inks, b.mode);
         surf.prune();
         Ok(bbox)
     })
@@ -304,7 +304,8 @@ mod tests {
         let (w, h) = (1024usize, 512usize);
         for shape in SHAPES {
             let g = SphereGradient::new(&vp, [400.0, 550.0], [400.0, 100.0], shape).unwrap();
-            let img: Vec<f32> = (0..w * h).map(|i| g.t(crate::equirect::equirect_to_dir((i % w) as f64 + 0.5, (i / w) as f64 + 0.5, w as f64, h as f64))).collect();
+            let img: Vec<f32> =
+                (0..w * h).map(|i| g.t(crate::equirect::equirect_to_dir((i % w) as f64 + 0.5, (i / w) as f64 + 0.5, w as f64, h as f64))).collect();
             if let Ok(out) = std::env::var("GRADIENT_PGM") {
                 let mut bytes = format!("P5 {w} {h} 255\n").into_bytes();
                 bytes.extend(img.iter().map(|t| (t * 255.0).round() as u8));

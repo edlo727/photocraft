@@ -43,11 +43,7 @@ impl Camera {
     /// The camera with yaw wrapped, pitch and FOV clamped (non-finite values reset).
     pub fn normalized(self) -> Camera {
         let f = |v: f64, d: f64| if v.is_finite() { v } else { d };
-        Camera {
-            yaw: wrap_deg(self.yaw),
-            pitch: f(self.pitch, 0.0).clamp(-MAX_PITCH, MAX_PITCH),
-            fov: f(self.fov, 90.0).clamp(MIN_FOV, MAX_FOV),
-        }
+        Camera { yaw: wrap_deg(self.yaw), pitch: f(self.pitch, 0.0).clamp(-MAX_PITCH, MAX_PITCH), fov: f(self.fov, 90.0).clamp(MIN_FOV, MAX_FOV) }
     }
 
     /// Forward, right and up unit vectors.
@@ -348,7 +344,9 @@ mod tests {
 
     #[test]
     fn rotation_between_maps_a_to_b_and_is_orthonormal() {
-        for (a, b) in [([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), ([0.3, 0.4, -0.8], [-0.2, 0.9, 0.1]), ([0.0, 1.0, 0.0], [0.0, -1.0, 0.0]), ([1.0, 0.0, 0.0], [1.0, 0.0, 0.0])] {
+        for (a, b) in
+            [([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), ([0.3, 0.4, -0.8], [-0.2, 0.9, 0.1]), ([0.0, 1.0, 0.0], [0.0, -1.0, 0.0]), ([1.0, 0.0, 0.0], [1.0, 0.0, 0.0])]
+        {
             let q = rotation_between(a, b);
             let m = rot(&q, normalize(a));
             let b = normalize(b);

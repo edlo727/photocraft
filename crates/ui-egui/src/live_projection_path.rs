@@ -14,7 +14,17 @@ use crate::live_projection::ProjectionView;
 use crate::{PhotocraftApp, Tool};
 
 pub fn supported(t: Tool) -> bool {
-    matches!(t, Tool::Pen | Tool::FreeformPen | Tool::CurvaturePen | Tool::AddAnchorPoint | Tool::DeleteAnchorPoint | Tool::ConvertPoint | Tool::PathSelection | Tool::DirectSelection)
+    matches!(
+        t,
+        Tool::Pen
+            | Tool::FreeformPen
+            | Tool::CurvaturePen
+            | Tool::AddAnchorPoint
+            | Tool::DeleteAnchorPoint
+            | Tool::ConvertPoint
+            | Tool::PathSelection
+            | Tool::DirectSelection
+    )
 }
 
 /// A knot being drawn, in view px.
@@ -44,10 +54,10 @@ enum Grab {
 }
 
 fn draft_id(idx: usize) -> egui::Id {
-    egui::Id::new(("pc-live-projection-pen", idx))
+    egui::Id::unique(("pc-live-projection-pen", idx))
 }
 fn grab_id(idx: usize) -> egui::Id {
-    egui::Id::new(("pc-live-projection-path-grab", idx))
+    egui::Id::unique(("pc-live-projection-path-grab", idx))
 }
 
 fn view_json(cam: &ProjectionView, vp: &ViewProjection) -> Value {
@@ -165,7 +175,17 @@ pub fn draw(app: &PhotocraftApp, ctx: &egui::Context, painter: &egui::Painter, r
 
 /// Handle a Pen-family tool on the projection canvas.
 #[allow(clippy::too_many_arguments)]
-pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, rect: Rect, ppp: f32, cam: &ProjectionView, vp: &ViewProjection, idx: usize, tool: Tool) {
+pub fn tool(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    rect: Rect,
+    ppp: f32,
+    cam: &ProjectionView,
+    vp: &ViewProjection,
+    idx: usize,
+    tool: Tool,
+) {
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     let tol = f64::from(6.0 * ppp);
     if response.hovered() {
@@ -243,16 +263,31 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
 
 /// Path Selection, Direct Selection and the anchor tools on the stored work path.
 #[allow(clippy::too_many_arguments)]
-fn edit(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, _cam: &ProjectionView, vp: &ViewProjection, idx: usize, tool: Tool, to_view: impl Fn(Pos2) -> [f64; 2], tol: f64) {
+fn edit(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    _cam: &ProjectionView,
+    vp: &ViewProjection,
+    idx: usize,
+    tool: Tool,
+    to_view: impl Fn(Pos2) -> [f64; 2],
+    tol: f64,
+) {
     let Some(st) = app.session.documents().get(idx) else { return };
     let (iw, ih) = (f64::from(st.doc.size.width), f64::from(st.doc.size.height));
     let Some(path) = st.doc.work_path.clone() else { return };
     let knots = view_knots(app, vp);
-    let near_anchor = |q: [f64; 2]| knots.iter().filter_map(|(s, k, a, ..)| a.map(|a| (dist(a, q), *s, *k))).filter(|(d, ..)| *d <= tol).min_by(|a, b| a.0.total_cmp(&b.0));
+    let near_anchor =
+        |q: [f64; 2]| knots.iter().filter_map(|(s, k, a, ..)| a.map(|a| (dist(a, q), *s, *k))).filter(|(d, ..)| *d <= tol).min_by(|a, b| a.0.total_cmp(&b.0));
     let near_handle = |q: [f64; 2]| {
         knots
             .iter()
-            .flat_map(|(s, k, a, i, o)| [(i, false), (o, true)].into_iter().filter_map(move |(h, out)| h.filter(|h| a.is_none_or(|a| dist(a, *h) > 0.5)).map(|h| (dist(h, q), *s, *k, out))))
+            .flat_map(|(s, k, a, i, o)| {
+                [(i, false), (o, true)]
+                    .into_iter()
+                    .filter_map(move |(h, out)| h.filter(|h| a.is_none_or(|a| dist(a, *h) > 0.5)).map(|h| (dist(h, q), *s, *k, out)))
+            })
             .filter(|(d, ..)| *d <= tol)
             .min_by(|a, b| a.0.total_cmp(&b.0))
     };
@@ -313,7 +348,9 @@ fn edit(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response,
         let q = to_view(p);
         let g = match tool {
             Tool::PathSelection => Some(Grab::Path(vp.view_to_dir(q[0], q[1]))),
-            Tool::DirectSelection | Tool::ConvertPoint => near_handle(q).map(|(_, s, k, o)| Grab::Handle(s, k, o)).or_else(|| near_anchor(q).map(|(_, s, k)| Grab::Anchor(s, k))),
+            Tool::DirectSelection | Tool::ConvertPoint => {
+                near_handle(q).map(|(_, s, k, o)| Grab::Handle(s, k, o)).or_else(|| near_anchor(q).map(|(_, s, k)| Grab::Anchor(s, k)))
+            }
             _ => None,
         };
         if let Some(g) = g {
@@ -374,7 +411,7 @@ fn edit(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response,
         report(app, r);
     } else if response.dragged() {
         // Live: shown by replacing the work path for drawing only.
-        ctx.data_mut(|x| x.insert_temp(egui::Id::new(("pc-live-projection-path-live", idx)), moved));
+        ctx.data_mut(|x| x.insert_temp(egui::Id::unique(("pc-live-projection-path-live", idx)), moved));
         ctx.request_repaint();
     }
 }
@@ -383,10 +420,10 @@ fn edit(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response,
 pub fn live_path(ctx: &egui::Context, idx: usize) -> Option<photocraft_doc::Path> {
     let grabbing = ctx.data(|x| x.get_temp::<(Grab, photocraft_doc::Path)>(grab_id(idx))).is_some();
     if !grabbing {
-        ctx.data_mut(|x| x.remove::<photocraft_doc::Path>(egui::Id::new(("pc-live-projection-path-live", idx))));
+        ctx.data_mut(|x| x.remove::<photocraft_doc::Path>(egui::Id::unique(("pc-live-projection-path-live", idx))));
         return None;
     }
-    ctx.data(|x| x.get_temp(egui::Id::new(("pc-live-projection-path-live", idx))))
+    ctx.data(|x| x.get_temp(egui::Id::unique(("pc-live-projection-path-live", idx))))
 }
 
 /// Make Selection, Fill Path and Stroke Path while the active view is in projection.

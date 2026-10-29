@@ -101,7 +101,8 @@ fn begin_transform(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usize) -> 
     let preview = XformPreview::new(&app.session, &json!({"projection": view})).map_err(|e| e.to_string())?;
     let rect = preview.content_rect().ok_or("Nothing to transform in the view")?;
     let quad = corners(rect);
-    app.projection_xform = Some(Xform { doc: idx, kind: Kind::Transform { rect, quad, drag: None }, preview, view, texture: None, shown: None, dirty: false, last: 0.0 });
+    app.projection_xform =
+        Some(Xform { doc: idx, kind: Kind::Transform { rect, quad, drag: None }, preview, view, texture: None, shown: None, dirty: false, last: 0.0 });
     app.ui.status = "Free Transform: drag the handles (Shift: free scale, Ctrl: distort), outside to rotate; Enter applies, Esc cancels.".into();
     app.ui.status_error = false;
     Ok(())
@@ -152,7 +153,17 @@ impl Xform {
 
 /// The Move tool in the projection canvas.
 #[allow(clippy::too_many_arguments)]
-pub fn move_tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: &ProjectionView, vp: &ViewProjection, idx: usize) {
+pub fn move_tool(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    rect: Rect,
+    ppp: f32,
+    cam: &ProjectionView,
+    vp: &ViewProjection,
+    idx: usize,
+) {
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     if response.hovered() {
         ctx.set_cursor_icon(egui::CursorIcon::Move);
@@ -164,7 +175,16 @@ pub fn move_tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::
         let view = view_json(cam, vp);
         match XformPreview::new(&app.session, &json!({"projection": view})) {
             Ok(preview) => {
-                app.projection_xform = Some(Xform { doc: idx, kind: Kind::Move { start: vp.view_to_dir(x, y), q: photocraft_engine::equirect::IDENTITY }, preview, view, texture: None, shown: None, dirty: false, last: 0.0 });
+                app.projection_xform = Some(Xform {
+                    doc: idx,
+                    kind: Kind::Move { start: vp.view_to_dir(x, y), q: photocraft_engine::equirect::IDENTITY },
+                    preview,
+                    view,
+                    texture: None,
+                    shown: None,
+                    dirty: false,
+                    last: 0.0,
+                });
             }
             Err(e) => {
                 app.ui.status = e.to_string();
@@ -273,7 +293,11 @@ fn dragged(rect: [f64; 4], d: &Drag, p: [f64; 2], shift: bool, ctrl: bool) -> [[
                         (sx, sy) = (k, k);
                     }
                     let (nx, ny) = (ax + (src[i][0] - ax) * sx, ay + (src[i][1] - ay) * sy);
-                    if i == 0 || i == 3 { r[0] = nx } else { r[2] = nx }
+                    if i == 0 || i == 3 {
+                        r[0] = nx
+                    } else {
+                        r[2] = nx
+                    }
                     if i < 2 { r[1] = ny } else { r[3] = ny }
                 }
                 Handle::Edge(0) => r[1] = s[1],

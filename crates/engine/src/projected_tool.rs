@@ -265,7 +265,11 @@ pub fn projected_tool(s: &mut Session, p: &Value) -> Result<Value> {
         let params = p.get("params").cloned().unwrap_or_else(|| json!({}));
         let q = p.get("projection").ok_or_else(|| bad("missing `projection`"))?;
         let g = |k: &str, d: f64| q.get(k).and_then(Value::as_f64).unwrap_or(d);
-        let vp = ViewProjection::new(Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) }, g("width", 1.0).max(1.0), g("height", 1.0).max(1.0));
+        let vp = ViewProjection::new(
+            Camera { yaw: g("yaw", 0.0), pitch: g("pitch", 0.0), fov: g("fov", 90.0) },
+            g("width", 1.0).max(1.0),
+            g("height", 1.0).max(1.0),
+        );
         let (a, b) = (points[0], points[points.len() - 1]);
         let dmg = if cmd == "paint.gradient" {
             crate::projected_fill::gradient(s, &params, &vp, [a[0], a[1]], [b[0], b[1]])?
@@ -419,7 +423,8 @@ mod tests {
         assert!(r.is_ok() && rgba(&s, 330, 180)[0] > 0.5, "F32 healing: {r:?} -> {:?}", rgba(&s, 330, 180));
         let mut s = float_doc();
         s.execute("select.rect", json!({"x": 322, "y": 172, "width": 16, "height": 16})).unwrap();
-        let r = s.execute(CMD, json!({"command": "paint.patch", "params": {"mode": "source", "target": "pixels"}, "rotation": q.concat(), "projection": view()}));
+        let r =
+            s.execute(CMD, json!({"command": "paint.patch", "params": {"mode": "source", "target": "pixels"}, "rotation": q.concat(), "projection": view()}));
         assert!(r.is_ok() && rgba(&s, 330, 180)[0] > 0.5, "F32 patch: {r:?} -> {:?}", rgba(&s, 330, 180));
         // Remove, Red Eye and Content-Aware Move run too.
         for (cmd, extra) in [("paint.remove", json!({"points": [[dot[0], dot[1], 1.0]]})), ("paint.redEye", json!({"points": [[dot[0], dot[1], 1.0]]}))] {
@@ -432,8 +437,6 @@ mod tests {
         let r = s.execute(CMD, json!({"command": "paint.contentAwareMove", "params": {"offset": [20, 0], "target": "pixels"}, "projection": view()}));
         assert!(r.is_ok(), "F32 content-aware move: {r:?}");
     }
-
-
 }
 
 #[cfg(test)]

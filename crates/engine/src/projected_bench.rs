@@ -69,7 +69,8 @@ mod tests {
             crate::brush_cmds::projected::to_view(l, &vp, Rect::new(0, 0, 1920, 1080), w as i32, h as i32)
         });
         t("projected brush stroke + write-back", || {
-            s.execute("paint.projectedStroke", json!({"points": [[400, 500], [900, 520], [1400, 600]], "size": 80, "hardness": 80, "projection": view})).unwrap()
+            s.execute("paint.projectedStroke", json!({"points": [[400, 500], [900, 520], [1400, 600]], "size": 80, "hardness": 80, "projection": view}))
+                .unwrap()
         });
         t("projected spot healing", || {
             s.execute("paint.projectedTool", json!({"command": "paint.spotHealing", "params": {"type": "proximityMatch", "target": "pixels"}, "projection": view, "points": [[900, 540, 1.0], [920, 540, 1.0]]})).unwrap()
@@ -80,14 +81,19 @@ mod tests {
         t("projected paint bucket (whole latlong)", || {
             s.execute("paint.projectedTool", json!({"command": "paint.bucket", "params": {"target": "pixels", "tolerance": 30, "contiguous": true, "contents": "foreground"}, "projection": view, "points": [[960, 900, 1.0]]})).unwrap()
         });
-        let q = rotation_between(equirect_to_dir(f64::from(w) / 2.0, f64::from(h) / 2.0, f64::from(w), f64::from(h)), equirect_to_dir(f64::from(w) / 2.0 + f64::from(w) / 10.0, f64::from(h) / 2.0, f64::from(w), f64::from(h)));
+        let q = rotation_between(
+            equirect_to_dir(f64::from(w) / 2.0, f64::from(h) / 2.0, f64::from(w), f64::from(h)),
+            equirect_to_dir(f64::from(w) / 2.0 + f64::from(w) / 10.0, f64::from(h) / 2.0, f64::from(w), f64::from(h)),
+        );
         t("whole-layer projected Move (36 deg yaw)", || s.execute("layer.projectedRotate", json!({"rotation": q.concat()})).unwrap());
         s.execute("select.rect", json!({"x": w / 2, "y": h / 2, "width": w / 20, "height": h / 20})).unwrap();
         t("selection projected Move", || s.execute("layer.projectedRotate", json!({"rotation": q.concat()})).unwrap());
         s.execute("select.deselect", json!({})).unwrap();
         // Flat (non-projection) equivalents.
         t("flat brush stroke", || s.execute("paint.stroke", json!({"points": [[w / 4, h / 2], [w / 2, h / 2 + 50]], "size": 80, "hardness": 80})).unwrap());
-        t("flat gradient (whole doc)", || s.execute("paint.gradient", json!({"from": [0, 0], "to": [w, h], "colors": ["#000000", "#ffffff"], "opacity": 50})).unwrap());
+        t("flat gradient (whole doc)", || {
+            s.execute("paint.gradient", json!({"from": [0, 0], "to": [w, h], "colors": ["#000000", "#ffffff"], "opacity": 50})).unwrap()
+        });
         t("flat paint bucket", || s.execute("paint.bucket", json!({"x": 10, "y": h - 10, "tolerance": 30})).unwrap());
         t("undo x3", || {
             for _ in 0..3 {

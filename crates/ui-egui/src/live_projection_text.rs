@@ -21,7 +21,7 @@ pub(crate) struct Typing {
 }
 
 pub(crate) fn typing_id(idx: usize) -> egui::Id {
-    egui::Id::new(("pc-live-projection-typing", idx))
+    egui::Id::unique(("pc-live-projection-typing", idx))
 }
 
 fn view_json(cam: &ProjectionView, vp: &ViewProjection) -> serde_json::Value {
@@ -47,7 +47,18 @@ pub(crate) fn commit_text(app: &mut PhotocraftApp, ctx: &egui::Context, cam: &Pr
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: &ProjectionView, vp: &ViewProjection, idx: usize, tool: Tool) {
+pub fn tool(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    rect: Rect,
+    ppp: f32,
+    cam: &ProjectionView,
+    vp: &ViewProjection,
+    idx: usize,
+    tool: Tool,
+) {
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     if matches!(tool, Tool::Type | Tool::VerticalType) {
         if response.hovered() {
@@ -71,12 +82,23 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
             return;
         }
         let size = (app.ui.tool_options.type_size as f32 / ppp).max(8.0);
-        egui::Area::new(egui::Id::new(("pc-live-projection-type-area", idx))).fixed_pos(t.screen - vec2(0.0, size)).order(egui::Order::Foreground).show(ctx, |ui| {
-            let fg = app.session.tools.foreground;
-            let col = Color32::from_rgb((fg[0].clamp(0.0, 1.0) * 255.0) as u8, (fg[1].clamp(0.0, 1.0) * 255.0) as u8, (fg[2].clamp(0.0, 1.0) * 255.0) as u8);
-            let r = ui.add(egui::TextEdit::multiline(&mut t.text).font(egui::FontId::proportional(size)).text_color(col).desired_rows(1).desired_width(400.0).hint_text("Type, then Ctrl+Enter"));
-            r.request_focus();
-        });
+        egui::Area::new(egui::Id::unique(("pc-live-projection-type-area", idx))).fixed_pos(t.screen - vec2(0.0, size)).order(egui::Order::Foreground).show(
+            ctx,
+            |ui| {
+                let fg = app.session.tools.foreground;
+                let col =
+                    Color32::from_rgb((fg[0].clamp(0.0, 1.0) * 255.0) as u8, (fg[1].clamp(0.0, 1.0) * 255.0) as u8, (fg[2].clamp(0.0, 1.0) * 255.0) as u8);
+                let r = ui.add(
+                    egui::TextEdit::multiline(&mut t.text)
+                        .font(egui::FontId::proportional(size))
+                        .text_color(col)
+                        .desired_rows(1)
+                        .desired_width(400.0)
+                        .hint_text("Type, then Ctrl+Enter"),
+                );
+                r.request_focus();
+            },
+        );
         ctx.data_mut(|d| d.insert_temp(typing_id(idx), t));
         return;
     }
@@ -84,7 +106,7 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
     if response.hovered() {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
     }
-    let id = egui::Id::new(("pc-live-projection-shape", idx));
+    let id = egui::Id::unique(("pc-live-projection-shape", idx));
     if response.drag_started_by(PointerButton::Primary)
         && let Some(p) = ctx.input(|i| i.pointer.press_origin())
     {

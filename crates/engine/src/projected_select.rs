@@ -9,8 +9,8 @@
 
 use photocraft_algo::segment::{SurfaceSampler, grabcut, quick};
 use photocraft_algo::selection::{self as sel, Region, SelectionMode};
-use photocraft_geom::Rect;
 use photocraft_color::PixelFormat;
+use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
 

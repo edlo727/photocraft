@@ -128,7 +128,10 @@ impl Trig {
     fn new(iw: i32, ih: i32) -> Self {
         let (fw, fh) = (f64::from(iw), f64::from(ih));
         let lon = (0..iw).map(|x| ((f64::from(x) + 0.5) / fw - 0.5) * std::f64::consts::TAU).map(f64::sin_cos).collect();
-        let lat = (0..ih).map(|y| ((0.5 - (f64::from(y) + 0.5) / fh) * std::f64::consts::PI).clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2)).map(f64::sin_cos).collect();
+        let lat = (0..ih)
+            .map(|y| ((0.5 - (f64::from(y) + 0.5) / fh) * std::f64::consts::PI).clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2))
+            .map(f64::sin_cos)
+            .collect();
         Trig { lon, lat }
     }
     fn dir(&self, x: i32, y: i32) -> [f64; 3] {
@@ -158,7 +161,13 @@ fn move_region(r: Rect, q: &Rot, iw: i32, ih: i32) -> MoveRegion {
     let inside = |d: [f64; 3]| {
         let [u, v] = dir_to_equirect(d, fw, fh);
         let (x0, x1) = (f64::from(r.x0) - pad, f64::from(r.x1) + pad);
-        let du = if u < x0 { u + fw } else if u > x1 { u - fw } else { u };
+        let du = if u < x0 {
+            u + fw
+        } else if u > x1 {
+            u - fw
+        } else {
+            u
+        };
         du >= x0 && du <= x1 && v >= f64::from(r.y0) - pad && v <= f64::from(r.y1) + pad
     };
     // Sample the source rect's edges densely and its inside coarsely.
@@ -365,7 +374,17 @@ fn invert3(m: &[f64; 9]) -> Option<[f64; 9]> {
     if det.abs() < 1e-15 {
         return None;
     }
-    Some([(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det, (f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det, (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det])
+    Some([
+        (e * i - f * h) / det,
+        (c * h - b * i) / det,
+        (b * f - c * e) / det,
+        (f * g - d * i) / det,
+        (a * i - c * g) / det,
+        (c * d - a * f) / det,
+        (d * h - e * g) / det,
+        (b * g - a * h) / det,
+        (a * e - b * d) / det,
+    ])
 }
 
 /// `m · (x, y, 1)`, `None` past the horizon of the plane (w ≤ 0).
@@ -409,7 +428,12 @@ impl Warp {
     fn quad_bbox(&self) -> [f64; 4] {
         let xs = self.quad.map(|q| q[0]);
         let ys = self.quad.map(|q| q[1]);
-        [xs.iter().copied().fold(f64::MAX, f64::min), ys.iter().copied().fold(f64::MAX, f64::min), xs.iter().copied().fold(f64::MIN, f64::max), ys.iter().copied().fold(f64::MIN, f64::max)]
+        [
+            xs.iter().copied().fold(f64::MAX, f64::min),
+            ys.iter().copied().fold(f64::MAX, f64::min),
+            xs.iter().copied().fold(f64::MIN, f64::max),
+            ys.iter().copied().fold(f64::MIN, f64::max),
+        ]
     }
 }
 
@@ -426,7 +450,15 @@ fn rows_of(proj: &ViewProjection, rects: &[[f64; 4]], iw: u32, ih: u32) -> Optio
 
 /// A new layer above the active one holding `src` over `cb` mapped onto the view `quad`
 /// (Paste, and the Type and shape tools' rendered layers).
-pub(crate) fn place_new_layer(s: &mut Session, src: &Surface, cb: Rect, quad: [[f64; 2]; 4], proj: &ViewProjection, label: &str, name: Option<String>) -> Result<photocraft_doc::LayerId> {
+pub(crate) fn place_new_layer(
+    s: &mut Session,
+    src: &Surface,
+    cb: Rect,
+    quad: [[f64; 2]; 4],
+    proj: &ViewProjection,
+    label: &str,
+    name: Option<String>,
+) -> Result<photocraft_doc::LayerId> {
     const CMD: &str = "layer.projectedPlace";
     let proj = *proj;
     let st = s.active().ok_or(EngineError::NoDocument)?;
@@ -436,7 +468,8 @@ pub(crate) fn place_new_layer(s: &mut Session, src: &Surface, cb: Rect, quad: [[
         if cb.is_empty() {
             return Err(EngineError::Other("the clipboard is empty".into()));
         }
-        let warp = Warp::new([f64::from(cb.x0), f64::from(cb.y0), f64::from(cb.x1), f64::from(cb.y1)], quad).ok_or_else(|| bad(CMD, "the quad is degenerate"))?;
+        let warp =
+            Warp::new([f64::from(cb.x0), f64::from(cb.y0), f64::from(cb.x1), f64::from(cb.y1)], quad).ok_or_else(|| bad(CMD, "the quad is degenerate"))?;
         let fmt = st.doc.pixel_format();
         let target = PixelFormat::new(fmt.mode, fmt.sample, true);
         let img = if src.format() == target { src.clone() } else { src.convert(target) };
@@ -647,7 +680,8 @@ impl XformPreview {
         let proj = projection_of(p, "projection preview")?;
         let st = s.active().ok_or(EngineError::NoDocument)?;
         let id = st.active_layer.ok_or_else(|| EngineError::Other("no active layer".into()))?;
-        let layer = st.doc.layer(id).and_then(|l| l.surface()).ok_or_else(|| EngineError::Other("the active layer has no pixels (rasterize it first)".into()))?;
+        let layer =
+            st.doc.layer(id).and_then(|l| l.surface()).ok_or_else(|| EngineError::Other("the active layer has no pixels (rasterize it first)".into()))?;
         let (iw, ih) = (st.doc.size.width as i32, st.doc.size.height as i32);
         let view = Rect::new(0, 0, proj.w as i32, proj.h as i32);
         let pre = crate::brush_cmds::projected::to_view(layer, &proj, view, iw, ih);
@@ -824,7 +858,10 @@ mod tests {
     #[test]
     fn move_on_the_opaque_background_leaves_the_background_colour() {
         let mut s = doc();
-        let opaque = { let d = s.active().unwrap(); !d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().format().alpha };
+        let opaque = {
+            let d = s.active().unwrap();
+            !d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().format().alpha
+        };
         s.tools.background = [0.0, 1.0, 0.0, 1.0];
         s.execute("select.rect", json!({"x": 1000, "y": 500, "width": 40, "height": 40})).unwrap();
         let q = rotation_between(equirect_to_dir(1020.0, 520.0, 2048.0, 1024.0), equirect_to_dir(1300.0, 520.0, 2048.0, 1024.0));
@@ -863,7 +900,8 @@ mod tests {
         s.execute("select.rect", json!({"x": 1000, "y": 500, "width": 40, "height": 40})).unwrap();
         let r = [c[0] - 40.0, c[1] - 40.0, c[0] + 40.0, c[1] + 40.0];
         // Twice the size, shifted right by 150 px.
-        let q = [[c[0] - 80.0 + 150.0, c[1] - 80.0], [c[0] + 80.0 + 150.0, c[1] - 80.0], [c[0] + 80.0 + 150.0, c[1] + 80.0], [c[0] - 80.0 + 150.0, c[1] + 80.0]];
+        let q =
+            [[c[0] - 80.0 + 150.0, c[1] - 80.0], [c[0] + 80.0 + 150.0, c[1] - 80.0], [c[0] + 80.0 + 150.0, c[1] + 80.0], [c[0] - 80.0 + 150.0, c[1] + 80.0]];
         let pv = XformPreview::new(&s, &json!({"projection": view})).unwrap();
         assert!(pv.place(r, q).is_some(), "a live preview");
         s.execute("layer.projectedPlace", json!({"projection": view, "rect": r, "quad": q, "source": "layer"})).unwrap();
@@ -924,7 +962,12 @@ pub fn projected_render(s: &mut Session, p: &Value) -> Result<Value> {
     if cb.is_empty() {
         return Err(EngineError::Other("nothing to place (empty text or shape)".into()));
     }
-    let quad = [[f64::from(cb.x0), f64::from(cb.y0)], [f64::from(cb.x1), f64::from(cb.y0)], [f64::from(cb.x1), f64::from(cb.y1)], [f64::from(cb.x0), f64::from(cb.y1)]];
+    let quad = [
+        [f64::from(cb.x0), f64::from(cb.y0)],
+        [f64::from(cb.x1), f64::from(cb.y0)],
+        [f64::from(cb.x1), f64::from(cb.y1)],
+        [f64::from(cb.x0), f64::from(cb.y1)],
+    ];
     let label = if cmd == "type.create" { "Type" } else { "Shape" };
     let keep = s.active().and_then(|d| d.doc.selection.clone());
     let id = place_new_layer(s, &surf, cb, quad, &proj, label, Some(name))?;
@@ -949,7 +992,11 @@ mod render_tests {
         let view = json!({"yaw": 30.0, "pitch": 40.0, "fov": 60.0, "width": 800, "height": 600});
         let vp = ViewProjection::new(Camera { yaw: 30.0, pitch: 40.0, fov: 60.0 }, 800.0, 600.0);
         let n = s.active().unwrap().doc.walk().len();
-        s.execute("layer.projectedRender", json!({"command": "shape.create", "params": {"kind": "rect", "rect": [300, 250, 200, 100], "fill": "#ff0000"}, "projection": view})).unwrap();
+        s.execute(
+            "layer.projectedRender",
+            json!({"command": "shape.create", "params": {"kind": "rect", "rect": [300, 250, 200, 100], "fill": "#ff0000"}, "projection": view}),
+        )
+        .unwrap();
         assert_eq!(s.active().unwrap().doc.walk().len(), n + 1);
         let d = s.active().unwrap();
         let surf = d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap();
@@ -982,7 +1029,9 @@ mod move_region_tests {
                 let (x, y) = ((i % 1024) as f32, (i / 1024) as f32);
                 px[0] = (x * 0.37).sin() * 4.0 + 4.0; // HDR
                 px[1] = (y * 0.11).cos();
-                if n > 2 { px[2] = ((x + y) * 0.05).sin(); }
+                if n > 2 {
+                    px[2] = ((x + y) * 0.05).sin();
+                }
                 px[n - 1] = 1.0;
             }
             buf[(300 * 1024 + 520) * n] = f32::INFINITY;

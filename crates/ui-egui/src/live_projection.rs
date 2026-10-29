@@ -104,7 +104,13 @@ pub(crate) fn look_keys(ctx: &egui::Context, cam: &mut ProjectionView) {
     use egui::Key;
     ctx.input_mut(|i| {
         let m = i.modifiers;
-        let step = if m.shift { 10.0 } else if m.alt { 0.5 } else { 2.0 };
+        let step = if m.shift {
+            10.0
+        } else if m.alt {
+            0.5
+        } else {
+            2.0
+        };
         for (k, dy, dp) in [(Key::ArrowLeft, -1.0, 0.0), (Key::ArrowRight, 1.0, 0.0), (Key::ArrowUp, 0.0, 1.0), (Key::ArrowDown, 0.0, -1.0)] {
             if i.consume_key(m, k) {
                 cam.yaw = wrap_deg(f64::from(cam.yaw + dy * step)) as f32;
@@ -255,7 +261,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             rotation: 0.0,
             shadow: false,
             pixel_grid: false,
-            view_key: egui::Id::new(("pc-canvas-projection", ctx.viewport_id(), idx)).value(),
+            view_key: egui::Id::unique(("pc-canvas-projection", ctx.viewport_id(), idx)).value(),
             display: crate::canvas::sync_display_lut(app, &doc, doc.id.0, output),
             output: output.unwrap_or(0),
             hdr: crate::canvas::hdr_preview(app, &doc),
@@ -321,7 +327,19 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
                     None
                 };
                 return match photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
-                    Ok(t) => Some(Live { doc: idx, cmd: "paint.projectedTool", params: p, rotation: q, points: vec![first], preview: LivePreview::Tool(Box::new(t)), texture: None, shown: None, rendered: 0, last: 0.0, cost: 0.0 }),
+                    Ok(t) => Some(Live {
+                        doc: idx,
+                        cmd: "paint.projectedTool",
+                        params: p,
+                        rotation: q,
+                        points: vec![first],
+                        preview: LivePreview::Tool(Box::new(t)),
+                        texture: None,
+                        shown: None,
+                        rendered: 0,
+                        last: 0.0,
+                        cost: 0.0,
+                    }),
                     Err(e) => {
                         app.ui.status = e.to_string();
                         app.ui.status_error = true;
@@ -342,7 +360,19 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             }
             .map(LivePreview::Stroke);
             match preview {
-                Ok(preview) => Some(Live { doc: idx, cmd, params: p, rotation: q, points: vec![first], preview, texture: None, shown: None, rendered: 0, last: 0.0, cost: 0.0 }),
+                Ok(preview) => Some(Live {
+                    doc: idx,
+                    cmd,
+                    params: p,
+                    rotation: q,
+                    points: vec![first],
+                    preview,
+                    texture: None,
+                    shown: None,
+                    rendered: 0,
+                    last: 0.0,
+                    cost: 0.0,
+                }),
                 Err(e) => {
                     app.ui.status = e.to_string();
                     app.ui.status_error = true;
@@ -404,10 +434,12 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
         // Clone source crosshair: where the pointer (or the stroke) samples from.
         if cloning && let Some(src) = cam.clone_source {
             let live = app.projection_live.as_ref().filter(|l| l.doc == idx);
-            let at = live.and_then(|l| l.points.last().copied()).or_else(|| response.hover_pos().map(|h| {
-                let [x, y] = to_view(h);
-                [x, y, 1.0]
-            }));
+            let at = live.and_then(|l| l.points.last().copied()).or_else(|| {
+                response.hover_pos().map(|h| {
+                    let [x, y] = to_view(h);
+                    [x, y, 1.0]
+                })
+            });
             let first = live.and_then(|l| l.points.first().copied());
             let shown = match (at, cam.clone_rotation.filter(|_| app.ui.tool_options.clone_aligned)) {
                 (Some(a), Some(q)) => vp.dir_to_view(rot(&rot_of(&q), vp.view_to_dir(a[0], a[1]))),
@@ -596,7 +628,7 @@ enum PatchDrag {
 /// Where the marching ants of document `idx` are drawn shifted to (view points), while a Patch
 /// or Content-Aware Move drag moves the selection.
 pub(crate) fn ants_shift_id(idx: usize) -> egui::Id {
-    egui::Id::new(("pc-live-projection-ants-shift", idx))
+    egui::Id::unique(("pc-live-projection-ants-shift", idx))
 }
 
 /// Whether view device pixel `v` lies inside the selection of the active document.
@@ -616,8 +648,19 @@ fn in_selection(app: &PhotocraftApp, vp: &ViewProjection, v: [f64; 2]) -> bool {
 /// marching ants and the patch preview following the pointer; release applies (Patch: Normal,
 /// Source; the preview runs the flat Patch on the view, rotated onto the pointer, throttled).
 #[allow(clippy::too_many_arguments)]
-fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: &ProjectionView, vp: &ViewProjection, idx: usize, tool: Tool) {
-    let id = egui::Id::new(("pc-live-projection-patch", idx));
+fn patch(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    rect: Rect,
+    ppp: f32,
+    cam: &ProjectionView,
+    vp: &ViewProjection,
+    idx: usize,
+    tool: Tool,
+) {
+    let id = egui::Id::unique(("pc-live-projection-patch", idx));
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     let to_screen = |q: [f64; 2]| -> Pos2 { rect.min + vec2(q[0] as f32, q[1] as f32) / ppp };
     let params = |app: &PhotocraftApp, start: [f64; 2], end: [f64; 2]| -> serde_json::Value {
@@ -719,14 +762,29 @@ fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
             painter.line_segment([to_screen(start), to_screen(now)], Stroke::new(1.0, Color32::from_white_alpha(160)));
             // The preview: rebuilt for each new drag position (a new source rotation), throttled.
             let t = ctx.input(|i| i.time);
-            let stale = app.projection_live.as_ref().is_none_or(|l| l.doc != idx || (t - l.last > 0.15 && l.points.first().is_none_or(|q| q[0] != now[0] || q[1] != now[1])));
+            let stale = app
+                .projection_live
+                .as_ref()
+                .is_none_or(|l| l.doc != idx || (t - l.last > 0.15 && l.points.first().is_none_or(|q| q[0] != now[0] || q[1] != now[1])));
             // Content-Aware Move is a heavy content-aware fill: no live re-run, just the ants.
             if stale && tool == Tool::Patch {
                 let p = params(app, start, now);
                 match photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
                     Ok(tool) => {
                         let texture = app.projection_live.take().and_then(|l| l.texture);
-                        let mut l = Live { doc: idx, cmd: "paint.projectedTool", params: p, rotation: None, points: vec![[now[0], now[1], 1.0]], preview: LivePreview::Tool(Box::new(tool)), texture, shown: None, rendered: 0, last: 0.0, cost: 0.0 };
+                        let mut l = Live {
+                            doc: idx,
+                            cmd: "paint.projectedTool",
+                            params: p,
+                            rotation: None,
+                            points: vec![[now[0], now[1], 1.0]],
+                            preview: LivePreview::Tool(Box::new(tool)),
+                            texture,
+                            shown: None,
+                            rendered: 0,
+                            last: 0.0,
+                            cost: 0.0,
+                        };
                         // Patch takes no points: render once now.
                         l.draw(ctx, painter, rect, ppp);
                         l.last = t;
@@ -748,10 +806,25 @@ fn patch(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
 /// Gradient (drag, with a live preview) and Paint Bucket (click) in the view: the flat tools
 /// on the resampled view through `paint.projectedTool`, with the options bar's settings.
 #[allow(clippy::too_many_arguments)]
-fn fill_tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: &ProjectionView, vp: &ViewProjection, idx: usize, tool: Tool) {
+fn fill_tool(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    rect: Rect,
+    ppp: f32,
+    cam: &ProjectionView,
+    vp: &ViewProjection,
+    idx: usize,
+    tool: Tool,
+) {
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     if response.hovered() {
-        ctx.set_cursor_icon(if tool == Tool::PaintBucket { crate::canvas::paint_bucket_cursor(ctx, response.hover_pos().unwrap_or_default()) } else { egui::CursorIcon::Crosshair });
+        ctx.set_cursor_icon(if tool == Tool::PaintBucket {
+            crate::canvas::paint_bucket_cursor(ctx, response.hover_pos().unwrap_or_default())
+        } else {
+            egui::CursorIcon::Crosshair
+        });
     }
     let o = app.ui.tool_options.clone();
     let target = crate::canvas::paint_target(app);
@@ -762,7 +835,9 @@ fn fill_tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Resp
             let [x, y] = to_view(p);
             let contents = if o.bucket_fill_pattern { "pattern" } else { "foreground" };
             let fp = json!({"tolerance": o.tolerance, "contiguous": o.contiguous, "antiAlias": o.anti_alias, "sampleAllLayers": o.sample_all.get(tool), "opacity": o.fill_opacity, "contents": contents, "target": target});
-            if let Err(e) = app.run("paint.projectedTool", json!({"command": "paint.bucket", "params": fp, "points": [[x, y, 1.0]], "projection": view_json(cam, vp)})) {
+            if let Err(e) =
+                app.run("paint.projectedTool", json!({"command": "paint.bucket", "params": fp, "points": [[x, y, 1.0]], "projection": view_json(cam, vp)}))
+            {
                 app.ui.status = e;
                 app.ui.status_error = true;
             }
@@ -776,7 +851,19 @@ fn fill_tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Resp
     {
         let [x, y] = to_view(at);
         app.projection_live = match photocraft_engine::projected_tool::ProjectedTool::new(&app.session, &p) {
-            Ok(t) => Some(Live { doc: idx, cmd: "paint.projectedTool", params: p.clone(), rotation: None, points: vec![[x, y, 1.0]], preview: LivePreview::Tool(Box::new(t)), texture: None, shown: None, rendered: 0, last: 0.0, cost: 0.0 }),
+            Ok(t) => Some(Live {
+                doc: idx,
+                cmd: "paint.projectedTool",
+                params: p.clone(),
+                rotation: None,
+                points: vec![[x, y, 1.0]],
+                preview: LivePreview::Tool(Box::new(t)),
+                texture: None,
+                shown: None,
+                rendered: 0,
+                last: 0.0,
+                cost: 0.0,
+            }),
             Err(e) => {
                 app.ui.status = e.to_string();
                 app.ui.status_error = true;
@@ -830,7 +917,9 @@ pub(crate) fn retouch_cmd(app: &PhotocraftApp, tool: Tool, alt: bool) -> Option<
     Some(match tool {
         Tool::Healing => ("paint.healingBrush", json!({"aligned": o.clone_aligned, "sampleLayer": o.clone_sample})),
         Tool::SpotHealing => ("paint.spotHealing", json!({"type": o.spot_type, "sampleAllLayers": o.sample_all.get(tool)})),
-        Tool::Blur | Tool::Sharpen | Tool::Smudge | Tool::Dodge | Tool::Burn | Tool::Sponge => crate::retouch_ui::dab_params(app, crate::retouch_ui::alt_flipped(tool, alt))?,
+        Tool::Blur | Tool::Sharpen | Tool::Smudge | Tool::Dodge | Tool::Burn | Tool::Sponge => {
+            crate::retouch_ui::dab_params(app, crate::retouch_ui::alt_flipped(tool, alt))?
+        }
         Tool::Pencil => ("paint.pencil", json!({})),
         Tool::MixerBrush => ("paint.mixerBrush", json!({})),
         Tool::ColorReplacement => ("paint.colorReplacement", crate::retouch_ui::color_replacement_params(app)),
@@ -838,7 +927,10 @@ pub(crate) fn retouch_cmd(app: &PhotocraftApp, tool: Tool, alt: bool) -> Option<
         // Each stroke is one removal here (the pending-strokes mode and New Layer stay on the
         // flat canvas: the projection writes back into the target layer).
         Tool::Remove => ("paint.remove", json!({"sampleAllLayers": o.sample_all.get(tool), "newLayer": false})),
-        Tool::BackgroundEraser => ("paint.backgroundEraser", json!({"sampling": o.bg_sampling, "limits": o.bg_limits, "tolerance": o.bg_tolerance, "protectForegroundColor": o.bg_protect_fg})),
+        Tool::BackgroundEraser => (
+            "paint.backgroundEraser",
+            json!({"sampling": o.bg_sampling, "limits": o.bg_limits, "tolerance": o.bg_tolerance, "protectForegroundColor": o.bg_protect_fg}),
+        ),
         Tool::PatternStamp => {
             // Aligned phase is per view here: the pattern is laid out in the view.
             let mut p = json!({"aligned": o.pattern_stamp_aligned, "impressionist": o.pattern_stamp_impressionist, "scale": o.pattern_stamp_scale, "angle": o.pattern_stamp_angle});
@@ -881,7 +973,9 @@ fn clone_params(app: &PhotocraftApp, cam: &ProjectionView, vp: &ViewProjection, 
 /// earlier stroke, else from here to the source. `None` (with the status hint) without a source.
 fn clone_rotation_for(app: &mut PhotocraftApp, cam: &ProjectionView, vp: &ViewProjection, first: [f64; 3]) -> Option<Rot> {
     let Some(src) = cam.clone_source else {
-        app.ui.status = if cfg!(target_os = "macos") { "Option-click to define a source point to clone from" } else { "Alt-click to define a source point to clone from" }.into();
+        app.ui.status =
+            if cfg!(target_os = "macos") { "Option-click to define a source point to clone from" } else { "Alt-click to define a source point to clone from" }
+                .into();
         app.ui.status_error = true;
         return None;
     };
@@ -964,7 +1058,8 @@ mod tests {
 
     #[test]
     fn clone_source_and_aligned_rotation_survive_looking_around() {
-        let mut v = ProjectionView { clone_source: Some([0.0, 0.0, 1.0]), clone_rotation: Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]), ..Default::default() };
+        let mut v =
+            ProjectionView { clone_source: Some([0.0, 0.0, 1.0]), clone_rotation: Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]), ..Default::default() };
         let before = (v.clone_source, v.clone_rotation);
         v.look(vec2(-250.0, 40.0), 300.0);
         v.scale_fov(0.5);

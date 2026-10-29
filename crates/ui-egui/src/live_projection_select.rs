@@ -60,7 +60,21 @@ impl SelDrag {
         self.quick.is_some()
     }
     fn new(doc: usize, tool: Tool, mode: &'static str, q: [f64; 2], cam: [u32; 5]) -> Self {
-        SelDrag { doc, tool, mode, points: vec![q], anchor: q, cam, pixels: None, live: Vec::new(), trail: vec![q], anchors: vec![0], quick: None, quick_n: 0, quick_t: 0.0 }
+        SelDrag {
+            doc,
+            tool,
+            mode,
+            points: vec![q],
+            anchor: q,
+            cam,
+            pixels: None,
+            live: Vec::new(),
+            trail: vec![q],
+            anchors: vec![0],
+            quick: None,
+            quick_n: 0,
+            quick_t: 0.0,
+        }
     }
 }
 
@@ -147,7 +161,11 @@ fn commit(app: &mut PhotocraftApp, d: SelDrag, cam: Camera, w: f64, h: f64) {
             if (matches!(d.tool, Tool::RectMarquee | Tool::EllipseMarquee) && small(&d.points))
                 || (matches!(d.tool, Tool::Lasso | Tool::PolygonLasso | Tool::MagneticLasso) && d.points.len() < 3) =>
         {
-            if d.mode == "replace" { app.run("select.deselect", json!({})).map(|_| ()) } else { Ok(()) }
+            if d.mode == "replace" {
+                app.run("select.deselect", json!({})).map(|_| ())
+            } else {
+                Ok(())
+            }
         }
         Tool::ObjectSelection if small(&d.points) => {
             app.ui.status = "Drag a rectangle around the object to select it".into();
@@ -172,7 +190,17 @@ fn magnetic_settings(app: &PhotocraftApp) -> photocraft_algo::magnetic::Settings
 
 /// Handle a selection tool in the projection canvas.
 #[allow(clippy::too_many_arguments)]
-pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, rect: Rect, ppp: f32, cam: Camera, idx: usize, tool: Tool) {
+pub fn tool(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    painter: &egui::Painter,
+    rect: Rect,
+    ppp: f32,
+    cam: Camera,
+    idx: usize,
+    tool: Tool,
+) {
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     let to_screen = |q: [f64; 2]| -> Pos2 { rect.min + vec2(q[0] as f32, q[1] as f32) / ppp };
     let (w, h) = (f64::from(rect.width() * ppp), f64::from(rect.height() * ppp));
@@ -370,7 +398,12 @@ pub fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Respo
                 dash(pts, false);
                 for &i in &d.anchors {
                     if let Some(q) = d.points.get(i) {
-                        painter.rect_stroke(Rect::from_center_size(to_screen(*q), vec2(5.0, 5.0)), 0.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Middle);
+                        painter.rect_stroke(
+                            Rect::from_center_size(to_screen(*q), vec2(5.0, 5.0)),
+                            0.0,
+                            Stroke::new(1.0, Color32::WHITE),
+                            egui::StrokeKind::Middle,
+                        );
                     }
                 }
             }

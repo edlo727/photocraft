@@ -275,7 +275,19 @@ fn stroke(h: &mut Harness<'_, PhotocraftApp>, from: egui::Pos2, steps: usize) ->
 
 #[test]
 fn retouch_and_paint_tools_stroke_with_a_live_preview_in_projection() {
-    for tool in [Tool::SpotHealing, Tool::Smudge, Tool::Blur, Tool::Sharpen, Tool::Dodge, Tool::Burn, Tool::Sponge, Tool::Pencil, Tool::MixerBrush, Tool::ColorReplacement, Tool::HistoryBrush] {
+    for tool in [
+        Tool::SpotHealing,
+        Tool::Smudge,
+        Tool::Blur,
+        Tool::Sharpen,
+        Tool::Dodge,
+        Tool::Burn,
+        Tool::Sponge,
+        Tool::Pencil,
+        Tool::MixerBrush,
+        Tool::ColorReplacement,
+        Tool::HistoryBrush,
+    ] {
         let mut h = harness(tool);
         assert_eq!(h.state().ui.tool, tool, "{tool:?} works in projection");
         // Something to retouch: a coloured band across the view.
@@ -435,7 +447,6 @@ fn healing_group_heals_an_f32_exr_and_refreshes_the_canvas() {
     }
 }
 
-
 #[test]
 fn remove_red_eye_and_content_aware_move_work_on_an_f32_exr() {
     for tool in [Tool::Remove, Tool::RedEye, Tool::ContentAwareMove] {
@@ -588,10 +599,12 @@ fn ed_flow_patch_draws_its_selection_then_drags_it_with_ants_and_preview() {
     assert!(h.state().session.active().unwrap().doc.selection.is_none());
     let dot = screen_of_doc(&h, 2100.5, 1020.5);
     // Draw the patch selection around the blemish with the Patch tool itself.
-    let ring: Vec<egui::Pos2> = (0..=24).map(|i| {
-        let a = i as f32 / 24.0 * std::f32::consts::TAU;
-        dot + vec2(a.cos(), a.sin()) * 18.0
-    }).collect();
+    let ring: Vec<egui::Pos2> = (0..=24)
+        .map(|i| {
+            let a = i as f32 / 24.0 * std::f32::consts::TAU;
+            dot + vec2(a.cos(), a.sin()) * 18.0
+        })
+        .collect();
     h.event(Event::PointerMoved(ring[0]));
     h.run_steps(2);
     h.event(Event::PointerButton { pos: ring[0], button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
@@ -799,7 +812,11 @@ fn ed_flow_pen_draws_a_path_in_view_that_selects_strokes_and_edits_in_projection
     let cam = h.state().ui.views[0].projection.unwrap().camera();
     let vp = photocraft_engine::equirect::ViewProjection::new(cam, f64::from(r.width() * ppp), f64::from(r.height() * ppp));
     let path = h.state().session.active().unwrap().doc.work_path.clone().unwrap();
-    let anchors: Vec<[f64; 2]> = path.subpaths[0].knots.iter().filter_map(|k| vp.dir_to_view(photocraft_engine::equirect::equirect_to_dir(k.anchor.x, k.anchor.y, 4096.0, 2048.0))).collect();
+    let anchors: Vec<[f64; 2]> = path.subpaths[0]
+        .knots
+        .iter()
+        .filter_map(|k| vp.dir_to_view(photocraft_engine::equirect::equirect_to_dir(k.anchor.x, k.anchor.y, 4096.0, 2048.0)))
+        .collect();
     let want = sq[1] + vec2(30.0, 0.0);
     let want = [f64::from((want.x - r.min.x) * ppp), f64::from((want.y - r.min.y) * ppp)];
     assert!(anchors.iter().any(|a| (a[0] - want[0]).abs() < 2.0 && (a[1] - want[1]).abs() < 2.0), "the anchor followed the drag: {anchors:?} want {want:?}");

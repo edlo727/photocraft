@@ -171,8 +171,8 @@ pub fn view_polylines(path: &Path, proj: &ViewProjection, iw: f64, ih: f64) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::equirect::Camera;
+    use serde_json::json;
 
     fn session() -> Session {
         let mut s = Session::new();
