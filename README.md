@@ -1,3 +1,16 @@
+# PhotoCraft Projection Edition (unofficial)
+
+An unofficial variant of [PhotoCraft](https://github.com/storytold/photocraft) 0.21.0, maintained by Ed Lopez ([edlo727](https://github.com/edlo727)). It is not affiliated with or endorsed by the PhotoCraft team.
+
+It adds two things:
+
+- **Equirectangular Live Projection** (Ctrl+Alt+Shift+J): paint, heal, fill, transform, draw paths, type and add shapes through a perspective view into a latlong, with edits written back across the ±180° seam. Built for big 32-bit EXRs.
+- **DirectX GPU fix**: a rewritten compositor shader so Windows (DX12) runs the GPU compositor instead of falling back to CPU rendering ([upstream issue #8733](https://github.com/storytold/photocraft/issues/8733)).
+
+Downloads are on the [Releases](https://github.com/edlo727/photocraft/releases) page. The original PhotoCraft README follows.
+
+---
+
 <p align="center">
   <a href="https://getartcraft.com/">
     <picture>

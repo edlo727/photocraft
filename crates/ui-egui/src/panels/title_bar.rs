@@ -163,15 +163,21 @@ pub fn system_title_bar(app: &PhotocraftApp) -> bool {
     !app.custom_titlebar && app.session.prefs().interface.system_title_bar && !cfg!(any(target_os = "macos", target_arch = "wasm32"))
 }
 
+/// OS window title for this unofficial variant, so it is never mistaken for the official app.
+pub const WINDOW_APP_NAME: &str = "PhotoCraft Projection Edition (unofficial)";
+
 /// The OS window title: the active document's name suffixed with the app name (a `*` prefix
 /// marks unsaved changes, like the `•` in the app-drawn title), or just the app name with no
 /// document open. With Preferences › Interface › Show File Name In Title off, the file name
 /// drops out and only the app name (and the `*`) remains (#5037).
 pub fn window_title(app: &PhotocraftApp) -> String {
     if !app.session.prefs().interface.show_file_name_in_title {
-        return format!("{}PhotoCraft", if app.session.active().is_some_and(|d| d.is_dirty()) { "*" } else { "" });
+        return format!("{}{}", if app.session.active().is_some_and(|d| d.is_dirty()) { "*" } else { "" }, WINDOW_APP_NAME);
     }
-    app.session.active().map(|d| format!("{}{} \u{2014} PhotoCraft", if d.is_dirty() { "*" } else { "" }, d.doc.name)).unwrap_or_else(|| "PhotoCraft".into())
+    app.session
+        .active()
+        .map(|d| format!("{}{} \u{2014} {}", if d.is_dirty() { "*" } else { "" }, d.doc.name, WINDOW_APP_NAME))
+        .unwrap_or_else(|| WINDOW_APP_NAME.into())
 }
 
 /// Keep the OS window title (and the taskbar / Alt-Tab entry) on the active file. Sends
