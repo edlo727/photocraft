@@ -116,10 +116,11 @@ fn bucket(s: &mut Session, p: &Value) -> Result<Value> {
     };
     // A foreground picked as CMYK fills a CMYK document with the picked inks (#4196).
     let inks = s.tools.picked_cmyk([c[0], c[1], c[2]]).filter(|_| c[3] >= 1.0 && pattern.is_none());
-    let filled = s.edit("Paint Bucket", |doc, active| {
+    let layer = if p.get("layer").is_some() { Some(crate::commands::layer_param(s, p)?) } else { s.active().and_then(|st| st.active_layer) };
+    let filled = s.edit("Paint Bucket", |doc, _| {
         let area = doc.bounds();
         let sel = doc.selection.clone();
-        let (surf, lock) = crate::channel_cmds::target_surface(doc, *active, p)?;
+        let (surf, lock) = crate::channel_cmds::target_surface(doc, layer, p)?;
         let ok = if all && region.is_none() {
             false
         } else if let Some((tile, scale, angle, phase)) = &pattern {
@@ -160,10 +161,11 @@ fn gradient(s: &mut Session, p: &Value) -> Result<Value> {
     let from = point(p, "from").ok_or_else(|| EngineError::BadParams { cmd: "paint.gradient".into(), msg: "missing from".into() })?;
     let to = point(p, "to").ok_or_else(|| EngineError::BadParams { cmd: "paint.gradient".into(), msg: "missing to".into() })?;
     let GradientSetup { shape, stops, reverse, opacity, blend, dither } = gradient_setup(s, p)?;
-    s.edit("Gradient", |doc, active| {
+    let layer = if p.get("layer").is_some() { Some(crate::commands::layer_param(s, p)?) } else { s.active().and_then(|st| st.active_layer) };
+    s.edit("Gradient", |doc, _| {
         let sel = doc.selection.clone();
         let area = sel.as_ref().map(|m| m.content_bounds()).filter(|r| !r.is_empty()).unwrap_or_else(|| doc.bounds()).intersect(&doc.bounds());
-        let (surf, lock) = crate::channel_cmds::target_surface(doc, *active, p)?;
+        let (surf, lock) = crate::channel_cmds::target_surface(doc, layer, p)?;
         paint_gradient(surf, area, from, to, shape, &stops, reverse, opacity, blend, dither, sel.as_ref(), lock);
         Ok(())
     })?;

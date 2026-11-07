@@ -11,7 +11,7 @@ struct View {
     i: vec4<f32>, // live projection: on (1), yaw, pitch (radians), view-plane units per device px
     j: vec4<f32>, // live projection: view centre x, y (device px), unused, unused
 };
-struct Tile { r: vec4<f32> }; // x, y, w, h in doc px
+struct Tile { r: vec4<f32>, core: vec4<f32> }; // x, y, w, h in doc px; drawn x0, y0, x1, y1
 
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var samp: sampler;
@@ -165,6 +165,8 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
     let p = in.pos.xy;
     let scale = view.a.z;
     let d = px_to_doc(p) - view.d.xy;      // document pixel coordinates (within this copy)
+    // A viewport page's apron is only sampled; its neighbour draws those pixels.
+    if (any(d < tile.core.xy) || any(d >= tile.core.zw)) { discard; }
     let size = tile.r.zw;
     let t = d - tile.r.xy;                 // texel coordinates within this tile
     let mode = view.c.x;

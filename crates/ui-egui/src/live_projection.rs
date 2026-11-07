@@ -820,11 +820,12 @@ fn fill_tool(
 ) {
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     if response.hovered() {
-        ctx.set_cursor_icon(if tool == Tool::PaintBucket {
-            crate::canvas::paint_bucket_cursor(ctx, response.hover_pos().unwrap_or_default())
+        let icon = if tool == Tool::PaintBucket {
+            crate::canvas::paint_bucket_cursor(app, painter, response.hover_pos().unwrap_or_default())
         } else {
             egui::CursorIcon::Crosshair
-        });
+        };
+        ctx.set_cursor_icon(icon);
     }
     let o = app.ui.tool_options.clone();
     let target = crate::canvas::paint_target(app);

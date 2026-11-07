@@ -92,8 +92,8 @@ fn view_pixels(s: &Session, proj: &ViewProjection, view: Rect, all_layers: bool)
     for e in view_rect_to_equirect(proj, r, iw as u32, ih as u32, 2.0) {
         let rect = Rect::new(e[0] as i32, e[1] as i32, e[2] as i32, e[3] as i32).intersect(&doc.bounds());
         if !rect.is_empty() {
-            let px = photocraft_compose::render(doc, rect).px;
-            flat.write_region(rect, px.as_flattened());
+            let buf = photocraft_compose::render(doc, rect);
+            flat.write_region(rect, buf.px.as_flattened());
         }
     }
     Ok(to_view(&flat, proj, view, iw, ih))
