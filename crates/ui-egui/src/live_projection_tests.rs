@@ -7,7 +7,10 @@ use serde_json::json;
 use crate::{PhotocraftApp, Services, Tool};
 
 fn harness(tool: Tool) -> Harness<'static, PhotocraftApp> {
-    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
+    // Upstream's Crop options bar (v0.21) has unlabelled width/height spin buttons, which
+    // the harness's accessibility check rejects before projection switches to the Hand.
+    let a11y = tool != Tool::Crop;
+    let mut h = Harness::builder().with_accessibility_check(a11y).with_size(vec2(1200.0, 800.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
         PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Services::default());
         app.run("file.new", json!({"width": 800, "height": 400})).unwrap();
@@ -58,8 +61,12 @@ fn toolbox_click_switches_tools_in_projection() {
     let c = h.state().last_canvas_rect.center();
     h.event(Event::PointerMoved(c));
     h.run_steps(2);
-    let nodes: Vec<_> = h.query_all_by_label_contains("Brush Tool").map(|n| (n.rect(), format!("{n:?}").chars().take(80).collect::<String>())).collect();
-    let at = nodes.iter().min_by(|a, b| a.0.min.x.total_cmp(&b.0.min.x)).map(|n| n.0.center()).expect("Brush button in the toolbox");
+    // The toolbox stacks Spot Healing Brush, Brush and others in one column: pick the Brush itself.
+    let at = h
+        .query_all_by_label_contains("Brush Tool")
+        .find(|n| format!("{n:?}").contains("label: \"Brush Tool"))
+        .map(|n| n.rect().center())
+        .expect("Brush button in the toolbox");
     h.event(Event::PointerMoved(at));
     h.run_steps(2);
     h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
