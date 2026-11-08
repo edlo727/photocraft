@@ -108,12 +108,16 @@ fn a_layer_mask_is_an_exr_layer_on_the_merge_mask_input() {
     assert_eq!(tree[1].mask.as_deref(), Some("Top_mask"));
 
     let nk = generate_nuke_script("t.exr", &tree, 8, 6);
-    assert!(nk.contains("add_layer {Top_mask Top_mask.alpha}"), "{nk}");
+    assert!(nk.contains("add_layer {Top_mask Top_mask.red Top_mask.green Top_mask.blue Top_mask.alpha}"), "{nk}");
+    // The mask is Shuffled off the layer's bus Dot…
+    let shuffle = node(&nk, "ShuffleMask_Top");
+    assert!(shuffle.starts_with("push $NDot_Top\n") && shuffle.contains("in Top_mask"), "{shuffle}");
+    // …and multiplies the layer with a Merge mask (A = mask, B = layer)…
+    let mask = node(&nk, "Mask_Top");
+    assert!(mask.contains("push $NShuffleMask_Top\npush $NPremult_Top") && mask.contains("operation mask"), "{mask}");
+    // …before the layer merges onto the comp.
     let merge = node(&nk, "Merge_Top");
-    assert!(merge.contains("inputs 2+1") && merge.contains("maskChannelInput Top_mask.alpha"), "{merge}");
-    // Stack order: mask, then A, then B on top.
-    let mask_push = nk.find("push $NDot_Top\n").expect("the mask comes off the layer's bus Dot");
-    assert!(mask_push < nk.find(" name Merge_Top\n").unwrap_or(0));
+    assert!(merge.contains("push $NMask_Top\npush $NDot_Comp_Base") && !merge.contains("maskChannel"), "{merge}");
 }
 
 #[test]
@@ -140,29 +144,46 @@ fn the_base_layer_mask_goes_into_its_coverage() {
     d.layers = vec![base];
     let nk = script(&d, GroupExport::Branches);
     let m = node(&nk, "Mask_Base");
-    assert!(m.contains("expr3 \"a*Base_mask.alpha\""), "{m}");
+    assert!(m.contains("operation mask"), "{m}");
+    assert!(nk.contains("push $NMask_Base\nDot {\n name Dot_Comp_Base"), "{nk}");
 }
 
 #[test]
-fn a_mask_in_a_mode_the_mask_input_cannot_match_goes_into_the_layer() {
+fn a_masked_layer_in_any_mode_is_masked_before_its_merge() {
+    let mut d = doc();
+    d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0])];
+    let mut top = raster(&d, "Top", [0.9, 0.2, 0.1, 0.8]);
+    top.blend = BlendMode::Multiply;
+    top.mask = Some(half_mask());
+    d.layers.push(top);
+    let nk = script(&d, GroupExport::Branches);
+    let merge = node(&nk, "Merge_Top");
+    assert!(merge.contains("push $NMask_Top\n") && merge.contains("operation multiply"), "{merge}");
+}
+
+#[test]
+fn a_masked_adjustment_reads_its_mask_from_its_input() {
+    let mut d = doc();
+    let mut g = grade("Warm");
+    g.mask = Some(half_mask());
+    d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]), g];
+    let nk = script(&d, GroupExport::Branches);
+    let grade = node(&nk, "Grade_Warm");
+    assert!(grade.contains("maskChannelMask Warm_mask.alpha") && !grade.contains("inputs"), "{grade}");
+    assert!(nk.contains("add_layer {Warm_mask Warm_mask.red"), "{nk}");
+}
+
+#[test]
+fn clipped_nodes_stack_under_their_base_column() {
     let mut d = doc();
     let base = raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]);
-    d.layers = vec![base];
-    for mode in BlendMode::LAYER_MODES.iter().chain(&BlendMode::PS_MODES).copied().filter(|m| *m != BlendMode::PassThrough) {
-        let mut top = raster(&d, "Top", [0.9, 0.2, 0.1, 0.8]);
-        top.blend = mode;
-        top.mask = Some(half_mask());
-        d.layers.truncate(1);
-        d.layers.push(top);
-        let nk = script(&d, GroupExport::Branches);
-        let merge = node(&nk, "Merge_Top");
-        if mask_input_exact(mode) {
-            assert!(merge.contains("maskChannelInput Top_mask.alpha"), "{mode:?}: {merge}");
-        } else {
-            assert!(nk.contains(" name Mask_Top\n") && !merge.contains("maskChannelInput"), "{mode:?}: {merge}");
-        }
-    }
-    assert!(mask_input_exact(BlendMode::Normal));
+    let mut g = grade("Warm");
+    g.clipped = true;
+    d.layers = vec![raster(&d, "BG", [0.2; 4]), base, g];
+    let nk = script(&d, GroupExport::Branches);
+    let x = |name: &str| node(&nk, name).split("xpos ").nth(1).and_then(|t| t.lines().next()).map(str::to_string);
+    assert_eq!(x("Grade_Warm"), x("Premult_Base"), "{nk}");
+    assert_eq!(x("Merge_Base"), x("Premult_Base"), "the base merges below its own column");
 }
 
 #[test]
@@ -183,8 +204,8 @@ fn an_isolated_group_composites_its_children_then_merges_in_its_mode() {
     assert!(node(&nk, "Merge_B").contains("push $NPremult_B\npush $NDot_Comp_A"), "{nk}");
     // …which merges onto the background in the group's mode, mix and mask.
     let merge = node(&nk, "Merge_Shade");
-    assert!(merge.contains("push $NDot_Comp_BG\nMerge2"), "{merge}");
-    assert!(merge.contains("push $NMerge_B\n") || nk.contains("push $NMerge_B\nExpression"), "{merge}");
+    assert!(merge.contains("push $NMask_Shade\npush $NDot_Comp_BG"), "{merge}");
+    assert!(node(&nk, "Mask_Shade").contains("push $NShuffleMask_Shade\npush $NMerge_B"), "{nk}");
     assert!(merge.contains("operation multiply") && merge.contains("mix 0.75"), "{merge}");
     assert!(nk.contains("Shade_mask.alpha"), "{nk}");
     assert!(nk.contains(" name BD_Shade\n"), "a backdrop frames the group");
@@ -283,10 +304,10 @@ fn export_writes_mask_channels_and_the_script() {
 
     let image = exr::prelude::read_all_flat_layers_from_file(&path).expect("read back");
     let names: Vec<String> = image.layer_data[0].channel_data.list.iter().map(|c| c.name.to_string()).collect();
-    for want in ["Top_mask.A", "Top.R", "BG.A", "R", "A"] {
+    for want in ["Top_mask.R", "Top_mask.A", "Top.R", "BG.A", "R", "A"] {
         assert!(names.iter().any(|n| n == want), "{want} in {names:?}");
     }
     let nk = std::fs::read_to_string(dir.join("comp.nk")).expect("script written");
-    assert!(nk.contains("maskChannelInput Top_mask.alpha"));
+    assert!(nk.contains("operation mask") && nk.contains("in Top_mask"));
     let _ = std::fs::remove_dir_all(&dir);
 }

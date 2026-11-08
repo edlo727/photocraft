@@ -59,8 +59,9 @@ pub struct ExportLayer {
     /// `Grade`, `ColorLookup` or `OCIOColorSpace` node instead of a Shuffle → Premult → Merge
     /// column (`opacity` is its mix). On the comp it sits in, or on its base's branch when clipped.
     pub adjustment: Option<photocraft_doc::Adjustment>,
-    /// The EXR layer whose `.alpha` holds this layer's mask (pixel mask × vector mask, with
-    /// density and feather, as the canvas applies them). It drives the node's mask input.
+    /// The EXR layer holding this layer's mask (pixel mask × vector mask, with density and
+    /// feather, as the canvas applies them) in every channel: a Merge `mask` for pixel layers
+    /// and groups, the node's own mask channel for adjustments.
     pub mask: Option<String>,
     /// A group exported as a branch: its children, bottom first.
     pub children: Option<Vec<ExportLayer>>,
@@ -158,29 +159,6 @@ fn merged_as(mode: BlendMode) -> BlendMode {
     if mode == BlendMode::PassThrough || mode.is_photoshop_only() { BlendMode::Normal } else { mode }
 }
 
-/// Whether a Merge's mask input reproduces the canvas for `mode`. The canvas multiplies a
-/// layer's alpha by its mask before blending; a Merge2 mask input mixes the merged result back
-/// towards B by the mask. They agree when the mode's maths is linear in the layer's coverage
-/// (over, plus, screen, the Photoshop-style separable forms…). Checked on the compositor's own
-/// maths, so a mode whose maths changes is re-judged; otherwise the mask goes into the layer's
-/// alpha in the script, which is exact for every mode.
-fn mask_input_exact(mode: BlendMode) -> bool {
-    use photocraft_color::blend::composite;
-    const SAMPLES: [[f32; 4]; 4] = [[0.2, 0.5, 0.9, 1.0], [0.8, 0.3, 0.1, 0.6], [0.5, 0.5, 0.5, 0.25], [1.5, 0.7, 0.05, 0.9]];
-    let pm = |p: [f32; 4]| [p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]];
-    let mode = merged_as(mode);
-    SAMPLES.iter().all(|&b| {
-        SAMPLES.iter().all(|&a| {
-            [0.3_f32, 0.7].iter().all(|&k| {
-                let masked = pm(composite(mode, b, [a[0], a[1], a[2], a[3] * k], 1.0));
-                let full = pm(composite(mode, b, a, 1.0));
-                let bp = pm(b);
-                (0..4).all(|c| (masked[c] - (bp[c] + (full[c] - bp[c]) * k)).abs() < 1e-4)
-            })
-        })
-    })
-}
-
 fn tcl_escape(s: &str) -> String {
     s.replace('\\', "/")
         .replace('"', "\\\"")
@@ -207,17 +185,21 @@ fn backdrop_color(op: &str, is_base: bool) -> &'static str {
 }
 
 /// Layout grid (Nuke nodes are 80x18, Dots 12x12).
-const COL_W: i32 = 200; // column pitch: room for long node names + Merge autolabel
+const COL_W: i32 = 250; // column pitch: a layer's Shuffle and, beside it, its mask's
+const BD_W: i32 = 230; // layer backdrop width
 const DOT_DX: i32 = 34; // centres a Dot over an 80-wide node
+const MASK_DX: i32 = 110; // a mask's Shuffle sits right of its layer's
 const READ_Y: i32 = -230;
 const BUS_Y: i32 = -100;
 const BD_Y: i32 = -50; // layer backdrop top
 const BD_H: i32 = 190;
 const SHUFFLE_Y: i32 = 40;
 const PREMULT_Y: i32 = 100;
-/// The deepest branch row; shallower rows sit `ROW_DY` lower each, the main comp lowest.
-const MERGE_Y: i32 = 220;
-const ROW_DY: i32 = 90;
+/// Under a layer's Premult, its mask and its clipped layers stack one slot each.
+const STACK_Y: i32 = 150;
+const STACK_DY: i32 = 130;
+/// Group branch rows, above the main COMP row.
+const ROW_DY: i32 = 120;
 
 fn walk<'a>(layers: &'a [ExportLayer], f: &mut dyn FnMut(&'a ExportLayer)) {
     for l in layers {
@@ -229,17 +211,37 @@ fn walk<'a>(layers: &'a [ExportLayer], f: &mut dyn FnMut(&'a ExportLayer)) {
     }
 }
 
-/// How many branch rows sit above the main comp row.
+/// How many group branch rows sit above the main comp row.
 fn branch_depth(layers: &[ExportLayer]) -> i32 {
     layers
         .iter()
         .map(|l| {
-            let clip = if l.clipped.is_empty() { 0 } else { 1 + branch_depth(&l.clipped) };
-            let group = l.children.as_deref().map_or(0, |c| 1 + branch_depth(c));
-            clip.max(group)
+            let clip = branch_depth(&l.clipped);
+            match &l.children {
+                Some(c) => 1 + branch_depth(c).max(clip),
+                None => clip,
+            }
         })
         .max()
         .unwrap_or(0)
+}
+
+/// The most slots any layer's column stacks under its Premult (its mask, its clipped layers).
+fn stack_slots(layers: &[ExportLayer]) -> i32 {
+    let mut most = 0;
+    walk(layers, &mut |l| {
+        if l.is_pixels() {
+            most = most.max(i32::from(l.mask.is_some()) + l.clipped.len() as i32);
+        }
+    });
+    most
+}
+
+/// Where a clipped node goes: stacked in its base's column, or along a group's branch row.
+#[derive(Clone, Copy)]
+enum At {
+    Stack { x: i32, slot: i32 },
+    Row,
 }
 
 /// The `.nk` text as it is built: nodes in `nk`, backdrops collected apart (written last, behind).
@@ -249,11 +251,21 @@ struct Script {
     col: i32,
     prev_bus: String,
     max_depth: i32,
+    /// Where the stacks under the columns end.
+    stack_bottom: i32,
 }
 
 impl Script {
     fn row_y(&self, depth: i32) -> i32 {
-        MERGE_Y + (self.max_depth - depth).max(0) * ROW_DY
+        self.stack_bottom + 60 + (self.max_depth - depth).max(0) * ROW_DY
+    }
+
+    fn slot_top(slot: i32) -> i32 {
+        STACK_Y + slot * STACK_DY
+    }
+
+    fn slot_node_y(slot: i32) -> i32 {
+        Self::slot_top(slot) + 60
     }
 
     fn next_x(&mut self) -> i32 {
@@ -277,38 +289,53 @@ impl Script {
         self.prev_bus.clone()
     }
 
-    fn layer_backdrop(&mut self, name: &str, x: i32, color: &str, sub: &str) {
+    #[allow(clippy::too_many_arguments)]
+    fn backdrop(&mut self, id: &str, title: &str, sub: &str, color: &str, x: i32, y: i32, h: i32) {
         self.backdrops.push_str(&format!(
-            "BackdropNode {{\n inputs 0\n name BD_{name}\n tile_color {color}\n label \"<center><b>{name}</b>\\n<font size=2>{sub}</font></center>\"\n note_font_size 18\n xpos {}\n ypos {BD_Y}\n bdwidth {}\n bdheight {BD_H}\n z_order 2\n}}\n",
-            x - 50,
-            COL_W - 20
+            "BackdropNode {{\n inputs 0\n name BD_{id}\n tile_color {color}\n label \"<center><b>{title}</b>\\n<font size=2>{sub}</font></center>\"\n note_font_size 18\n xpos {}\n ypos {y}\n bdwidth {BD_W}\n bdheight {h}\n z_order 2\n}}\n",
+            x - 50
         ));
     }
 
-    /// A pixel layer's column: bus Dot → Shuffle → Premult. Returns the Premult and the bus Dot.
-    fn column(&mut self, name: &str, x: i32) -> (String, String) {
-        let bus = self.bus(name, x);
-        // Shuffle -> Premult (EXR holds straight alpha; Merge wants premultiplied).
-        self.nk.push_str(&format!("Shuffle {{\n in {name}\n out rgba\n name Shuffle_{name}\n xpos {x}\n ypos {SHUFFLE_Y}\n}}\n"));
-        self.nk.push_str(&format!("Premult {{\n name Premult_{name}\n xpos {x}\n ypos {PREMULT_Y}\n}}\nset NPremult_{name} [stack 0]\n"));
-        (format!("NPremult_{name}"), bus)
-    }
-
-    /// `stream` (premultiplied) times `mask`: the mask goes into the layer's coverage, as the
-    /// canvas applies it. Every stream carries the Read's channels, so the mask is at hand.
-    fn mask_multiply(&mut self, stream: &str, mask: &str, name: &str, x: i32, y: i32) -> String {
-        let m = format!("{mask}.alpha");
+    /// The mask's EXR layer off the bus, and `stream` (premultiplied) masked by it with a Merge
+    /// `mask` (B × A's alpha): the mask goes into the layer's coverage, as the canvas applies it,
+    /// so it is exact in every blend mode.
+    #[allow(clippy::too_many_arguments)]
+    fn mask(&mut self, stream: &str, mask: &str, name: &str, bus: &str, x: i32, shuffle_y: i32, merge_y: i32) -> String {
         self.nk.push_str(&format!(
-            "push ${stream}\nExpression {{\n expr0 \"r*{m}\"\n expr1 \"g*{m}\"\n expr2 \"b*{m}\"\n expr3 \"a*{m}\"\n name Mask_{name}\n xpos {x}\n ypos {y}\n}}\nset NMask_{name} [stack 0]\n"
+            "push ${bus}\nShuffle {{\n in {mask}\n out rgba\n name ShuffleMask_{name}\n xpos {}\n ypos {shuffle_y}\n}}\nset NShuffleMask_{name} [stack 0]\n",
+            x + MASK_DX
+        ));
+        // Merge2 inputs: 0 = B (top of the stack), 1 = A: push A, then B.
+        self.nk.push_str(&format!(
+            "push $NShuffleMask_{name}\npush ${stream}\nMerge2 {{\n inputs 2\n operation mask\n name Mask_{name}\n xpos {x}\n ypos {merge_y}\n}}\nset NMask_{name} [stack 0]\n"
         ));
         format!("NMask_{name}")
     }
 
-    /// An adjustment node on `comp`, its mask (if any) on the node's mask input.
-    fn adjustment(&mut self, l: &ExportLayer, adj: &photocraft_doc::Adjustment, comp: &str, depth: i32) -> String {
+    /// A pixel layer's column: bus Dot → Shuffle → Premult, then its mask. Returns the stream.
+    fn column(&mut self, l: &ExportLayer, x: i32, is_base: bool) -> String {
         let name = &l.name;
-        let x = self.next_x();
-        let y = self.row_y(depth);
+        let bus = self.bus(name, x);
+        // Shuffle -> Premult (EXR holds straight alpha; Merge wants premultiplied).
+        self.nk.push_str(&format!("Shuffle {{\n in {name}\n out rgba\n name Shuffle_{name}\n xpos {x}\n ypos {SHUFFLE_Y}\n}}\n"));
+        self.nk.push_str(&format!("Premult {{\n name Premult_{name}\n xpos {x}\n ypos {PREMULT_Y}\n}}\nset NPremult_{name} [stack 0]\n"));
+        let mut a = format!("NPremult_{name}");
+        let mut h = BD_H;
+        if let Some(m) = &l.mask {
+            a = self.mask(&a, m, name, &bus, x, PREMULT_Y, Self::slot_node_y(0));
+            h += STACK_DY;
+        }
+        let (op, _) = nuke_merge_operation(l.blend_mode);
+        let sub = Self::sub_label(l, is_base);
+        self.backdrop(name, name, &sub, backdrop_color(op, is_base), x, BD_Y, h);
+        a
+    }
+
+    /// An adjustment node on `comp` at (`x`, `y`). Its mask is read from its own input (every
+    /// stream carries the Read's channels), so no extra wire.
+    fn adjustment(&mut self, l: &ExportLayer, adj: &photocraft_doc::Adjustment, comp: &str, x: i32, y: i32) -> (String, &'static str) {
+        let name = &l.name;
         let (class, knobs, op) = match adj {
             photocraft_doc::Adjustment::Grade { .. } => ("Grade", nk_grade_knobs(adj), "grade"),
             photocraft_doc::Adjustment::OcioColorSpace { input, output } => (
@@ -318,55 +345,45 @@ impl Script {
             ),
             _ => ("ColorLookup", nk_lookup_knobs(adj), "colorlookup"),
         };
-        let mask = match &l.mask {
-            Some(m) => {
-                let bus = self.bus(&format!("{name}_mask"), x);
-                self.nk.push_str(&format!("push ${bus}\n"));
-                format!(" inputs 1+1\n maskChannelInput {m}.alpha\n")
-            }
-            None => String::new(),
-        };
+        let mask = l.mask.as_ref().map_or(String::new(), |m| format!(" maskChannelMask {m}.alpha\n"));
         self.nk.push_str(&format!(
-            "push ${comp}\n{class} {{\n{mask}{knobs}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
+            "push ${comp}\n{class} {{\n{knobs}{mask}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
             if l.visible { "" } else { " disable true\n" },
             l.opacity.clamp(0.0, 1.0)
         ));
-        let pct = (l.opacity.clamp(0.0, 1.0) * 100.0).round() as i32;
-        let sub = if !l.visible {
-            "hidden".to_string()
-        } else {
-            let mut s = op.to_string();
-            if pct < 100 {
-                s.push_str(&format!("  {pct}%"));
-            }
-            if l.mask.is_some() {
-                s.push_str("  masked");
-            }
-            s
-        };
-        self.layer_backdrop(name, x, backdrop_color(op, false), &sub);
-        format!("N{class}_{name}")
+        (format!("N{class}_{name}"), op)
     }
 
-    /// `a` (this layer's premultiplied stream, at column `x`) merged onto `comp` with its blend
-    /// mode, opacity and mask, or starting the comp when there is none yet. `bus` is a Dot on the
-    /// Read bus at `x`, for the mask input (one is made when `None`).
-    fn place(&mut self, l: &ExportLayer, a: String, comp: Option<String>, depth: i32, x: i32, bus: Option<String>) -> String {
+    fn adjustment_label(l: &ExportLayer, op: &str) -> String {
+        if !l.visible {
+            return "hidden".to_string();
+        }
+        let mut s = op.to_string();
+        let pct = (l.opacity.clamp(0.0, 1.0) * 100.0).round() as i32;
+        if pct < 100 {
+            s.push_str(&format!("  {pct}%"));
+        }
+        if l.mask.is_some() {
+            s.push_str(" masked");
+        }
+        s
+    }
+
+    /// `a` (this layer's premultiplied stream) merged onto `comp` at column `x` with its blend
+    /// mode and opacity, or starting the comp when there is none yet.
+    fn place(&mut self, l: &ExportLayer, a: String, comp: Option<String>, depth: i32, x: i32) -> String {
         let name = &l.name;
         let y = self.row_y(depth);
         let mix = l.opacity.clamp(0.0, 1.0);
         let Some(comp) = comp else {
             // The base starts the comp. Over an empty backdrop every mode is plain over, so only
-            // its mask and opacity (0 when hidden) apply.
+            // its opacity (0 when hidden) applies.
             let mut a = a;
-            if let Some(m) = &l.mask {
-                a = self.mask_multiply(&a, m, name, x, y - 60);
-            }
             let base_mix = if l.visible { mix } else { 0.0 };
             if base_mix < 1.0 {
                 self.nk.push_str(&format!(
                     "push ${a}\nMultiply {{\n channels rgba\n value {base_mix}\n name Opacity_{name}\n xpos {x}\n ypos {}\n}}\nset NOpacity_{name} [stack 0]\n",
-                    y - 30
+                    y - 40
                 ));
                 a = format!("NOpacity_{name}");
             }
@@ -378,25 +395,8 @@ impl Script {
             return format!("NDot_Comp_{name}");
         };
         let (op, _) = nuke_merge_operation(l.blend_mode);
-        let mut a = a;
-        let mut mask_knob = String::new();
-        let mut inputs = "2";
-        if let Some(m) = &l.mask {
-            if mask_input_exact(l.blend_mode) {
-                let bus = match bus {
-                    Some(b) => b,
-                    None => self.bus(&format!("{name}_mask"), x),
-                };
-                // Merge2 inputs: 0 = B (top of the stack), 1 = A, then the mask: push mask, A, B.
-                self.nk.push_str(&format!("push ${bus}\n"));
-                mask_knob = format!(" maskChannelInput {m}.alpha\n");
-                inputs = "2+1";
-            } else {
-                a = self.mask_multiply(&a, m, name, x, y - 60);
-            }
-        }
         self.nk.push_str(&format!(
-            "push ${a}\npush ${comp}\nMerge2 {{\n inputs {inputs}\n operation {op}\n{mask_knob} mix {mix}\n{} name Merge_{name}\n xpos {x}\n ypos {y}\n}}\nset NMerge_{name} [stack 0]\n",
+            "push ${a}\npush ${comp}\nMerge2 {{\n inputs 2\n operation {op}\n mix {mix}\n{} name Merge_{name}\n xpos {x}\n ypos {y}\n}}\nset NMerge_{name} [stack 0]\n",
             if l.visible { "" } else { " disable true\n" }
         ));
         format!("NMerge_{name}")
@@ -425,46 +425,48 @@ impl Script {
         s
     }
 
-    /// The layers clipped to `base` (a premultiplied stream), composited onto it in a branch:
-    /// a clipped adjustment grades only the base; a clipped layer goes atop it (only inside the
-    /// base's alpha, which it keeps).
-    fn clip(&mut self, base: String, clipped: &[ExportLayer], depth: i32) -> String {
+    /// The layers clipped to `base` (a premultiplied stream), composited onto it: a clipped
+    /// adjustment grades only the base; a clipped layer goes atop it (only inside the base's
+    /// alpha, which it keeps). Stacked under the base's column, or along a group's branch row.
+    fn clip(&mut self, base: String, clipped: &[ExportLayer], at: At, depth: i32) -> String {
         let mut base = base;
-        for c in clipped {
+        for (i, c) in clipped.iter().enumerate() {
+            let name = &c.name;
             if let Some(adj) = &c.adjustment {
-                base = self.adjustment(c, adj, &base, depth);
+                let (x, y) = match at {
+                    At::Stack { x, slot } => (x, Self::slot_node_y(slot + i as i32)),
+                    At::Row => (self.next_x(), self.row_y(depth)),
+                };
+                let (node, op) = self.adjustment(c, adj, &base, x, y);
+                let (top, h) = match at {
+                    At::Stack { slot, .. } => (Self::slot_top(slot + i as i32), STACK_DY - 10),
+                    At::Row => (BD_Y, BD_H),
+                };
+                self.backdrop(name, name, &Self::adjustment_label(c, op), backdrop_color(op, false), x, top, h);
+                base = node;
                 continue;
             }
-            let Some((a, x, bus)) = self.stream(c, depth, false) else { continue };
-            let name = &c.name;
-            let y = self.row_y(depth);
+            let Some((a, cx)) = self.stream(c, depth, false) else { continue };
+            let (x, y) = match at {
+                At::Stack { x, slot } => (x, Self::slot_node_y(slot + i as i32)),
+                At::Row => (cx, self.row_y(depth)),
+            };
+            if let At::Stack { slot, .. } = at {
+                let (op, _) = nuke_merge_operation(c.blend_mode);
+                self.backdrop(&format!("Clip_{name}"), name, &format!("clipped  {op}"), "0x3a3a3aff", x, Self::slot_top(slot + i as i32), STACK_DY - 10);
+            }
             let mix = c.opacity.clamp(0.0, 1.0);
             let disable = if c.visible { "" } else { " disable true\n" };
             if merged_as(c.blend_mode) == BlendMode::Normal {
-                // Normal clipped: atop, exact (its mask on the mask input is exact too).
-                let mut mask_knob = String::new();
-                let mut inputs = "2";
-                if let Some(m) = &c.mask {
-                    let bus = match bus {
-                        Some(b) => b,
-                        None => self.bus(&format!("{name}_mask"), x),
-                    };
-                    self.nk.push_str(&format!("push ${bus}\n"));
-                    mask_knob = format!(" maskChannelInput {m}.alpha\n");
-                    inputs = "2+1";
-                }
+                // Normal clipped: atop, exact.
                 self.nk.push_str(&format!(
-                    "push ${a}\npush ${base}\nMerge2 {{\n inputs {inputs}\n operation atop\n{mask_knob} mix {mix}\n{disable} name Clip_{name}\n xpos {x}\n ypos {y}\n}}\nset NClip_{name} [stack 0]\n"
+                    "push ${a}\npush ${base}\nMerge2 {{\n inputs 2\n operation atop\n mix {mix}\n{disable} name Clip_{name}\n xpos {x}\n ypos {y}\n}}\nset NClip_{name} [stack 0]\n"
                 ));
             } else {
                 // Another mode: merged in its mode, kept inside the base by the base's own
                 // alpha on the mask input, and the base's alpha kept. Exact where the base is
                 // opaque or empty; its soft edges are close.
                 let (op, _) = nuke_merge_operation(c.blend_mode);
-                let a = match &c.mask {
-                    Some(m) => self.mask_multiply(&a, m, name, x, y - 60),
-                    None => a,
-                };
                 self.nk.push_str(&format!(
                     "push ${base}\npush ${a}\npush ${base}\nMerge2 {{\n inputs 2+1\n operation {op}\n output {{rgba.red rgba.green rgba.blue -rgba.alpha}}\n maskChannelInput rgba.alpha\n mix {mix}\n{disable} name Clip_{name}\n xpos {x}\n ypos {y}\n}}\nset NClip_{name} [stack 0]\n"
                 ));
@@ -474,27 +476,33 @@ impl Script {
         base
     }
 
-    /// A pixel layer's or an isolated group's premultiplied stream, with its own clipped layers
-    /// composited on, ready to merge: (stream, x of its merge, bus Dot at that x if any).
-    fn stream(&mut self, l: &ExportLayer, depth: i32, is_base: bool) -> Option<(String, i32, Option<String>)> {
+    /// A pixel layer's or an isolated group's premultiplied stream, masked and with its own
+    /// clipped layers composited on, ready to merge: (stream, x of its merge).
+    fn stream(&mut self, l: &ExportLayer, depth: i32, is_base: bool) -> Option<(String, i32)> {
+        let name = &l.name;
         if let Some(children) = &l.children {
             let start = self.col;
-            let sub = self.chain(children, None, depth + 1)?;
-            let sub = if l.clipped.is_empty() { sub } else { self.clip(sub, &l.clipped, depth + 1) };
+            let mut sub = self.chain(children, None, depth + 1)?;
+            if !l.clipped.is_empty() {
+                sub = self.clip(sub, &l.clipped, At::Row, depth + 1);
+            }
+            let x = self.last_x();
+            if let Some(m) = &l.mask {
+                let bus = self.bus(&format!("{name}_mask"), x);
+                let y = self.row_y(depth) - ROW_DY / 2;
+                sub = self.mask(&sub, m, name, &bus, x, y, y);
+            }
             self.group_backdrop(l, start, depth);
-            return Some((sub, self.last_x(), None));
+            return Some((sub, x));
         }
         let x = self.next_x();
-        let (a, bus) = self.column(&l.name, x);
-        let (op, _) = nuke_merge_operation(l.blend_mode);
-        let sub = Self::sub_label(l, is_base);
-        self.layer_backdrop(&l.name, x, backdrop_color(op, is_base), &sub);
+        let a = self.column(l, x, is_base);
         if l.clipped.is_empty() {
-            return Some((a, x, Some(bus)));
+            return Some((a, x));
         }
-        // The clipped layers take the next columns; the merge goes after the last of them.
-        let a = self.clip(a, &l.clipped, depth + 1);
-        Some((a, self.last_x(), None))
+        let slot = i32::from(l.mask.is_some());
+        let a = self.clip(a, &l.clipped, At::Stack { x, slot }, depth);
+        Some((a, x))
     }
 
     fn group_backdrop(&mut self, l: &ExportLayer, start_col: i32, depth: i32) {
@@ -523,7 +531,11 @@ impl Script {
             if let Some(adj) = &l.adjustment {
                 // Nothing to adjust before the base.
                 if let Some(c) = &comp {
-                    comp = Some(self.adjustment(l, adj, c, depth));
+                    let x = self.next_x();
+                    let y = self.row_y(depth);
+                    let (node, op) = self.adjustment(l, adj, c, x, y);
+                    self.backdrop(&l.name, &l.name, &Self::adjustment_label(l, op), backdrop_color(op, false), x, BD_Y, BD_H);
+                    comp = Some(node);
                 }
                 continue;
             }
@@ -538,21 +550,27 @@ impl Script {
                 } else if let Some(after) = self.chain(children, comp.clone(), depth + 1) {
                     // Opacity or mask: the comp with the children mixed with the comp without
                     // them, as the canvas mixes a pass-through group.
+                    let x = self.last_x();
                     comp = Some(match comp {
-                        None => self.place(l, after, None, depth, self.last_x(), None),
-                        Some(before) => {
-                            let x = self.last_x();
-                            let mut copy = l.clone();
-                            copy.blend_mode = BlendMode::Normal;
-                            self.mix_copy(&copy, after, before, depth, x)
+                        None => {
+                            let after = match &l.mask {
+                                Some(m) => {
+                                    let bus = self.bus(&format!("{}_mask", l.name), x);
+                                    let y = self.row_y(depth) - ROW_DY / 2;
+                                    self.mask(&after, m, &l.name, &bus, x, y, y)
+                                }
+                                None => after,
+                            };
+                            self.place(l, after, None, depth, x)
                         }
+                        Some(before) => self.mix_copy(l, after, before, depth, x),
                     });
                 }
                 self.group_backdrop(l, start, depth);
                 continue;
             }
-            let Some((a, x, bus)) = self.stream(l, depth, comp.is_none()) else { continue };
-            comp = Some(self.place(l, a, comp, depth, x, bus));
+            let Some((a, x)) = self.stream(l, depth, comp.is_none()) else { continue };
+            comp = Some(self.place(l, a, comp, depth, x));
         }
         comp
     }
@@ -584,11 +602,12 @@ impl Script {
 ///    o-------o-------o-------o        bus (one Dot per layer)
 ///   [Layer] [Layer] [Layer] [Layer]   one backdrop column each:
 ///   Shuffle Shuffle Shuffle Shuffle     Shuffle -> Premult
-///   Premult Premult Premult Premult
-///   [ branch rows: clipped layers and groups, composited on their own ]
+///   Premult Premult Premult Premult     -> Merge mask (its mask) -> its clipped layers
+///   [ group branch rows ]
 ///  [ o----->Merge-->Merge-->Merge ]   COMP row, B runs left to right
 ///
-/// Masks are EXR layers of their own (`<Layer>_mask.alpha`) feeding the node's mask input.
+/// A layer's mask is an EXR layer of its own (`<Layer>_mask`, the mask in every channel),
+/// Shuffled out beside the layer and applied with a Merge `mask`.
 pub fn generate_nuke_script(
     exr_filename: &str,
     layers: &[ExportLayer],
@@ -613,12 +632,9 @@ pub fn generate_nuke_script(
     // `in <layer>` resolves to `none` for names Nuke hasn't seen this session.
     let mut registered = String::new();
     walk(layers, &mut |l| {
-        if l.is_pixels() {
-            let n = &l.name;
+        let pixels = l.is_pixels().then_some(&l.name);
+        for n in pixels.into_iter().chain(l.mask.as_ref()) {
             registered.push_str(&format!("add_layer {{{n} {n}.red {n}.green {n}.blue {n}.alpha}}\n"));
-        }
-        if let Some(m) = &l.mask {
-            registered.push_str(&format!("add_layer {{{m} {m}.alpha}}\n"));
         }
     });
     nk.push_str(&registered);
@@ -630,7 +646,14 @@ pub fn generate_nuke_script(
         if ocio.is_some() { "scene_linear" } else { "linear" }
     ));
 
-    let mut s = Script { nk, backdrops: String::new(), col: 0, prev_bus: "NRead_MultiChannel".into(), max_depth: branch_depth(layers) };
+    let mut s = Script {
+        nk,
+        backdrops: String::new(),
+        col: 0,
+        prev_bus: "NRead_MultiChannel".into(),
+        max_depth: branch_depth(layers),
+        stack_bottom: Script::slot_top(stack_slots(layers)),
+    };
     let out = s.chain(layers, None, 0);
     let main_y = s.row_y(0);
     let cols = s.col.max(1);
@@ -906,7 +929,6 @@ pub fn export_multichannel_exr_with_options(
 
     // Single-part EXR, fully qualified channel names: "<Layer>.R/G/B/A",
     // beauty as bare R/G/B/A. This is what Nuke's Shuffle `in <Layer>` expects.
-    // Masks are "<Layer>_mask.A", which Nuke reads as `<Layer>_mask.alpha`.
     let mut chans: SmallVec<[AnyChannel<FlatSamples>; 4]> = SmallVec::new();
     for (name, data) in &extracted {
         let prefix = if name == BEAUTY { String::new() } else { format!("{name}.") };
@@ -916,8 +938,12 @@ pub fn export_multichannel_exr_with_options(
             chans.push(AnyChannel::new(label.as_str(), to_samples(vals)));
         }
     }
+    // Masks in every channel ("<Layer>_mask.R/G/B/A"): they view as grey in Nuke, and the
+    // script's Merge `mask` takes their alpha.
     for (name, data) in masks {
-        chans.push(AnyChannel::new(format!("{name}.A").as_str(), to_samples(data)));
+        for ch in ["R", "G", "B", "A"] {
+            chans.push(AnyChannel::new(format!("{name}.{ch}").as_str(), to_samples(data.clone())));
+        }
     }
 
     let layer = Layer::new(
