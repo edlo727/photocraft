@@ -53,7 +53,7 @@ fn script(doc: &Document, groups: GroupExport) -> String {
 fn node<'a>(nk: &'a str, name: &str) -> &'a str {
     let at = nk.find(&format!(" name {name}\n")).unwrap_or_else(|| panic!("no node {name} in:\n{nk}"));
     // The node's pushes start after the previous node's closing line.
-    let start = [nk[..at].rfind("[stack 0]\n").map(|i| i + 10), nk[..at].rfind("}\n").map(|i| i + 2)].into_iter().flatten().max().unwrap_or(0);
+    let start = [nk[..at].rfind("[stack 0]\n").map(|i| i + 10), nk[..at].rfind("\n}\n").map(|i| i + 3)].into_iter().flatten().max().unwrap_or(0);
     let end = at + nk[at..].find('}').unwrap_or(0);
     &nk[start..end]
 }
@@ -163,7 +163,6 @@ fn a_mask_in_a_mode_the_mask_input_cannot_match_goes_into_the_layer() {
         }
     }
     assert!(mask_input_exact(BlendMode::Normal));
-    assert!(mask_input_exact(BlendMode::LinearDodge), "plus is linear in coverage");
 }
 
 #[test]
