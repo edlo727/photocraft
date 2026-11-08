@@ -10,7 +10,8 @@ pub struct EXRExportModalState {
     pub compression: photocraft_io::exr_export::NukeCompression,
     pub flat_beauty: bool,
     pub bit_depth_32: bool,
-    pub generate_nuke_script: bool, // <-- Added field
+    pub generate_nuke_script: bool,
+    pub groups: photocraft_io::exr_export::GroupExport,
 }
 
 impl Default for EXRExportModalState {
@@ -20,7 +21,8 @@ impl Default for EXRExportModalState {
             compression: photocraft_io::exr_export::NukeCompression::ZipScanline,
             flat_beauty: true,
             bit_depth_32: true,
-            generate_nuke_script: true, // <-- Added default true
+            generate_nuke_script: true,
+            groups: photocraft_io::exr_export::GroupExport::Branches,
         }
     }
 }
@@ -228,6 +230,20 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                                 ui.radio_value(&mut exr_state.bit_depth_32, true, "32-bit float");
                             });
                             ui.end_row();
+
+                            ui.label("Groups:");
+                            egui::ComboBox::from_id_salt("exr_groups_combo")
+                                .selected_text(match exr_state.groups {
+                                    photocraft_io::exr_export::GroupExport::Branches => "Keep layers (group branches)",
+                                    photocraft_io::exr_export::GroupExport::Merged => "Merge each group into one layer",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut exr_state.groups, photocraft_io::exr_export::GroupExport::Branches, "Keep layers (group branches)")
+                                        .on_hover_text("Every layer is its own EXR layer; each group is rebuilt in the .nk as a branch merged with the group's blend mode, opacity and mask.");
+                                    ui.selectable_value(&mut exr_state.groups, photocraft_io::exr_export::GroupExport::Merged, "Merge each group into one layer")
+                                        .on_hover_text("Each group is merged into one EXR layer, as Layer › Merge Group does, keeping the group's blend mode, opacity and mask. Your document is not changed.");
+                                });
+                            ui.end_row();
                         });
 
                     ui.add_space(8.0);
@@ -241,8 +257,8 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                     ui.weak("Includes the current workspace layer stack with individual .R .G .B .A channels");
                     
                     ui.add_space(4.0);
-                    ui.checkbox(&mut exr_state.generate_nuke_script, "Generate .nk Nuke Script alongside EXR") // <-- Added checkbox
-                        .on_hover_text("Automatically builds a Nuke node graph matching your layer blend modes.");
+                    ui.checkbox(&mut exr_state.generate_nuke_script, "Generate .nk Nuke Script alongside EXR")
+                        .on_hover_text("Builds a Nuke node graph matching your layers: blend modes, clipping groups (clipped grades stay on their layer), masks on the Merge mask inputs, and groups.");
                         
                     ui.add_space(12.0);
 
@@ -272,7 +288,8 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                         exr_state.compression,
                         exr_state.flat_beauty,
                         exr_state.bit_depth_32,
-                        exr_state.generate_nuke_script, // <-- Added 6th argument
+                        exr_state.generate_nuke_script,
+                        exr_state.groups,
                     );
                     
                     if let Err(e) = res {
@@ -336,4 +353,4 @@ fn switch_on_hover(ctx: &egui::Context, buttons: &[egui::Response]) {
         egui::Popup::open_id(ctx, ids[i]);
         ctx.request_repaint();
     }
-}
+}
