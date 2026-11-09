@@ -27,6 +27,53 @@ impl Default for EXRExportModalState {
     }
 }
 
+/// The background job command of an EXR + Nuke script export.
+pub const EXR_EXPORT_JOB: &str = "file.exportNukeExr";
+
+/// Export the active document to `path` on a worker thread: the window keeps drawing, the
+/// progress dialog shows (with Cancel, or Esc) while it runs, and the result or error is reported
+/// when it ends (see `jobs_ui`).
+fn start_exr_export(app: &mut PhotocraftApp, path: std::path::PathBuf, opts: EXRExportModalState) {
+    let Some(active) = app.session.active() else { return };
+    let doc = std::sync::Arc::clone(&active.doc);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let label = format!("Exporting {name}");
+    let result = json!({"path": path.to_string_lossy(), "name": name, "nk": opts.generate_nuke_script});
+    let started = app.session.start_job(
+        EXR_EXPORT_JOB,
+        json!({"path": path.to_string_lossy()}),
+        &label,
+        true,
+        move |ctx| {
+            let report = |f: f32, m: &str| {
+                ctx.progress(f, m);
+                !ctx.cancelled()
+            };
+            photocraft_io::exr_export::export_multichannel_exr_with_options(
+                &doc,
+                &path,
+                opts.compression,
+                opts.flat_beauty,
+                opts.bit_depth_32,
+                opts.generate_nuke_script,
+                opts.groups,
+                &report,
+            )
+            .map_err(|e| if ctx.cancelled() { photocraft_engine::EngineError::Cancelled } else { photocraft_engine::EngineError::Other(e) })
+        },
+        move |_, ()| Ok(result),
+    );
+    match started {
+        Ok(photocraft_engine::jobs::Started::Done(v)) => crate::jobs_ui::exr_exported(app, &v),
+        Ok(photocraft_engine::jobs::Started::Job(job)) => {
+            app.jobs.last_started = Some(job);
+            app.ui.status.clear();
+            app.ui.status_error = false;
+        }
+        Err(e) => crate::notices::error(app, format!("EXR export failed: {e}")),
+    }
+}
+
 pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
     let exr_state_id = egui::Id::unique("exr_export_modal_state");
     let mut exr_state = ui.ctx().data(|d| d.get_temp::<EXRExportModalState>(exr_state_id)).unwrap_or_default();
@@ -281,21 +328,7 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                 .set_file_name("multichannel_export.exr")
                 .save_file() 
             {
-                if let Some(active) = app.session.active() {
-                    let res = photocraft_io::exr_export::export_multichannel_exr_with_options(
-                        &active.doc,
-                        &path,
-                        exr_state.compression,
-                        exr_state.flat_beauty,
-                        exr_state.bit_depth_32,
-                        exr_state.generate_nuke_script,
-                        exr_state.groups,
-                    );
-                    
-                    if let Err(e) = res {
-                        eprintln!("EXR Export Failed: {}", e);
-                    }
-                }
+                start_exr_export(app, path, exr_state.clone());
             }
             closed = true;
         }

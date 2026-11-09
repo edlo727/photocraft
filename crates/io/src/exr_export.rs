@@ -748,9 +748,59 @@ struct Collector<'a> {
     names: HashSet<String>,
     pixels: Vec<(String, Vec<[f32; 4]>)>,
     masks: Vec<(String, Vec<f32>)>,
+    /// Progress: layers read so far of `total`, reported into `0.0..span`.
+    report: Progress<'a>,
+    done: usize,
+    total: usize,
+    span: f32,
+    /// The export was cancelled: stop reading layers.
+    cancelled: bool,
 }
 
-impl Collector<'_> {
+/// Progress and cancellation for an export: called with the fraction done (`0.0..=1.0`) and
+/// what it is doing; returns `false` to cancel.
+pub type Progress<'a> = &'a (dyn Fn(f32, &str) -> bool + Sync);
+
+/// Never cancels, ignores progress.
+pub const NO_PROGRESS: Progress<'static> = &|_, _| true;
+
+/// Every layer in `layers` and below (the work the export reads).
+fn count_layers(layers: &[DocLayer]) -> usize {
+    layers.iter().map(|l| 1 + l.children().map_or(0, count_layers)).sum()
+}
+
+impl<'a> Collector<'a> {
+    fn new(doc: &'a Document, groups: GroupExport, report: Progress<'a>, span: f32) -> Self {
+        let mut names = HashSet::new();
+        names.insert(BEAUTY.to_string());
+        Collector {
+            doc,
+            bounds: doc.bounds(),
+            groups,
+            names,
+            pixels: Vec::new(),
+            masks: Vec::new(),
+            report,
+            done: 0,
+            total: count_layers(&doc.layers).max(1),
+            span,
+            cancelled: false,
+        }
+    }
+
+    /// One more layer read; `false` once cancelled.
+    fn tick(&mut self, name: &str) -> bool {
+        if self.cancelled {
+            return false;
+        }
+        self.done += 1;
+        let f = self.done as f32 / self.total as f32 * self.span;
+        if !(self.report)(f, &format!("Reading layer {} of {}: {name}", self.done.min(self.total), self.total)) {
+            self.cancelled = true;
+        }
+        !self.cancelled
+    }
+
     /// `base`, or `base_2`, `base_3`, … when an earlier layer or mask already has that name (EXR
     /// layer prefixes and node names must be unique).
     fn unique(&mut self, base: &str) -> String {
@@ -862,6 +912,9 @@ impl Collector<'_> {
             return out;
         }
         for l in layers {
+            if !self.tick(&l.name) {
+                return out;
+            }
             let item = self.layer(l, parent_visible, depth);
             match item {
                 Some(item) if l.clipped && base.is_some() => {
@@ -892,7 +945,10 @@ pub fn export_multichannel_exr_with_options(
     use_32bit: bool,
     write_nuke_script: bool,
     groups: GroupExport,
+    progress: Progress<'_>,
 ) -> std::result::Result<(), String> {
+    const CANCELLED: &str = "cancelled";
+    let step = |f: f32, m: &str| if progress(f, m) { Ok(()) } else { Err(CANCELLED.to_string()) };
     let width = doc.size.width as usize;
     let height = doc.size.height as usize;
 
@@ -900,9 +956,12 @@ pub fn export_multichannel_exr_with_options(
         return Err("Document dimensions must be greater than zero.".into());
     }
 
-    let mut c = Collector { doc, bounds: doc.bounds(), groups, names: HashSet::new(), pixels: Vec::new(), masks: Vec::new() };
-    c.names.insert(BEAUTY.to_string());
+    // Reading layers: 0–60%, the beauty pass to 75%, channels to 80%, writing to 98%.
+    let mut c = Collector::new(doc, groups, progress, 0.6);
     let nuke_layers = c.list(&doc.layers, true, 0);
+    if c.cancelled {
+        return Err(CANCELLED.into());
+    }
     let Collector { pixels: mut extracted, masks, .. } = c;
 
     if extracted.is_empty() {
@@ -912,6 +971,7 @@ pub fn export_multichannel_exr_with_options(
     if include_flat_beauty {
         // The canvas's own composite: every layer, mode, mask, clipping group, group and
         // adjustment exactly as shown, whether or not the script can rebuild it.
+        step(0.6, "Compositing the beauty pass")?;
         let flat = photocraft_compose::flatten(doc).px;
         if flat.len() != width * height {
             return Err("The document is too large to flatten for the beauty pass.".into());
@@ -919,6 +979,7 @@ pub fn export_multichannel_exr_with_options(
         extracted.push((BEAUTY.to_string(), flat));
     }
 
+    step(0.75, "Building channels")?;
     let to_samples = |vals: Vec<f32>| -> FlatSamples {
         if use_32bit {
             FlatSamples::F32(vals)
@@ -958,21 +1019,32 @@ pub fn export_multichannel_exr_with_options(
     );
     let image = Image::from_layer(layer);
 
-    image.write().to_file(path).map_err(|e| e.to_string())?;
+    // The last chance to cancel: nothing is written before this.
+    step(0.8, "Writing EXR")?;
+    // Writing can't stop halfway (a cancelled export would leave a broken file): progress only.
+    image
+        .write()
+        .on_progress(|p| {
+            let _ = progress(0.8 + 0.18 * p as f32, "");
+        })
+        .to_file(path)
+        .map_err(|e| e.to_string())?;
 
     if write_nuke_script {
+        let _ = progress(0.98, "Writing Nuke script");
         let exr_filename = path.file_name().unwrap_or_default().to_string_lossy();
         let nk_path = path.with_extension("nk");
         let nk_content =
             generate_nuke_script(&exr_filename, &nuke_layers, width as u32, height as u32);
         std::fs::write(&nk_path, nk_content).map_err(|e| e.to_string())?;
     }
+    let _ = progress(1.0, "Done");
 
     Ok(())
 }
 
 pub fn export_multichannel_exr(doc: &Document, path: &Path) -> std::result::Result<(), String> {
-    export_multichannel_exr_with_options(doc, path, NukeCompression::ZipScanline, true, true, false, GroupExport::Branches)
+    export_multichannel_exr_with_options(doc, path, NukeCompression::ZipScanline, true, true, false, GroupExport::Branches, NO_PROGRESS)
 }
 
 #[cfg(test)]

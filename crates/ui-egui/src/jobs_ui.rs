@@ -526,6 +526,7 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
             app.sync_views();
             crate::file_ui::print_status(app, result);
         }
+        JobOutcome::Done(ref v) if e.command == crate::menus::bar::EXR_EXPORT_JOB => exr_exported(app, v),
         JobOutcome::Done(_) => {
             app.sync_views();
             app.ui.status = e.label;
@@ -543,6 +544,14 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
             app.ui.status_error = false;
         }
     }
+}
+
+/// The status after an EXR export (`{path, name, nk}`).
+pub fn exr_exported(app: &mut PhotocraftApp, v: &Value) {
+    let name = v.get("name").and_then(Value::as_str).unwrap_or_default();
+    let nk = v.get("nk").and_then(Value::as_bool).unwrap_or(false);
+    app.ui.status = if nk { format!("Exported {name} and its Nuke script") } else { format!("Exported {name}") };
+    app.ui.status_error = false;
 }
 
 /// What [`crate::PhotocraftApp::open_bytes`] does after decoding, for a background open's result
