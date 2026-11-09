@@ -172,10 +172,12 @@ fn a_masked_adjustment_takes_its_mask_on_its_mask_input() {
     // The mask is Shuffled off the bus beside the Grade, like a layer's…
     let shuffle = node(&nk, "ShuffleMask_Warm");
     assert!(shuffle.starts_with("push $NDot_Warm_mask\n") && shuffle.contains("in Warm_mask"), "{shuffle}");
-    // …and wired straight into its mask input: image pushed first, the mask on top.
+    // …and wired straight into its mask input, as Nuke saves one: the mask pushed first, the
+    // image on top, the channel in maskChannelMask before unpremult.
     let grade = node(&nk, "Grade_Warm");
-    assert!(grade.contains("push $NDot_Comp_Base\npush $NShuffleMask_Warm\nGrade"), "{grade}");
-    assert!(grade.contains("inputs 1+1") && grade.contains("maskChannelInput rgba.alpha"), "{grade}");
+    assert!(grade.contains("push $NShuffleMask_Warm\npush $NDot_Comp_Base\nGrade"), "{grade}");
+    assert!(grade.contains("inputs 1+1") && grade.contains(" maskChannelMask rgba.alpha\n unpremult rgba.alpha\n"), "{grade}");
+    assert!(!grade.contains("maskChannelInput"), "{grade}");
     assert!(!nk.contains("Keymix"), "{nk}");
     assert!(nk.contains("add_layer {Warm_mask Warm_mask.red"), "{nk}");
 }
@@ -368,7 +370,7 @@ fn a_clipped_masked_curves_takes_its_mask_beside_its_base_column() {
     d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]), g];
     let nk = script(&d, GroupExport::Branches);
     let grade = node(&nk, "Grade_Warm");
-    assert!(grade.contains("push $NPremult_Base\npush $NShuffleMask_Warm\nGrade"), "{grade}");
+    assert!(grade.contains("push $NShuffleMask_Warm\npush $NPremult_Base\nGrade"), "{grade}");
     assert!(grade.contains("inputs 1+1"), "{grade}");
     // The base (the bottom layer here) starts the comp from the Grade.
     assert!(nk.contains("push $NGrade_Warm\nDot {\n name Dot_Comp_Base"), "{nk}");

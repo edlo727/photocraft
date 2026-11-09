@@ -396,18 +396,24 @@ impl Script {
             ),
             _ => ("ColorLookup", nk_lookup_knobs(adj), "colorlookup"),
         };
-        // With `inputs 1+1` Nuke takes the mask input from the top of the stack, the image from
-        // under it: push the image, then the mask (checked in Nuke).
-        let mask = match &l.mask {
+        // As Nuke saves a node with its mask input connected: `inputs 1+1`, the image on top of
+        // the stack and the mask under it (push the mask, then the image), and the mask channel
+        // in `maskChannelMask`, after the node's own knobs and before `unpremult`.
+        let pushes = match &l.mask {
             Some(m) => {
                 let shuffle = self.mask_shuffle(m, name, x + MASK_DX, y);
-                format!("push ${comp}\npush ${shuffle}\n")
+                format!("push ${shuffle}\npush ${comp}\n")
             }
             None => format!("push ${comp}\n"),
         };
-        let mask_knobs = if l.mask.is_some() { " inputs 1+1\n maskChannelInput rgba.alpha\n" } else { "" };
+        let (inputs, mask_knob) = if l.mask.is_some() { (" inputs 1+1\n", " maskChannelMask rgba.alpha\n") } else { ("", "") };
+        const UNPREMULT: &str = " unpremult rgba.alpha\n";
+        let knobs = match knobs.strip_suffix(UNPREMULT) {
+            Some(own) => format!("{own}{mask_knob}{UNPREMULT}"),
+            None => format!("{knobs}{mask_knob}"),
+        };
         self.nk.push_str(&format!(
-            "{mask}{class} {{\n{mask_knobs}{knobs}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
+            "{pushes}{class} {{\n{inputs}{knobs}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
             if l.visible { "" } else { " disable true\n" },
             l.opacity.clamp(0.0, 1.0)
         ));
