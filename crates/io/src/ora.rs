@@ -82,19 +82,19 @@ pub(crate) fn krita_blend(id: &str) -> Option<(BlendMode, bool)> {
         "soft_light_svg" => (B::SoftLight, false),
         "diff" => (B::Difference, false),
         "exclusion" => (B::Exclusion, false),
-        "linear_burn" => (B::PsLinearBurn, false),
+        "linear_burn" => (B::LinearBurn, false),
         "linear_dodge" | "add" => (B::LinearDodge, false),
-        "subtract" => (B::PaintNetColorBurn, false),
-        "divide" => (B::PsDivide, false),
-        "vivid_light" => (B::PsVividLight, false),
-        "linear light" => (B::PsLinearLight, false),
-        "pin_light" => (B::PsPinLight, false),
-        "hard_mix_photoshop" => (B::PsHardMix, false),
+        "subtract" => (B::Subtract, false),
+        "divide" => (B::Divide, false),
+        "vivid_light" => (B::VividLight, false),
+        "linear light" => (B::LinearLight, false),
+        "pin_light" => (B::PinLight, false),
+        "hard_mix_photoshop" => (B::HardMix, false),
         // Krita's own Hard Mix thresholds differently from Photoshop's.
-        "hard mix" => (B::PsHardMix, true),
-        "darker color" => (B::PsDarkerColor, false),
-        "lighter color" => (B::PsLighterColor, false),
-        "hue" => (B::PsHue, false),
+        "hard mix" => (B::HardMix, true),
+        "darker color" => (B::DarkerColor, false),
+        "lighter color" => (B::LighterColor, false),
+        "hue" => (B::Hue, false),
         "saturation" => (B::Saturation, false),
         "color" => (B::Color, false),
         "luminize" => (B::Luminosity, false),
@@ -116,44 +116,64 @@ pub(crate) fn krita_id(mode: BlendMode) -> Option<&'static str> {
         B::Darken => "darken",
         B::Multiply => "multiply",
         B::ColorBurn => "burn",
-        B::PsLinearBurn => "linear_burn",
-        B::PsDarkerColor => "darker color",
+        B::LinearBurn => "linear_burn",
+        B::DarkerColor => "darker color",
         B::Lighten => "lighten",
         B::Screen => "screen",
         B::ColorDodge => "dodge",
         B::LinearDodge => "linear_dodge",
-        B::PsLighterColor => "lighter color",
+        B::LighterColor => "lighter color",
         B::Overlay => "overlay",
         B::SoftLight => "soft_light_svg",
         B::HardLight => "hard_light",
-        B::PsVividLight => "vivid_light",
-        B::PsLinearLight => "linear light",
-        B::PsPinLight => "pin_light",
-        B::PsHardMix => "hard_mix_photoshop",
+        B::VividLight => "vivid_light",
+        B::LinearLight => "linear light",
+        B::PinLight => "pin_light",
+        B::HardMix => "hard_mix_photoshop",
         B::Difference => "diff",
         B::Exclusion => "exclusion",
-        B::PaintNetColorBurn => "subtract",
-        B::PsDivide => "divide",
-        B::PsHue => "hue",
+        B::Subtract => "subtract",
+        B::Divide => "divide",
+        B::Hue => "hue",
         B::Saturation => "saturation",
         B::Color => "color",
         B::Luminosity => "luminize",
         B::Reflect => "reflect",
         B::Glow => "glow",
         B::Negation => "negation",
-        // Nuke Merge operations Krita has no composite op for.
+        // Paint.NET modes and Nuke Merge operations Krita has no composite op for: written as
+        // Normal and reported.
         B::Xor
+        | B::PaintNetColorBurn
         | B::PaintNetColorDodge
-        | B::LinearBurn
-        | B::DarkerColor
-        | B::LighterColor
-        | B::VividLight
-        | B::LinearLight
-        | B::PinLight
-        | B::HardMix
-        | B::Subtract
-        | B::Divide
-        | B::Hue => return None,
+        | B::NukeMin
+        | B::NukeMultiply
+        | B::NukeColorBurn
+        | B::NukeUnder
+        | B::NukeIn
+        | B::NukeMax
+        | B::NukeScreen
+        | B::NukeColorDodge
+        | B::NukePlus
+        | B::NukeOut
+        | B::NukeOverlay
+        | B::NukeSoftLight
+        | B::NukeHardLight
+        | B::NukeGeometric
+        | B::NukeHypot
+        | B::NukeMask
+        | B::NukeStencil
+        | B::NukeDifference
+        | B::NukeExclusion
+        | B::NukeMinus
+        | B::NukeDivide
+        | B::NukeMatte
+        | B::NukeAverage
+        | B::NukeConjointOver
+        | B::NukeDisjointOver
+        | B::NukeXor
+        | B::NukeFrom
+        | B::NukeAtop => return None,
     })
 }
 
@@ -172,7 +192,7 @@ const SVG_OPS: [(&str, BlendMode); 15] = [
     ("svg:difference", BlendMode::Difference),
     ("svg:color", BlendMode::Color),
     ("svg:luminosity", BlendMode::Luminosity),
-    ("svg:hue", BlendMode::PsHue),
+    ("svg:hue", BlendMode::Hue),
     ("svg:saturation", BlendMode::Saturation),
 ];
 

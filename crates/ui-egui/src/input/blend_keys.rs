@@ -37,21 +37,19 @@ pub enum Pick {
     Behind,
 }
 
-/// Photoshop's ⇧⌥ letter for each mode that has a Nuke Merge equivalent in the blend menu
-/// (N over, K min, M multiply, B color-burn, G max, S screen, D color-dodge, W plus, O overlay,
-/// F soft-light, H hard-light, E difference, X exclusion). Letters for Photoshop modes Nuke lacks
-/// (Dissolve, Linear Burn, Vivid / Linear / Pin Light, Hard Mix, Hue, Saturation, Color,
-/// Luminosity) do nothing.
+/// Photoshop's ⇧⌥ letter for each mode. Darker Color, Lighter Color, Subtract and Divide have none.
 pub fn letter_pick(key: Key) -> Option<Pick> {
     use BlendMode as B;
     Some(Pick::Mode(match key {
         Key::N => B::Normal,
+        Key::I => B::Dissolve,
         Key::Q => return Some(Pick::Behind),
         Key::R => return Some(Pick::Clear),
         Key::P => B::PassThrough,
         Key::K => B::Darken,
         Key::M => B::Multiply,
         Key::B => B::ColorBurn,
+        Key::A => B::LinearBurn,
         Key::G => B::Lighten,
         Key::S => B::Screen,
         Key::D => B::ColorDodge,
@@ -59,8 +57,16 @@ pub fn letter_pick(key: Key) -> Option<Pick> {
         Key::O => B::Overlay,
         Key::F => B::SoftLight,
         Key::H => B::HardLight,
+        Key::V => B::VividLight,
+        Key::J => B::LinearLight,
+        Key::Z => B::PinLight,
+        Key::L => B::HardMix,
         Key::E => B::Difference,
         Key::X => B::Exclusion,
+        Key::U => B::Hue,
+        Key::T => B::Saturation,
+        Key::C => B::Color,
+        Key::Y => B::Luminosity,
         _ => return None,
     }))
 }

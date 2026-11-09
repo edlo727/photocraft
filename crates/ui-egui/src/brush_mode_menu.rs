@@ -68,11 +68,11 @@ pub(crate) fn choices() -> Vec<((Option<BlendMode>, bool), &'static str)> {
 }
 
 /// The blend modes in their menu groups (a separator before Darken, Lighten, Overlay, Difference
-/// and the Photoshop-only modes, which start at Dissolve), with Behind and/or Clear after Dissolve.
+/// and Hue, and the Nuke Merge operations when they are shown), with Behind and/or Clear after Dissolve.
 fn blend_items(behind: bool, clear: bool) -> Vec<Item> {
     let mut out = Vec::new();
     for m in BlendMode::menu_modes() {
-        if matches!(m, BlendMode::Darken | BlendMode::Lighten | BlendMode::Overlay | BlendMode::Difference | BlendMode::Dissolve) {
+        if matches!(m, BlendMode::Darken | BlendMode::Lighten | BlendMode::Overlay | BlendMode::Difference | BlendMode::Hue | BlendMode::NukeMin) {
             out.push(Item::Separator);
         }
         out.push(Item::Blend(m));

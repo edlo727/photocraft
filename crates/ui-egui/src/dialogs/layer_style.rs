@@ -965,8 +965,9 @@ fn blending_page(ui: &mut egui::Ui, p: &mut Value, names: &[String]) {
     ui.horizontal(|ui| {
         widgets::row_label(ui, "Blend Mode", LABEL_W);
         let mut cur = p.get("blend").and_then(Value::as_str).unwrap_or("Normal").to_string();
-        // The menu modes, plus the layer's own mode when it is a hidden one.
-        let own = photocraft_color::BlendMode::HIDDEN_MODES.into_iter().find(|m| m.label() == cur);
+        // The menu modes, plus the layer's own mode when the menu doesn't list it (a Paint.NET
+        // mode from an imported .pdn, a Nuke operation while those are hidden).
+        let own = photocraft_color::BlendMode::all_modes().find(|m| !m.is_menu_mode() && m.label() == cur);
         let opts: Vec<(String, &str)> = photocraft_color::BlendMode::menu_modes().chain(own).map(|m| (m.label().to_string(), m.label())).collect();
         if widgets::dropdown(ui, "fx-blend-blendingOptions", tl!("Blend Mode"), &mut cur, &opts, 150.0) {
             p["blend"] = json!(cur);

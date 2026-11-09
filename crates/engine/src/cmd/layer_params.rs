@@ -58,12 +58,7 @@ pub(crate) fn layer_param(s: &Session, p: &Value) -> Result<LayerId> {
 pub fn blend_from_str(s: &str) -> Option<BlendMode> {
     let norm = |x: &str| x.to_ascii_lowercase().replace([' ', '_', '-', '(', ')'], "");
     let want = norm(s);
-    // "Linear Burn" finds the Photoshop-only "Linear Burn (PS)" (listed before the hidden Nuke
-    // `under`, whose variant is still called LinearBurn); Nuke names win where Nuke has the op.
-    let label = |m: BlendMode| norm(m.label());
-    std::iter::once(BlendMode::PassThrough)
-        .chain(BlendMode::layer_modes())
-        .find(|m| label(*m) == want || (m.is_photoshop_only() && label(*m).strip_suffix("ps") == Some(want.as_str())) || norm(&format!("{m:?}")) == want)
+    std::iter::once(BlendMode::PassThrough).chain(BlendMode::all_modes()).find(|m| norm(m.label()) == want || norm(&format!("{m:?}")) == want)
 }
 
 /// The active selection as the mask of a layer being created, or None without a selection.

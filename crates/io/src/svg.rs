@@ -1530,7 +1530,7 @@ fn blend(b: usvg::BlendMode) -> BlendMode {
         B::SoftLight => BlendMode::SoftLight,
         B::Difference => BlendMode::Difference,
         B::Exclusion => BlendMode::Exclusion,
-        B::Hue => BlendMode::PsHue,
+        B::Hue => BlendMode::Hue,
         B::Saturation => BlendMode::Saturation,
         B::Color => BlendMode::Color,
         B::Luminosity => BlendMode::Luminosity,

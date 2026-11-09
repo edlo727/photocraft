@@ -351,12 +351,14 @@ fn export_reports_progress_and_can_be_cancelled_before_writing() {
 
 #[test]
 fn alpha_masking_is_on_for_modes_that_ignore_alpha() {
-    // Nuke's multiply and average change B where A is empty; the canvas doesn't.
-    for mode in [BlendMode::Multiply, BlendMode::Reflect] {
+    // Nuke's multiply and average change B where A is empty; the canvas doesn't. Photoshop's
+    // Multiply and Darken are written as multiply and min, and need it too.
+    for mode in [BlendMode::NukeMultiply, BlendMode::NukeAverage, BlendMode::Multiply, BlendMode::Darken] {
         assert_eq!(merge_knobs(mode), " screen_alpha true\n", "{mode:?} ({})", mode.label());
     }
-    // Porter-Duff operations use alpha themselves; plus, min, max and difference already leave B.
-    for mode in [BlendMode::Normal, BlendMode::LinearBurn, BlendMode::LinearDodge, BlendMode::Darken, BlendMode::Lighten, BlendMode::Difference] {
+    // Porter-Duff operations use alpha themselves; Nuke's plus, min, max and difference already
+    // leave B (and so does a Photoshop mode written as over, like Hue).
+    for mode in [BlendMode::Normal, BlendMode::NukeUnder, BlendMode::NukePlus, BlendMode::NukeMin, BlendMode::NukeMax, BlendMode::NukeDifference, BlendMode::Hue] {
         assert_eq!(merge_knobs(mode), "", "{mode:?} ({})", mode.label());
     }
 }

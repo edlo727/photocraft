@@ -78,6 +78,9 @@ impl PhotocraftApp {
         crate::zoom_field::tick(self, ctx);
         // A colour swatch's Color Picker OK hands its colour back to the swatch widget.
         crate::color_picker_ui::widget_tick(self, ctx);
+        // Blend menus everywhere list the Nuke Merge operations only while the Layers panel's
+        // "Nuke blend modes" switch is on.
+        photocraft_color::blend::set_nuke_modes_in_menus(self.ui.layers_panel_options.show_nuke_blend_modes);
         // Background jobs: apply finished ones, keep frames coming, Esc cancels (before the
         // shortcuts see Esc).
         if !screen_picker::tick(self, ctx) {

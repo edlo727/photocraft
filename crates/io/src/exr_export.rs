@@ -141,17 +141,13 @@ fn sanitize_layer_name(raw: &str) -> String {
 
 /// Returns (Nuke Merge2 operation, is_exact_match).
 ///
-/// Photocraft's layer modes are Nuke Merge operations, and each mode's label is the Merge2
-/// `operation` name, so the script uses the same maths the canvas renders. Only pass-through
-/// (a pass-through group's children continue the comp, so the group itself is plain over) and
-/// the Photoshop-only modes ([`BlendMode::PS_MODES`]: no Merge equivalent) fall back to over,
-/// flagged with `~` in the breakdown. The EXR's beauty pass holds the true composite.
+/// A Nuke blend mode is its own Merge operation, so the script runs the maths the canvas renders.
+/// A Photoshop mode becomes the closest operation (Multiply `multiply`, Subtract `from`, …) and
+/// one Nuke has nothing close to (Linear Burn, Vivid Light, Hue, …) becomes `over`, both flagged
+/// with `~` in the breakdown. Pass-through is `over` (its children continue the comp). The EXR's
+/// beauty pass holds the true composite.
 pub fn nuke_merge_operation(mode: BlendMode) -> (&'static str, bool) {
-    match mode {
-        BlendMode::PassThrough => ("over", true),
-        m if m.is_photoshop_only() => ("over", false),
-        m => (m.label(), true),
-    }
+    mode.nearest_nuke_op()
 }
 
 /// Extra Merge2 knobs the Merge for `mode` needs to match the canvas.
@@ -170,8 +166,10 @@ fn merge_knobs(mode: BlendMode) -> &'static str {
 fn needs_alpha_masking(mode: BlendMode) -> bool {
     use photocraft_color::blend::composite;
     const PORTER_DUFF: [&str; 12] = ["over", "under", "in", "out", "atop", "xor", "mask", "stencil", "matte", "conjoint-over", "disjoint-over", "copy"];
-    let (op, exact) = nuke_merge_operation(mode);
-    if !exact || PORTER_DUFF.contains(&op) {
+    // A Photoshop mode written as its closest operation (Multiply as `multiply`) needs it as much
+    // as the Nuke one: its maths leaves the comp beneath unchanged where the layer is empty too.
+    let (op, _) = nuke_merge_operation(mode);
+    if PORTER_DUFF.contains(&op) {
         return false;
     }
     const SAMPLES: [[f32; 4]; 4] = [[0.2, 0.5, 0.9, 1.0], [0.8, 0.3, 0.1, 0.6], [0.5, 0.5, 0.5, 0.25], [0.9, 0.7, 0.05, 0.9]];
@@ -183,9 +181,9 @@ fn needs_alpha_masking(mode: BlendMode) -> bool {
     })
 }
 
-/// The mode whose maths the script's Merge for `mode` runs.
+/// The mode whose maths the script's Merge for `mode` runs: Normal where it is written as `over`.
 fn merged_as(mode: BlendMode) -> BlendMode {
-    if mode == BlendMode::PassThrough || mode.is_photoshop_only() { BlendMode::Normal } else { mode }
+    if nuke_merge_operation(mode).0 == "over" { BlendMode::Normal } else { mode }
 }
 
 fn tcl_escape(s: &str) -> String {

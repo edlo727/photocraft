@@ -1,33 +1,56 @@
-//! Nuke-style 32-bit floating-point linear Merge modes (scalar reference implementation).
+//! Photoshop and Paint.NET blend modes, plus Nuke Merge operations (scalar reference
+//! implementation).
+//!
+//! The Photoshop and Paint.NET modes follow the public PDF / ISO 32000-2 and W3C Compositing
+//! definitions, with Photoshop's variants where they differ (Hard Mix, Darker/Lighter Color,
+//! Linear Burn/Dodge, Vivid/Linear/Pin Light, Subtract, Divide). They are what layers get by
+//! default, and what PSD and the other layered formats read and write.
+//!
+//! The `Nuke*` modes are Nuke Merge operations with Nuke's own 32-bit maths (premultiplied, no
+//! clamping). Blend menus list them only when "Nuke blend modes" is turned on in the Layers panel
+//! ([`set_nuke_modes_in_menus`]); a layer keeps its mode either way, so a document renders the
+//! same whatever the switch says. This is the CPU reference the GPU kernels must match.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BlendMode {
+    /// Groups only: children blend directly into the group's backdrop.
     PassThrough,
     Normal,
     Dissolve,
     Darken,
     Multiply,
     ColorBurn,
+    // The aliases read documents saved while these Photoshop modes were called `Ps…`.
+    #[serde(alias = "PsLinearBurn")]
     LinearBurn,
+    #[serde(alias = "PsDarkerColor")]
     DarkerColor,
     Lighten,
     Screen,
     ColorDodge,
     LinearDodge,
+    #[serde(alias = "PsLighterColor")]
     LighterColor,
     Overlay,
     SoftLight,
     HardLight,
+    #[serde(alias = "PsVividLight")]
     VividLight,
+    #[serde(alias = "PsLinearLight")]
     LinearLight,
+    #[serde(alias = "PsPinLight")]
     PinLight,
+    #[serde(alias = "PsHardMix")]
     HardMix,
     Difference,
     Exclusion,
     Subtract,
+    #[serde(alias = "PsDivide")]
     Divide,
+    #[serde(alias = "PsHue")]
     Hue,
     Saturation,
     Color,
@@ -38,240 +61,656 @@ pub enum BlendMode {
     Xor,
     PaintNetColorBurn,
     PaintNetColorDodge,
-    // Photoshop modes Nuke's Merge has no operation for. The Photoshop-named variants above are
-    // Nuke Merge operations in this build (see `label`), so these carry Photoshop's own maths.
-    PsLinearBurn,
-    PsDarkerColor,
-    PsLighterColor,
-    PsVividLight,
-    PsLinearLight,
-    PsPinLight,
-    PsHardMix,
-    PsDivide,
-    PsHue,
+    // ---- Nuke Merge operations (`over` is Normal) ----
+    NukeMin,
+    NukeMultiply,
+    NukeColorBurn,
+    NukeUnder,
+    NukeIn,
+    NukeMax,
+    NukeScreen,
+    NukeColorDodge,
+    NukePlus,
+    NukeOut,
+    NukeOverlay,
+    NukeSoftLight,
+    NukeHardLight,
+    NukeGeometric,
+    NukeHypot,
+    NukeMask,
+    NukeStencil,
+    NukeDifference,
+    NukeExclusion,
+    NukeMinus,
+    NukeDivide,
+    NukeMatte,
+    NukeAverage,
+    NukeConjointOver,
+    NukeDisjointOver,
+    NukeXor,
+    NukeFrom,
+    NukeAtop,
+}
+
+/// Whether blend menus list the Nuke Merge operations ([`BlendMode::NUKE_MODES`]) after
+/// Photoshop's modes. The Layers panel's "Nuke blend modes" switch; off by default.
+static NUKE_MENU: AtomicBool = AtomicBool::new(false);
+
+/// Show (or hide) the Nuke Merge operations in blend menus ([`BlendMode::menu_modes`]).
+pub fn set_nuke_modes_in_menus(on: bool) {
+    NUKE_MENU.store(on, Ordering::Relaxed);
+}
+
+/// Whether blend menus list the Nuke Merge operations.
+pub fn nuke_modes_in_menus() -> bool {
+    NUKE_MENU.load(Ordering::Relaxed)
 }
 
 impl BlendMode {
-    /// Nuke Merge operations that are compositing (Porter-Duff / matte) ops rather than colour
-    /// blends, or that duplicate a layer-editor feature: in a layer stack B is everything below,
-    /// so they act on the whole stack (mask, stencil, in, out, xor, copy), reorder it (under),
-    /// duplicate clipping masks (atop) or equal `over` for straight-alpha layers (matte,
-    /// conjoint-over, disjoint-over). They stay fully supported, so documents and scripts that use
-    /// them still load and render, but blend menus only list one when a layer already has it.
-    pub const HIDDEN_MODES: [BlendMode; 10] = [
-        BlendMode::PaintNetColorDodge, // atop
-        BlendMode::Glow,               // conjoint-over
-        BlendMode::Negation,           // disjoint-over
-        BlendMode::DarkerColor,        // in
-        BlendMode::PinLight,           // mask
-        BlendMode::Hue,                // matte
-        BlendMode::LighterColor,       // out
-        BlendMode::HardMix,            // stencil
-        BlendMode::LinearBurn,         // under
-        BlendMode::Xor,                // xor
-    ];
+    /// Paint.NET modes without an exact Photoshop equivalent.
+    pub const PAINT_NET_MODES: [BlendMode; 6] = [Self::Reflect, Self::Glow, Self::Negation, Self::Xor, Self::PaintNetColorBurn, Self::PaintNetColorDodge];
 
-    /// Photoshop blend modes with no Nuke Merge operation, listed after the Nuke ones in blend
-    /// menus and labelled "(PS)". They composite with Photoshop's maths (on 32-bit values: the
-    /// 0..1 formulas, Linear Dodge-style adds kept unclamped, as the CPU and GPU agree). PSD files
-    /// keep them; EXR / Nuke script export writes them as `over` and warns, and the multi-channel
-    /// EXR's beauty pass still carries the true result.
-    pub const PS_MODES: [BlendMode; 13] = [
+    /// The Photoshop and Paint.NET modes, with Paint.NET modes after Photoshop's menu order.
+    pub fn layer_modes() -> impl Iterator<Item = Self> {
+        Self::LAYER_MODES.into_iter().chain(Self::PAINT_NET_MODES)
+    }
+
+    /// Every mode a layer can have but Pass Through: [`Self::layer_modes`], then the Nuke Merge
+    /// operations ([`Self::NUKE_MODES`], [`Self::NUKE_HIDDEN_MODES`]).
+    pub fn all_modes() -> impl Iterator<Item = Self> {
+        Self::layer_modes().chain(Self::NUKE_MODES).chain(Self::NUKE_HIDDEN_MODES)
+    }
+
+    /// The modes blend menus list, in menu order: Photoshop's ([`Self::LAYER_MODES`]), then the
+    /// Nuke Merge colour operations ([`Self::NUKE_MODES`]) when they are turned on.
+    pub fn menu_modes() -> impl Iterator<Item = Self> {
+        let nuke: &'static [BlendMode] = if nuke_modes_in_menus() { &Self::NUKE_MODES } else { &[] };
+        Self::LAYER_MODES.into_iter().chain(nuke.iter().copied())
+    }
+
+    /// Whether blend menus list this mode ([`Self::menu_modes`]).
+    pub fn is_menu_mode(self) -> bool {
+        Self::LAYER_MODES.contains(&self) || (nuke_modes_in_menus() && Self::NUKE_MODES.contains(&self))
+    }
+
+    /// One of the Nuke Merge operations (a `Nuke…` mode).
+    pub fn is_nuke(self) -> bool {
+        Self::NUKE_MODES.contains(&self) || Self::NUKE_HIDDEN_MODES.contains(&self)
+    }
+
+    /// Kept for older call sites: a mode that is not a Nuke Merge operation (or Normal, `over`).
+    pub fn is_photoshop_only(self) -> bool {
+        self.nuke_op().is_none() && self != BlendMode::PassThrough
+    }
+
+    pub fn has_psd_equivalent(self) -> bool {
+        !Self::PAINT_NET_MODES.contains(&self) && !self.is_nuke()
+    }
+
+    /// Photoshop modes except PassThrough, in Photoshop menu order.
+    pub const LAYER_MODES: [BlendMode; 27] = [
+        BlendMode::Normal,
         BlendMode::Dissolve,
-        BlendMode::PsLinearBurn,
-        BlendMode::PsDarkerColor,
-        BlendMode::PsLighterColor,
-        BlendMode::PsVividLight,
-        BlendMode::PsLinearLight,
-        BlendMode::PsPinLight,
-        BlendMode::PsHardMix,
-        BlendMode::PsDivide,
-        BlendMode::PsHue,
+        BlendMode::Darken,
+        BlendMode::Multiply,
+        BlendMode::ColorBurn,
+        BlendMode::LinearBurn,
+        BlendMode::DarkerColor,
+        BlendMode::Lighten,
+        BlendMode::Screen,
+        BlendMode::ColorDodge,
+        BlendMode::LinearDodge,
+        BlendMode::LighterColor,
+        BlendMode::Overlay,
+        BlendMode::SoftLight,
+        BlendMode::HardLight,
+        BlendMode::VividLight,
+        BlendMode::LinearLight,
+        BlendMode::PinLight,
+        BlendMode::HardMix,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Subtract,
+        BlendMode::Divide,
+        BlendMode::Hue,
         BlendMode::Saturation,
         BlendMode::Color,
         BlendMode::Luminosity,
     ];
 
-    /// Kept for older call sites (it used to hold the Paint.NET-only modes): the modes that blend
-    /// menus hide unless a layer already uses one. See [`Self::HIDDEN_MODES`].
-    pub const PAINT_NET_MODES: [BlendMode; 10] = Self::HIDDEN_MODES;
-
-    /// Every mode a layer can have: the menu modes, then the hidden ones.
-    pub fn layer_modes() -> impl Iterator<Item = Self> {
-        Self::menu_modes().chain(Self::HIDDEN_MODES)
-    }
-
-    /// The modes blend menus list, in menu order: the Nuke Merge operations
-    /// ([`Self::LAYER_MODES`]), then the Photoshop-only ones ([`Self::PS_MODES`]).
-    pub fn menu_modes() -> impl Iterator<Item = Self> {
-        Self::LAYER_MODES.into_iter().chain(Self::PS_MODES)
-    }
-
-    /// Whether blend menus list this mode ([`Self::menu_modes`]).
-    pub fn is_menu_mode(self) -> bool {
-        Self::LAYER_MODES.contains(&self) || Self::PS_MODES.contains(&self)
-    }
-
-    /// One of the Photoshop-only modes ([`Self::PS_MODES`]).
-    pub fn is_photoshop_only(self) -> bool {
-        Self::PS_MODES.contains(&self)
-    }
-
-    /// Whether Photoshop has a mode with the same maths on 0..1 values, so a PSD keeps it.
-    /// Soft Light counts (closest match; Nuke's curve differs slightly from Photoshop's).
-    /// `minus` (A − B), Nuke's `divide` (A / B; Photoshop divides B / A), average, geometric,
-    /// hypot and the hidden compositing ops have none: PSD export writes them as Normal and warns.
-    pub fn has_psd_equivalent(self) -> bool {
-        matches!(
-            self,
-            BlendMode::PassThrough
-                | BlendMode::Normal
-                | BlendMode::Multiply
-                | BlendMode::Screen
-                | BlendMode::Overlay
-                | BlendMode::SoftLight
-                | BlendMode::HardLight
-                | BlendMode::ColorDodge
-                | BlendMode::ColorBurn
-                | BlendMode::LinearDodge
-                | BlendMode::PaintNetColorBurn
-                | BlendMode::Difference
-                | BlendMode::Exclusion
-                | BlendMode::Darken
-                | BlendMode::Lighten
-        ) || self.is_photoshop_only()
-    }
-
-    /// The modes blend menus list: Nuke Merge colour operations that make sense between layers,
-    /// grouped like Photoshop's menu (normal, darken, lighten, contrast, comparative, Nuke-only).
-    pub const LAYER_MODES: [BlendMode; 19] = [
-        BlendMode::Normal,            // over
-        BlendMode::Darken,            // min
-        BlendMode::Multiply,          // multiply
-        BlendMode::ColorBurn,         // color-burn
-        BlendMode::Lighten,           // max
-        BlendMode::Screen,            // screen
-        BlendMode::ColorDodge,        // color-dodge
-        BlendMode::LinearDodge,       // plus
-        BlendMode::Overlay,           // overlay
-        BlendMode::SoftLight,         // soft-light
-        BlendMode::HardLight,         // hard-light
-        BlendMode::Difference,        // difference
-        BlendMode::Exclusion,         // exclusion
-        BlendMode::PaintNetColorBurn, // from (B − A, Photoshop's Subtract)
-        BlendMode::Subtract,          // minus (A − B)
-        BlendMode::Divide,            // divide
-        BlendMode::Reflect,           // average
-        BlendMode::VividLight,        // geometric
-        BlendMode::LinearLight,       // hypot
+    /// The Nuke Merge colour operations blend menus list when they are turned on, grouped like
+    /// Photoshop's menu (darken, lighten, contrast, comparative, Nuke-only). `over` is Normal.
+    pub const NUKE_MODES: [BlendMode; 18] = [
+        BlendMode::NukeMin,
+        BlendMode::NukeMultiply,
+        BlendMode::NukeColorBurn,
+        BlendMode::NukeMax,
+        BlendMode::NukeScreen,
+        BlendMode::NukeColorDodge,
+        BlendMode::NukePlus,
+        BlendMode::NukeOverlay,
+        BlendMode::NukeSoftLight,
+        BlendMode::NukeHardLight,
+        BlendMode::NukeDifference,
+        BlendMode::NukeExclusion,
+        BlendMode::NukeFrom,
+        BlendMode::NukeMinus,
+        BlendMode::NukeDivide,
+        BlendMode::NukeAverage,
+        BlendMode::NukeGeometric,
+        BlendMode::NukeHypot,
     ];
+
+    /// Nuke Merge operations that are compositing (Porter-Duff / matte) ops rather than colour
+    /// blends: in a layer stack B is everything below, so they act on the whole stack (mask,
+    /// stencil, in, out, xor), reorder it (under), duplicate clipping masks (atop) or equal over
+    /// for straight-alpha layers (matte, conjoint-over, disjoint-over). They still render, so
+    /// scripts and documents that use them work, but menus list one only on a layer that has it.
+    pub const NUKE_HIDDEN_MODES: [BlendMode; 10] = [
+        BlendMode::NukeAtop,
+        BlendMode::NukeConjointOver,
+        BlendMode::NukeDisjointOver,
+        BlendMode::NukeIn,
+        BlendMode::NukeMask,
+        BlendMode::NukeMatte,
+        BlendMode::NukeOut,
+        BlendMode::NukeStencil,
+        BlendMode::NukeUnder,
+        BlendMode::NukeXor,
+    ];
+
+    /// Kept for older call sites: [`Self::NUKE_HIDDEN_MODES`].
+    pub const HIDDEN_MODES: [BlendMode; 10] = Self::NUKE_HIDDEN_MODES;
+
+    /// The Nuke Merge2 `operation` this mode is: Normal / Pass Through are `over`, a `Nuke…` mode
+    /// its own operation; `None` for the Photoshop and Paint.NET modes.
+    pub fn nuke_op(self) -> Option<&'static str> {
+        Some(match self {
+            BlendMode::Normal | BlendMode::PassThrough => "over",
+            BlendMode::NukeMin => "min",
+            BlendMode::NukeMultiply => "multiply",
+            BlendMode::NukeColorBurn => "color-burn",
+            BlendMode::NukeUnder => "under",
+            BlendMode::NukeIn => "in",
+            BlendMode::NukeMax => "max",
+            BlendMode::NukeScreen => "screen",
+            BlendMode::NukeColorDodge => "color-dodge",
+            BlendMode::NukePlus => "plus",
+            BlendMode::NukeOut => "out",
+            BlendMode::NukeOverlay => "overlay",
+            BlendMode::NukeSoftLight => "soft-light",
+            BlendMode::NukeHardLight => "hard-light",
+            BlendMode::NukeGeometric => "geometric",
+            BlendMode::NukeHypot => "hypot",
+            BlendMode::NukeMask => "mask",
+            BlendMode::NukeStencil => "stencil",
+            BlendMode::NukeDifference => "difference",
+            BlendMode::NukeExclusion => "exclusion",
+            BlendMode::NukeMinus => "minus",
+            BlendMode::NukeDivide => "divide",
+            BlendMode::NukeMatte => "matte",
+            BlendMode::NukeAverage => "average",
+            BlendMode::NukeConjointOver => "conjoint-over",
+            BlendMode::NukeDisjointOver => "disjoint-over",
+            BlendMode::NukeXor => "xor",
+            BlendMode::NukeFrom => "from",
+            BlendMode::NukeAtop => "atop",
+            _ => return None,
+        })
+    }
+
+    /// The Nuke Merge operation closest to a Photoshop mode, for scripts written for Nuke:
+    /// (operation, exact). `over` (inexact) where Nuke has nothing close.
+    pub fn nearest_nuke_op(self) -> (&'static str, bool) {
+        if let Some(op) = self.nuke_op() {
+            return (op, true);
+        }
+        let op = match self {
+            BlendMode::Darken => "min",
+            BlendMode::Multiply => "multiply",
+            BlendMode::ColorBurn => "color-burn",
+            BlendMode::Lighten => "max",
+            BlendMode::Screen => "screen",
+            BlendMode::ColorDodge => "color-dodge",
+            BlendMode::LinearDodge => "plus",
+            BlendMode::Overlay => "overlay",
+            BlendMode::SoftLight => "soft-light",
+            BlendMode::HardLight => "hard-light",
+            BlendMode::Difference => "difference",
+            BlendMode::Exclusion => "exclusion",
+            BlendMode::Subtract => "from",
+            _ => "over",
+        };
+        (op, false)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
-            BlendMode::PassThrough => "pass-through",
-            BlendMode::PaintNetColorDodge => "atop",
-            BlendMode::Reflect => "average",
-            BlendMode::ColorBurn => "color-burn",
-            BlendMode::ColorDodge => "color-dodge",
-            BlendMode::Glow => "conjoint-over",
-            BlendMode::Dissolve => "Dissolve (PS)",
-            BlendMode::Difference => "difference",
-            BlendMode::Negation => "disjoint-over",
-            BlendMode::Divide => "divide",
-            BlendMode::Exclusion => "exclusion",
-            BlendMode::PaintNetColorBurn => "from",
-            BlendMode::VividLight => "geometric",
-            BlendMode::HardLight => "hard-light",
-            BlendMode::LinearLight => "hypot",
-            BlendMode::DarkerColor => "in",
-            BlendMode::PinLight => "mask",
-            BlendMode::Hue => "matte",
-            BlendMode::Lighten => "max",
-            BlendMode::Darken => "min",
-            BlendMode::Subtract => "minus",
-            BlendMode::Multiply => "multiply",
-            BlendMode::LighterColor => "out",
-            BlendMode::Normal => "over",
-            BlendMode::Overlay => "overlay",
-            BlendMode::LinearDodge => "plus",
-            BlendMode::Screen => "screen",
-            BlendMode::SoftLight => "soft-light",
-            BlendMode::HardMix => "stencil",
-            BlendMode::LinearBurn => "under",
-            BlendMode::Xor => "xor",
-            BlendMode::Saturation => "Saturation (PS)",
-            BlendMode::Color => "Color (PS)",
-            BlendMode::Luminosity => "Luminosity (PS)",
-            BlendMode::PsLinearBurn => "Linear Burn (PS)",
-            BlendMode::PsDarkerColor => "Darker Color (PS)",
-            BlendMode::PsLighterColor => "Lighter Color (PS)",
-            BlendMode::PsVividLight => "Vivid Light (PS)",
-            BlendMode::PsLinearLight => "Linear Light (PS)",
-            BlendMode::PsPinLight => "Pin Light (PS)",
-            BlendMode::PsHardMix => "Hard Mix (PS)",
-            BlendMode::PsDivide => "Divide (PS)",
-            BlendMode::PsHue => "Hue (PS)",
+            BlendMode::PassThrough => "Pass Through",
+            BlendMode::Normal => "Normal",
+            BlendMode::Dissolve => "Dissolve",
+            BlendMode::Darken => "Darken",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::ColorBurn => "Color Burn",
+            BlendMode::LinearBurn => "Linear Burn",
+            BlendMode::DarkerColor => "Darker Color",
+            BlendMode::Lighten => "Lighten",
+            BlendMode::Screen => "Screen",
+            BlendMode::ColorDodge => "Color Dodge",
+            BlendMode::LinearDodge => "Linear Dodge (Add)",
+            BlendMode::LighterColor => "Lighter Color",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::SoftLight => "Soft Light",
+            BlendMode::HardLight => "Hard Light",
+            BlendMode::VividLight => "Vivid Light",
+            BlendMode::LinearLight => "Linear Light",
+            BlendMode::PinLight => "Pin Light",
+            BlendMode::HardMix => "Hard Mix",
+            BlendMode::Difference => "Difference",
+            BlendMode::Exclusion => "Exclusion",
+            BlendMode::Subtract => "Subtract",
+            BlendMode::Divide => "Divide",
+            BlendMode::Hue => "Hue",
+            BlendMode::Saturation => "Saturation",
+            BlendMode::Color => "Color",
+            BlendMode::Luminosity => "Luminosity",
+            BlendMode::Reflect => "Reflect",
+            BlendMode::Glow => "Glow",
+            BlendMode::Negation => "Negation",
+            BlendMode::Xor => "XOR",
+            BlendMode::PaintNetColorBurn => "Color Burn (Paint.NET)",
+            BlendMode::PaintNetColorDodge => "Color Dodge (Paint.NET)",
+            BlendMode::NukeMin => "min (Nuke)",
+            BlendMode::NukeMultiply => "multiply (Nuke)",
+            BlendMode::NukeColorBurn => "color-burn (Nuke)",
+            BlendMode::NukeUnder => "under (Nuke)",
+            BlendMode::NukeIn => "in (Nuke)",
+            BlendMode::NukeMax => "max (Nuke)",
+            BlendMode::NukeScreen => "screen (Nuke)",
+            BlendMode::NukeColorDodge => "color-dodge (Nuke)",
+            BlendMode::NukePlus => "plus (Nuke)",
+            BlendMode::NukeOut => "out (Nuke)",
+            BlendMode::NukeOverlay => "overlay (Nuke)",
+            BlendMode::NukeSoftLight => "soft-light (Nuke)",
+            BlendMode::NukeHardLight => "hard-light (Nuke)",
+            BlendMode::NukeGeometric => "geometric (Nuke)",
+            BlendMode::NukeHypot => "hypot (Nuke)",
+            BlendMode::NukeMask => "mask (Nuke)",
+            BlendMode::NukeStencil => "stencil (Nuke)",
+            BlendMode::NukeDifference => "difference (Nuke)",
+            BlendMode::NukeExclusion => "exclusion (Nuke)",
+            BlendMode::NukeMinus => "minus (Nuke)",
+            BlendMode::NukeDivide => "divide (Nuke)",
+            BlendMode::NukeMatte => "matte (Nuke)",
+            BlendMode::NukeAverage => "average (Nuke)",
+            BlendMode::NukeConjointOver => "conjoint-over (Nuke)",
+            BlendMode::NukeDisjointOver => "disjoint-over (Nuke)",
+            BlendMode::NukeXor => "xor (Nuke)",
+            BlendMode::NukeFrom => "from (Nuke)",
+            BlendMode::NukeAtop => "atop (Nuke)",
         }
     }
 
-    /// The Photoshop key this mode is written as: the Photoshop mode with the same maths, or
-    /// Normal when there is none ([`Self::has_psd_equivalent`]).
+    /// PSD 4-character blend key. Modes without an equivalent fall back to Normal, except the
+    /// Nuke colour operations, written as the Photoshop mode closest to them; exporters must
+    /// report the loss using [`Self::has_psd_equivalent`].
     pub fn psd_key(self) -> [u8; 4] {
         *match self {
             BlendMode::PassThrough => b"pass",
             BlendMode::Normal => b"norm",
-            BlendMode::Multiply => b"mul ",
-            BlendMode::Screen => b"scrn",
-            BlendMode::Overlay => b"over",
-            BlendMode::SoftLight => b"sLit",
-            BlendMode::HardLight => b"hLit",
-            BlendMode::ColorDodge => b"div ",
-            BlendMode::ColorBurn => b"idiv",
-            BlendMode::LinearDodge => b"lddg",          // plus = Linear Dodge (Add)
-            BlendMode::PaintNetColorBurn => b"fsub",    // from (B − A) = Subtract
-            BlendMode::Difference => b"diff",
-            BlendMode::Exclusion => b"smud",
-            BlendMode::Darken => b"dark",               // min
-            BlendMode::Lighten => b"lite",              // max
             BlendMode::Dissolve => b"diss",
-            BlendMode::PsLinearBurn => b"lbrn",
-            BlendMode::PsDarkerColor => b"dkCl",
-            BlendMode::PsLighterColor => b"lgCl",
-            BlendMode::PsVividLight => b"vLit",
-            BlendMode::PsLinearLight => b"lLit",
-            BlendMode::PsPinLight => b"pLit",
-            BlendMode::PsHardMix => b"hMix",
-            BlendMode::PsDivide => b"fdiv",
-            BlendMode::PsHue => b"hue ",
+            BlendMode::Darken | BlendMode::NukeMin => b"dark",
+            BlendMode::Multiply | BlendMode::NukeMultiply => b"mul ",
+            BlendMode::ColorBurn | BlendMode::NukeColorBurn => b"idiv",
+            BlendMode::LinearBurn => b"lbrn",
+            BlendMode::DarkerColor => b"dkCl",
+            BlendMode::Lighten | BlendMode::NukeMax => b"lite",
+            BlendMode::Screen | BlendMode::NukeScreen => b"scrn",
+            BlendMode::ColorDodge | BlendMode::NukeColorDodge => b"div ",
+            BlendMode::LinearDodge | BlendMode::NukePlus => b"lddg",
+            BlendMode::LighterColor => b"lgCl",
+            BlendMode::Overlay | BlendMode::NukeOverlay => b"over",
+            BlendMode::SoftLight | BlendMode::NukeSoftLight => b"sLit",
+            BlendMode::HardLight | BlendMode::NukeHardLight => b"hLit",
+            BlendMode::VividLight => b"vLit",
+            BlendMode::LinearLight => b"lLit",
+            BlendMode::PinLight => b"pLit",
+            BlendMode::HardMix => b"hMix",
+            BlendMode::Difference | BlendMode::NukeDifference => b"diff",
+            BlendMode::Exclusion | BlendMode::NukeExclusion => b"smud",
+            BlendMode::Subtract | BlendMode::NukeFrom => b"fsub",
+            BlendMode::Divide => b"fdiv",
+            BlendMode::Hue => b"hue ",
             BlendMode::Saturation => b"sat ",
             BlendMode::Color => b"colr",
             BlendMode::Luminosity => b"lum ",
-            _ => b"norm",
+            BlendMode::Reflect | BlendMode::Glow | BlendMode::Negation | BlendMode::Xor | BlendMode::PaintNetColorBurn | BlendMode::PaintNetColorDodge => {
+                b"norm"
+            }
+            BlendMode::NukeUnder
+            | BlendMode::NukeIn
+            | BlendMode::NukeOut
+            | BlendMode::NukeGeometric
+            | BlendMode::NukeHypot
+            | BlendMode::NukeMask
+            | BlendMode::NukeStencil
+            | BlendMode::NukeMinus
+            | BlendMode::NukeDivide
+            | BlendMode::NukeMatte
+            | BlendMode::NukeAverage
+            | BlendMode::NukeConjointOver
+            | BlendMode::NukeDisjointOver
+            | BlendMode::NukeXor
+            | BlendMode::NukeAtop => b"norm",
         }
     }
 
-    /// The mode a Photoshop key reads as: the Nuke Merge operation with the same maths, else the
-    /// Photoshop-only mode ([`Self::PS_MODES`]). Every Photoshop layer mode has one.
+    /// The mode a Photoshop key reads as: always Photoshop's own (never a Nuke operation).
     pub fn from_psd_key(key: [u8; 4]) -> Option<BlendMode> {
-        std::iter::once(BlendMode::PassThrough)
-            .chain(Self::menu_modes())
-            .filter(|m| m.has_psd_equivalent())
-            .find(|m| m.psd_key() == key)
+        std::iter::once(BlendMode::PassThrough).chain(Self::LAYER_MODES).find(|m| m.psd_key() == key)
     }
 
     pub fn is_separable(self) -> bool {
-        !matches!(
-            self,
-            BlendMode::Hue
-                | BlendMode::Saturation
-                | BlendMode::Color
-                | BlendMode::Luminosity
-                | BlendMode::PsHue
-                | BlendMode::PsDarkerColor
-                | BlendMode::PsLighterColor
-        )
+        !matches!(self, BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity | BlendMode::DarkerColor | BlendMode::LighterColor)
     }
 }
+
+/// Separable per-channel blend function `B(cb, cs)`.
+#[inline]
+pub fn blend_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
+    channel(mode, cb, cs, 1.0)
+}
+
+/// [`blend_channel`] for 32-bit float documents, whose values may exceed 1: Linear Dodge (Add)
+/// and Divide don't clip at 1 there (Photoshop's 32-bit Add is how light is added in HDR), only
+/// at `f32::MAX`, so they stay finite. Every other mode is [`blend_channel`].
+#[inline]
+pub fn blend_channel_hdr(mode: BlendMode, cb: f32, cs: f32) -> f32 {
+    channel(mode, cb, cs, f32::MAX)
+}
+
+/// `B(cb, cs)` with Linear Dodge and Divide clipped at `hi` (1 at integer depths).
+#[inline]
+fn channel(mode: BlendMode, cb: f32, cs: f32, hi: f32) -> f32 {
+    match mode {
+        BlendMode::Normal | BlendMode::Dissolve | BlendMode::PassThrough => cs,
+        BlendMode::Darken => cb.min(cs),
+        BlendMode::Multiply => cb * cs,
+        BlendMode::ColorBurn => color_burn(cb, cs),
+        BlendMode::LinearBurn => (cb + cs - 1.0).max(0.0),
+        BlendMode::Lighten => cb.max(cs),
+        BlendMode::Screen => cb + cs - cb * cs,
+        BlendMode::ColorDodge => color_dodge(cb, cs),
+        BlendMode::LinearDodge => (cb + cs).min(hi),
+        BlendMode::Overlay => hard_light(cs, cb),
+        BlendMode::SoftLight => soft_light_ps(cb, cs),
+        BlendMode::HardLight => hard_light(cb, cs),
+        BlendMode::VividLight if cs <= 0.0 => 0.0,
+        BlendMode::VividLight if cs >= 1.0 => 1.0,
+        BlendMode::VividLight => {
+            if cs <= 0.5 {
+                color_burn(cb, 2.0 * cs)
+            } else {
+                color_dodge(cb, 2.0 * (cs - 0.5))
+            }
+        }
+        BlendMode::LinearLight => (cb + 2.0 * cs - 1.0).clamp(0.0, 1.0),
+        BlendMode::PinLight => {
+            if cs <= 0.5 {
+                cb.min(2.0 * cs)
+            } else {
+                cb.max(2.0 * cs - 1.0)
+            }
+        }
+        BlendMode::HardMix => {
+            if vivid_light_hard_mix(cb, cs) >= 0.5 - 1e-6 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        BlendMode::Difference => (cb - cs).abs(),
+        BlendMode::Exclusion => cb + cs - 2.0 * cb * cs,
+        BlendMode::Subtract => (cb - cs).max(0.0),
+        BlendMode::Divide => {
+            if cs <= 0.0 {
+                if cb <= 0.0 { 0.0 } else { 1.0 }
+            } else {
+                (cb / cs).min(hi)
+            }
+        }
+        BlendMode::Reflect => reflect(cb, cs),
+        BlendMode::Glow => reflect(cs, cb),
+        BlendMode::Negation => 1.0 - (1.0 - cb - cs).abs(),
+        BlendMode::Xor => {
+            // Paint.NET's XOR is defined on 8-bit channels even in a floating-point compositor.
+            let b = (cb.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let s = (cs.clamp(0.0, 1.0) * 255.0).round() as u8;
+            f32::from(b ^ s) / 255.0
+        }
+        BlendMode::PaintNetColorBurn => {
+            if cs <= 0.0 {
+                0.0
+            } else {
+                (1.0 - (1.0 - cb) / cs).max(0.0)
+            }
+        }
+        BlendMode::PaintNetColorDodge => {
+            if cs >= 1.0 {
+                1.0
+            } else {
+                (cb / (1.0 - cs)).min(1.0)
+            }
+        }
+        // Non-separable modes are handled by `blend_rgb`; fall back to source.
+        BlendMode::DarkerColor | BlendMode::LighterColor | BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => cs,
+        BlendMode::NukeMin
+        | BlendMode::NukeMultiply
+        | BlendMode::NukeColorBurn
+        | BlendMode::NukeUnder
+        | BlendMode::NukeIn
+        | BlendMode::NukeMax
+        | BlendMode::NukeScreen
+        | BlendMode::NukeColorDodge
+        | BlendMode::NukePlus
+        | BlendMode::NukeOut
+        | BlendMode::NukeOverlay
+        | BlendMode::NukeSoftLight
+        | BlendMode::NukeHardLight
+        | BlendMode::NukeGeometric
+        | BlendMode::NukeHypot
+        | BlendMode::NukeMask
+        | BlendMode::NukeStencil
+        | BlendMode::NukeDifference
+        | BlendMode::NukeExclusion
+        | BlendMode::NukeMinus
+        | BlendMode::NukeDivide
+        | BlendMode::NukeMatte
+        | BlendMode::NukeAverage
+        | BlendMode::NukeConjointOver
+        | BlendMode::NukeDisjointOver
+        | BlendMode::NukeXor
+        | BlendMode::NukeFrom
+        | BlendMode::NukeAtop => nuke_channel(mode, cb, cs),
+    }
+}
+
+fn reflect(cb: f32, cs: f32) -> f32 {
+    if cs >= 1.0 { 1.0 } else { (cb * cb / (1.0 - cs)).min(1.0) }
+}
+
+#[inline]
+fn vivid_light_hard_mix(cb: f32, cs: f32) -> f32 {
+    const EDGE: f32 = 1e-4;
+    if cs <= 0.5 {
+        if cb >= 1.0 - EDGE {
+            1.0
+        } else if cs <= 0.0 {
+            0.0
+        } else {
+            1.0 - ((1.0 - cb) / (2.0 * cs)).min(1.0)
+        }
+    } else if cb <= EDGE {
+        0.0
+    } else if cs >= 1.0 {
+        1.0
+    } else {
+        (cb / (2.0 * (1.0 - cs))).min(1.0)
+    }
+}
+
+#[inline]
+fn color_burn(cb: f32, cs: f32) -> f32 {
+    if cb >= 1.0 {
+        1.0
+    } else if cs <= 0.0 {
+        0.0
+    } else {
+        1.0 - ((1.0 - cb) / cs).min(1.0)
+    }
+}
+
+#[inline]
+fn color_dodge(cb: f32, cs: f32) -> f32 {
+    if cb <= 0.0 {
+        0.0
+    } else if cs >= 1.0 {
+        1.0
+    } else {
+        (cb / (1.0 - cs)).min(1.0)
+    }
+}
+
+#[inline]
+fn hard_light(cb: f32, cs: f32) -> f32 {
+    if cs <= 0.5 {
+        cb * 2.0 * cs
+    } else {
+        let s = 2.0 * cs - 1.0;
+        cb + s - cb * s
+    }
+}
+
+/// Photoshop's Soft Light: the W3C/PDF curve. In the upper half (`cs > 0.5`) the backdrop moves
+/// towards `D(cb)`, which is `sqrt(cb)` above a quarter and the cubic `((16·cb − 12)·cb + 4)·cb`
+/// below it; with `sqrt` throughout, dark backdrops came out up to 20 levels too light (#8804,
+/// measured on psd-tools `blend-modes/rgb-blend-modes.psd`).
+#[inline]
+fn soft_light_ps(cb: f32, cs: f32) -> f32 {
+    if cs <= 0.5 {
+        2.0 * cb * cs + cb * cb * (1.0 - 2.0 * cs)
+    } else {
+        let b = cb.max(0.0);
+        let d = if b <= 0.25 { ((16.0 * b - 12.0) * b + 4.0) * b } else { b.sqrt() };
+        2.0 * cb * (1.0 - cs) + d * (2.0 * cs - 1.0)
+    }
+}
+
+// ---- non-separable helpers (W3C Compositing Level 1) ----
+
+#[inline]
+pub fn lum(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+/// ClipColor: moves `c` towards its grey ([`lum`]) until every channel is within `0..=top`,
+/// keeping the luminosity. `top` is the brightest in-gamut value: 1, or `f32::MAX` in 32-bit
+/// documents (values above 1 are valid light there, so only negatives are pulled in).
+///
+/// The scale factors `l / (l − min)` and `(top − l) / (max − l)` lie in 0..1 only while the
+/// luminosity itself is in range. Outside it no colour of that luminosity is in gamut: the plain
+/// formula turned colours inside out (a grey of 2 as the Luminosity of (0.5, 0.25, 0.125) gave
+/// (1.0, 2.32, 2.99)) and, for greys, divided by the rounding noise of `max − l`, so results were
+/// arbitrary and differed between the CPU and the GPU. Such colours become their grey instead
+/// (the formula's value as the luminosity reaches the bound).
+fn clip_color(c: [f32; 3], top: f32) -> [f32; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    let mut out = c;
+    if n < 0.0 {
+        let d = l - n;
+        for v in &mut out {
+            *v = if l > 0.0 && d > 0.0 { l + (*v - l) * l / d } else { l };
+        }
+    }
+    if x > top {
+        let d = x - l;
+        for v in &mut out {
+            *v = if l < top && d > 0.0 { l + (*v - l) * (top - l) / d } else { l };
+        }
+    }
+    out
+}
+
+/// `c` with its luminosity ([`lum`]) moved to `l`, clipped back into gamut towards grey (the
+/// Luminosity blend mode's SetLum + ClipColor).
+pub fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+    set_lum_within(c, l, 1.0)
+}
+
+/// [`set_lum`] clipping at `top` instead of 1 (see [`blend_rgb_within`]).
+fn set_lum_within(c: [f32; 3], l: f32, top: f32) -> [f32; 3] {
+    let d = l - lum(c);
+    clip_color([c[0] + d, c[1] + d, c[2] + d], top)
+}
+
+fn sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
+    let mut idx = [0usize, 1, 2];
+    idx.sort_by(|&a, &b| c[a].partial_cmp(&c[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let (imin, imid, imax) = (idx[0], idx[1], idx[2]);
+    let mut out = [0.0f32; 3];
+    if c[imax] > c[imin] {
+        out[imid] = (c[imid] - c[imin]) * s / (c[imax] - c[imin]);
+        out[imax] = s;
+    }
+    out[imin] = 0.0;
+    out
+}
+
+/// Blend a whole RGB triple: `B(Cb, Cs)` including non-separable modes.
+pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    blend_rgb_within(mode, cb, cs, 1.0)
+}
+
+/// [`blend_rgb`] with Hue / Saturation / Color / Luminosity clipped at `top` instead of 1:
+/// `f32::MAX` keeps the values above 1 of 32-bit documents (their gamut has no upper bound).
+pub fn blend_rgb_within(mode: BlendMode, cb: [f32; 3], cs: [f32; 3], top: f32) -> [f32; 3] {
+    match mode {
+        BlendMode::Hue => set_lum_within(set_sat(cs, sat(cb)), lum(cb), top),
+        BlendMode::Saturation => set_lum_within(set_sat(cb, sat(cs)), lum(cb), top),
+        BlendMode::Color => set_lum_within(cs, lum(cb), top),
+        BlendMode::Luminosity => set_lum_within(cb, lum(cs), top),
+        BlendMode::DarkerColor => {
+            if lum(cs) < lum(cb) {
+                cs
+            } else {
+                cb
+            }
+        }
+        BlendMode::LighterColor => {
+            if lum(cs) > lum(cb) {
+                cs
+            } else {
+                cb
+            }
+        }
+        m => [blend_channel(m, cb[0], cs[0]), blend_channel(m, cb[1], cs[1]), blend_channel(m, cb[2], cs[2])],
+    }
+}
+
+/// [`blend_rgb`] for 32-bit float documents: separable modes use [`blend_channel_hdr`], and the
+/// non-separable ones keep values above 1 ([`blend_rgb_within`] at `f32::MAX`).
+pub fn blend_rgb_hdr(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    if mode.is_separable() { std::array::from_fn(|i| blend_channel_hdr(mode, cb[i], cs[i])) } else { blend_rgb_within(mode, cb, cs, f32::MAX) }
+}
+
+
+// ---- Nuke Merge operations (the `Nuke…` modes): Nuke's 32-bit maths, A = source, B = backdrop ----
 
 #[inline]
 pub fn nuke_screen(a: f32, b: f32) -> f32 {
@@ -287,11 +726,6 @@ pub fn nuke_screen(a: f32, b: f32) -> f32 {
 /// `x < 0.5 → 2·x·y`, else `screen(2·x − 1, y)`. Both branches give `y` at `x = 0.5`, so the
 /// result is continuous. Nothing is clamped: 32-bit values above 1 (and below 0) pass through,
 /// and [`nuke_screen`]'s `max` fallback handles them as Nuke does.
-///
-/// The previous version clamped both inputs to 0..1 (flattening every highlight above 1) and
-/// rescaled the *other* input in the screen branch, so wherever `x > 0.5` and `y < 0.5` the
-/// screen saw a negative operand, fell back to `max` and returned `x` outright: hard edges along
-/// the backdrop's 0.5 contour and a much brighter result than Nuke.
 #[inline]
 pub fn nuke_light(x: f32, y: f32) -> f32 {
     if x < 0.5 {
@@ -333,240 +767,95 @@ pub fn nuke_divide(a: f32, b: f32) -> f32 {
     }
 }
 
-// ---- Photoshop-only modes (PS_MODES): Photoshop's formulas, as upstream PhotoCraft had them ----
-
+/// `B(cb, cs)` of a Nuke colour operation (A = `cs`, B = `cb`); the compositing ones (in, out,
+/// mask, stencil, atop, matte, xor, conjoint / disjoint over, under) are composited whole in
+/// [`composite`], and give the source here.
 #[inline]
-fn ps_color_burn(cb: f32, cs: f32) -> f32 {
-    if cb >= 1.0 {
-        1.0
-    } else if cs <= 0.0 {
-        0.0
-    } else {
-        1.0 - ((1.0 - cb) / cs).min(1.0)
-    }
-}
-
-#[inline]
-fn ps_color_dodge(cb: f32, cs: f32) -> f32 {
-    if cb <= 0.0 {
-        0.0
-    } else if cs >= 1.0 {
-        1.0
-    } else {
-        (cb / (1.0 - cs)).min(1.0)
-    }
-}
-
-/// Vivid Light as Hard Mix thresholds it (backdrop extremes within 1e-4 of 0 / 1 count as exact).
-#[inline]
-fn ps_vivid_hard_mix(cb: f32, cs: f32) -> f32 {
-    const EDGE: f32 = 1e-4;
-    if cs <= 0.5 {
-        if cb >= 1.0 - EDGE {
-            1.0
-        } else if cs <= 0.0 {
-            0.0
-        } else {
-            1.0 - ((1.0 - cb) / (2.0 * cs)).min(1.0)
-        }
-    } else if cb <= EDGE {
-        0.0
-    } else if cs >= 1.0 {
-        1.0
-    } else {
-        (cb / (2.0 * (1.0 - cs))).min(1.0)
-    }
-}
-
-/// `B(cb, cs)` of a separable Photoshop-only mode; `None` for every other mode.
-#[inline]
-pub fn ps_channel(mode: BlendMode, cb: f32, cs: f32) -> Option<f32> {
-    Some(match mode {
-        BlendMode::PsLinearBurn => (cb + cs - 1.0).max(0.0),
-        BlendMode::PsVividLight => {
-            if cs <= 0.0 {
-                0.0
-            } else if cs >= 1.0 {
-                1.0
-            } else if cs <= 0.5 {
-                ps_color_burn(cb, 2.0 * cs)
-            } else {
-                ps_color_dodge(cb, 2.0 * (cs - 0.5))
-            }
-        }
-        BlendMode::PsLinearLight => (cb + 2.0 * cs - 1.0).clamp(0.0, 1.0),
-        BlendMode::PsPinLight => {
-            if cs <= 0.5 {
-                cb.min(2.0 * cs)
-            } else {
-                cb.max(2.0 * cs - 1.0)
-            }
-        }
-        BlendMode::PsHardMix => {
-            if ps_vivid_hard_mix(cb, cs) >= 0.5 - 1e-6 {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        // Backdrop ÷ source; unclamped above 1 (32-bit light), as Photoshop's 32-bit Divide.
-        BlendMode::PsDivide => {
-            if cs <= 0.0 {
-                if cb <= 0.0 { 0.0 } else { 1.0 }
-            } else {
-                (cb / cs).min(f32::MAX)
-            }
-        }
-        _ => return None,
-    })
-}
-
-#[inline]
-pub fn blend_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
-    blend_channel_hdr(mode, cb, cs)
-}
-
-#[inline]
-pub fn blend_channel_hdr(mode: BlendMode, cb: f32, cs: f32) -> f32 {
-    if let Some(v) = ps_channel(mode, cb, cs) {
-        return v;
-    }
+fn nuke_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
     match mode {
-        BlendMode::Normal | BlendMode::PassThrough => cs, // over
-        BlendMode::Dissolve => cs, // Dissolve (PS): over, with the caller's noise
-        BlendMode::LinearBurn => cb, // under
-        BlendMode::LinearDodge => cs + cb, // plus
-        BlendMode::Multiply => cs * cb, // multiply
-        BlendMode::Screen => nuke_screen(cs, cb), // screen
-        BlendMode::Subtract => cs - cb, // minus
-        BlendMode::PaintNetColorBurn => cb - cs, // from
-        BlendMode::Divide => nuke_divide(cs, cb), // divide
-        BlendMode::Darken | BlendMode::DarkerColor => cs.min(cb), // min / in
-        BlendMode::Lighten | BlendMode::LighterColor => cs.max(cb), // max / out
-        BlendMode::LinearLight => (cs * cs + cb * cb).sqrt(), // hypot
-        BlendMode::VividLight => { // geometric
+        BlendMode::NukeUnder | BlendMode::NukeAtop => cb,
+        BlendMode::NukePlus => cs + cb,
+        BlendMode::NukeMultiply => cs * cb,
+        BlendMode::NukeScreen => nuke_screen(cs, cb),
+        BlendMode::NukeMinus => cs - cb,
+        BlendMode::NukeFrom => cb - cs,
+        BlendMode::NukeDivide => nuke_divide(cs, cb),
+        BlendMode::NukeMin | BlendMode::NukeIn => cs.min(cb),
+        BlendMode::NukeMax | BlendMode::NukeOut => cs.max(cb),
+        BlendMode::NukeHypot => (cs * cs + cb * cb).sqrt(),
+        BlendMode::NukeGeometric => {
             let sum = cs + cb;
             if sum.abs() <= 1e-7 { 0.0 } else { (2.0 * cs * cb) / sum }
         }
-        BlendMode::Difference => (cs - cb).abs(), // difference
-        BlendMode::Exclusion => cs + cb - 2.0 * cs * cb, // exclusion
-        BlendMode::Overlay => nuke_overlay(cs, cb), // overlay
-        BlendMode::HardLight => nuke_hard_light(cs, cb), // hard-light
-        BlendMode::SoftLight => nuke_soft_light(cs, cb), // soft-light
-        BlendMode::Reflect => 0.5 * (cs + cb), // average
-        BlendMode::ColorDodge => { // color-dodge
+        BlendMode::NukeDifference => (cs - cb).abs(),
+        BlendMode::NukeExclusion => cs + cb - 2.0 * cs * cb,
+        BlendMode::NukeOverlay => nuke_overlay(cs, cb),
+        BlendMode::NukeHardLight => nuke_hard_light(cs, cb),
+        BlendMode::NukeSoftLight => nuke_soft_light(cs, cb),
+        BlendMode::NukeAverage => 0.5 * (cs + cb),
+        BlendMode::NukeColorDodge => {
             let denom = 1.0 - cs;
             if denom.abs() <= 1e-6 { cb } else { cb / denom }
         }
-        BlendMode::ColorBurn => { // color-burn
+        BlendMode::NukeColorBurn => {
             if cs.abs() <= 1e-6 { 0.0 } else { 1.0 - (1.0 - cb) / cs }
         }
-        BlendMode::PaintNetColorDodge => cb, // atop (handled in RGBA composite)
-        BlendMode::Hue => cs, // matte (handled in RGBA composite)
-        BlendMode::PinLight | BlendMode::HardMix | BlendMode::Glow | BlendMode::Negation | BlendMode::Xor | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => cs,
-        // Separable ones are answered by `ps_channel` above; the non-separable ones by `blend_rgb`.
-        BlendMode::PsLinearBurn
-        | BlendMode::PsVividLight
-        | BlendMode::PsLinearLight
-        | BlendMode::PsPinLight
-        | BlendMode::PsHardMix
-        | BlendMode::PsDivide
-        | BlendMode::PsDarkerColor
-        | BlendMode::PsLighterColor
-        | BlendMode::PsHue => cs,
+        _ => cs,
     }
 }
 
-#[inline]
-pub fn lum(c: [f32; 3]) -> f32 {
-    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
-}
-
-fn clip_color(c: [f32; 3], top: f32) -> [f32; 3] {
-    let l = lum(c);
-    let n = c[0].min(c[1]).min(c[2]);
-    let x = c[0].max(c[1]).max(c[2]);
-    let mut out = c;
-    if n < 0.0 {
-        let d = l - n;
-        for v in &mut out {
-            *v = if l > 0.0 && d > 0.0 { l + (*v - l) * l / d } else { l };
-        }
-    }
-    if x > top {
-        let d = x - l;
-        for v in &mut out {
-            *v = if l < top && d > 0.0 { l + (*v - l) * (top - l) / d } else { l };
-        }
-    }
-    out
-}
-
-pub fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
-    set_lum_within(c, l, f32::MAX)
-}
-
-fn set_lum_within(c: [f32; 3], l: f32, top: f32) -> [f32; 3] {
-    let d = l - lum(c);
-    clip_color([c[0] + d, c[1] + d, c[2] + d], top)
-}
-
-fn sat(c: [f32; 3]) -> f32 {
-    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
-}
-
-fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
-    let mut idx = [0usize, 1, 2];
-    idx.sort_by(|&a, &b| c[a].partial_cmp(&c[b]).unwrap_or(std::cmp::Ordering::Equal));
-    let (imin, imid, imax) = (idx[0], idx[1], idx[2]);
-    let mut out = [0.0f32; 3];
-    if c[imax] > c[imin] {
-        out[imid] = (c[imid] - c[imin]) * s / (c[imax] - c[imin]);
-        out[imax] = s;
-    }
-    out[imin] = 0.0;
-    out
-}
-
-pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    blend_rgb_within(mode, cb, cs, f32::MAX)
-}
-
-pub fn blend_rgb_within(mode: BlendMode, cb: [f32; 3], cs: [f32; 3], top: f32) -> [f32; 3] {
-    match mode {
-        // Hue: as a layer blend mode it is Nuke's `matte` (see `composite`), but the Color
-        // Replacement tool and clipped layers still recolour through the non-separable Hue.
-        BlendMode::Hue | BlendMode::PsHue => set_lum_within(set_sat(cs, sat(cb)), lum(cb), top),
-        BlendMode::PsDarkerColor => {
-            if lum(cs) < lum(cb) {
-                cs
-            } else {
-                cb
-            }
-        }
-        BlendMode::PsLighterColor => {
-            if lum(cs) > lum(cb) {
-                cs
-            } else {
-                cb
-            }
-        }
-        BlendMode::Saturation => set_lum_within(set_sat(cb, sat(cs)), lum(cb), top),
-        BlendMode::Color => set_lum_within(cs, lum(cb), top),
-        BlendMode::Luminosity => set_lum_within(cb, lum(cs), top),
-        m => [
-            blend_channel_hdr(m, cb[0], cs[0]),
-            blend_channel_hdr(m, cb[1], cs[1]),
-            blend_channel_hdr(m, cb[2], cs[2]),
-        ],
-    }
-}
-
-pub fn blend_rgb_hdr(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    blend_rgb_within(mode, cb, cs, f32::MAX)
-}
-
+/// Composite a straight-alpha source over a straight-alpha backdrop with blend mode and opacity.
+///
+/// Uses the W3C/PDF general formula:
+/// `αo = αs + αb(1−αs)`,
+/// `αo·Co = (1−αs)·αb·Cb + (1−αb)·αs·Cs + αs·αb·B(Cb,Cs)`.
+/// Dissolve must be resolved by the caller (per-pixel coverage decision) before calling.
 pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    if mode.is_nuke() {
+        return nuke_composite(mode, backdrop, source, opacity);
+    }
+    let ab = backdrop[3];
+    let as_ = source[3] * opacity;
+    if as_ <= 0.0 {
+        return backdrop;
+    }
+    let cb = [backdrop[0], backdrop[1], backdrop[2]];
+    let cs = [source[0], source[1], source[2]];
+    // 32-bit values above 1 are kept, as the GPU compositor keeps them.
+    let b = blend_rgb_hdr(mode, cb, cs);
+    let ao = as_ + ab * (1.0 - as_);
+    if ao <= 0.0 {
+        return [0.0; 4];
+    }
+    let mut out = [0.0f32; 4];
+    for i in 0..3 {
+        let premul = (1.0 - as_) * ab * cb[i] + (1.0 - ab) * as_ * cs[i] + as_ * ab * b[i];
+        out[i] = premul / ao;
+    }
+    out[3] = ao;
+    out
+}
+
+/// [`composite`] with the backdrop's alpha kept (Lock Transparent Pixels, Fill's Preserve
+/// Transparency): "source atop", `Co = (1−αs)·Cb + αs·B(Cb,Cs)`, `αo = αb`. Unlike source-over
+/// followed by restoring the alpha, a half-transparent backdrop takes the new colour by `αs` alone.
+pub fn composite_atop(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    let as_ = source[3] * opacity;
+    if as_ <= 0.0 {
+        return backdrop;
+    }
+    let b = blend_rgb_hdr(mode, [backdrop[0], backdrop[1], backdrop[2]], [source[0], source[1], source[2]]);
+    let mut out = backdrop;
+    for i in 0..3 {
+        out[i] = (1.0 - as_) * backdrop[i] + as_ * b[i];
+    }
+    out
+}
+
+/// [`composite`] for the Nuke Merge operations: Nuke's premultiplied maths, then mixed by
+/// `opacity` (Merge's `mix`). The compositing operations are composited whole here; the colour
+/// ones use the general formula with [`nuke_channel`].
+fn nuke_composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
     let mix = opacity.clamp(0.0, 1.0);
     if mix <= 0.0 {
         return backdrop;
@@ -581,144 +870,130 @@ pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity:
     if sa <= 0.0
         && !matches!(
             mode,
-            BlendMode::DarkerColor | BlendMode::PinLight | BlendMode::Darken
+            BlendMode::NukeIn | BlendMode::NukeMask | BlendMode::NukeMin
         )
     {
         return backdrop;
     }
 
     let m: [f32; 4] = match mode {
-        BlendMode::Normal | BlendMode::PassThrough => [ // over
+        BlendMode::NukeMatte => [ // matte
             a[0] + b[0] * (1.0 - sa),
             a[1] + b[1] * (1.0 - sa),
             a[2] + b[2] * (1.0 - sa),
             sa + ba * (1.0 - sa),
         ],
-        // Dissolve (PS): its per-pixel noise is decided by the caller (the compositors, brush), which
-        // then composites the kept pixels as over; called directly it is plain over.
-        BlendMode::Dissolve => [
-            a[0] + b[0] * (1.0 - sa),
-            a[1] + b[1] * (1.0 - sa),
-            a[2] + b[2] * (1.0 - sa),
-            sa + ba * (1.0 - sa),
-        ],
-        BlendMode::Hue => [ // matte
-            a[0] + b[0] * (1.0 - sa),
-            a[1] + b[1] * (1.0 - sa),
-            a[2] + b[2] * (1.0 - sa),
-            sa + ba * (1.0 - sa),
-        ],
-        BlendMode::LinearBurn => [ // under
+        BlendMode::NukeUnder => [ // under
             a[0] * (1.0 - ba) + b[0],
             a[1] * (1.0 - ba) + b[1],
             a[2] * (1.0 - ba) + b[2],
             sa * (1.0 - ba) + ba,
         ],
-        BlendMode::LinearDodge => [ // plus
+        BlendMode::NukePlus => [ // plus
             a[0] + b[0],
             a[1] + b[1],
             a[2] + b[2],
             (sa + ba).min(1.0),
         ],
-        BlendMode::Subtract => [ // minus
+        BlendMode::NukeMinus => [ // minus
             a[0] - b[0],
             a[1] - b[1],
             a[2] - b[2],
             (sa - ba).clamp(0.0, 1.0),
         ],
-        BlendMode::PaintNetColorBurn => [ // from
+        BlendMode::NukeFrom => [ // from
             b[0] - a[0],
             b[1] - a[1],
             b[2] - a[2],
             (ba - sa).clamp(0.0, 1.0),
         ],
-        BlendMode::Multiply => [ // multiply
+        BlendMode::NukeMultiply => [ // multiply
             a[0] * b[0] + b[0] * (1.0 - sa),
             a[1] * b[1] + b[1] * (1.0 - sa),
             a[2] * b[2] + b[2] * (1.0 - sa),
             sa + ba * (1.0 - sa),
         ],
-        BlendMode::Screen => [ // screen
+        BlendMode::NukeScreen => [ // screen
             nuke_screen(a[0], b[0]),
             nuke_screen(a[1], b[1]),
             nuke_screen(a[2], b[2]),
             nuke_screen(sa, ba),
         ],
-        BlendMode::Darken => [ // min
+        BlendMode::NukeMin => [ // min
             a[0].min(b[0]),
             a[1].min(b[1]),
             a[2].min(b[2]),
             sa.min(ba),
         ],
-        BlendMode::Lighten => [ // max
+        BlendMode::NukeMax => [ // max
             a[0].max(b[0]),
             a[1].max(b[1]),
             a[2].max(b[2]),
             sa.max(ba),
         ],
-        BlendMode::Difference => [ // difference
+        BlendMode::NukeDifference => [ // difference
             (a[0] - b[0]).abs(),
             (a[1] - b[1]).abs(),
             (a[2] - b[2]).abs(),
             (sa - ba).abs(),
         ],
-        BlendMode::Exclusion => [ // exclusion
+        BlendMode::NukeExclusion => [ // exclusion
             a[0] + b[0] - 2.0 * a[0] * b[0],
             a[1] + b[1] - 2.0 * a[1] * b[1],
             a[2] + b[2] - 2.0 * a[2] * b[2],
             sa + ba - 2.0 * sa * ba,
         ],
-        BlendMode::Divide => [ // divide
+        BlendMode::NukeDivide => [ // divide
             nuke_divide(a[0], b[0]),
             nuke_divide(a[1], b[1]),
             nuke_divide(a[2], b[2]),
             sa + ba * (1.0 - sa),
         ],
-        BlendMode::LinearLight => [ // hypot
+        BlendMode::NukeHypot => [ // hypot
             (a[0] * a[0] + b[0] * b[0]).sqrt(),
             (a[1] * a[1] + b[1] * b[1]).sqrt(),
             (a[2] * a[2] + b[2] * b[2]).sqrt(),
             (sa * sa + ba * ba).sqrt().min(1.0),
         ],
-        BlendMode::DarkerColor => [a[0] * ba, a[1] * ba, a[2] * ba, sa * ba], // in
-        BlendMode::LighterColor => [ // out
+        BlendMode::NukeIn => [a[0] * ba, a[1] * ba, a[2] * ba, sa * ba], // in
+        BlendMode::NukeOut => [ // out
             a[0] * (1.0 - ba),
             a[1] * (1.0 - ba),
             a[2] * (1.0 - ba),
             sa * (1.0 - ba),
         ],
-        BlendMode::PinLight => [b[0] * sa, b[1] * sa, b[2] * sa, ba * sa], // mask
-        BlendMode::HardMix => [ // stencil
+        BlendMode::NukeMask => [b[0] * sa, b[1] * sa, b[2] * sa, ba * sa], // mask
+        BlendMode::NukeStencil => [ // stencil
             b[0] * (1.0 - sa),
             b[1] * (1.0 - sa),
             b[2] * (1.0 - sa),
             ba * (1.0 - sa),
         ],
-        BlendMode::PaintNetColorDodge => [ // atop
+        BlendMode::NukeAtop => [ // atop
             a[0] * ba + b[0] * (1.0 - sa),
             a[1] * ba + b[1] * (1.0 - sa),
             a[2] * ba + b[2] * (1.0 - sa),
             ba,
         ],
-        BlendMode::ColorBurn => [ // color-burn
+        BlendMode::NukeColorBurn => [ // color-burn
             if a[0] <= 1e-6 { 0.0 } else { 1.0 - (1.0 - b[0]) / a[0] },
             if a[1] <= 1e-6 { 0.0 } else { 1.0 - (1.0 - b[1]) / a[1] },
             if a[2] <= 1e-6 { 0.0 } else { 1.0 - (1.0 - b[2]) / a[2] },
             sa + ba * (1.0 - sa),
         ],
-        BlendMode::ColorDodge => [ // color-dodge
+        BlendMode::NukeColorDodge => [ // color-dodge
             if 1.0 - a[0] <= 1e-6 { b[0] } else { b[0] / (1.0 - a[0]) },
             if 1.0 - a[1] <= 1e-6 { b[1] } else { b[1] / (1.0 - a[1]) },
             if 1.0 - a[2] <= 1e-6 { b[2] } else { b[2] / (1.0 - a[2]) },
             sa + ba * (1.0 - sa),
         ],
-        BlendMode::Xor => [ // xor
+        BlendMode::NukeXor => [ // xor
             a[0] * (1.0 - ba) + b[0] * (1.0 - sa),
             a[1] * (1.0 - ba) + b[1] * (1.0 - sa),
             a[2] * (1.0 - ba) + b[2] * (1.0 - sa),
             (sa * (1.0 - ba) + ba * (1.0 - sa)).clamp(0.0, 1.0),
         ],
-        BlendMode::Glow => { // conjoint-over
+        BlendMode::NukeConjointOver => { // conjoint-over
             if sa > ba || ba <= 1e-7 {
                 a
             } else {
@@ -726,7 +1001,7 @@ pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity:
                 [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k, sa + ba * k]
             }
         }
-        BlendMode::Negation => { // disjoint-over
+        BlendMode::NukeDisjointOver => { // disjoint-over
             if sa + ba < 1.0 || ba <= 1e-7 {
                 [a[0] + b[0], a[1] + b[1], a[2] + b[2], (sa + ba).min(1.0)]
             } else {
@@ -735,7 +1010,7 @@ pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity:
             }
         }
         other => {
-            let blended = blend_rgb(
+            let blended = blend_rgb_hdr(
                 other,
                 [backdrop[0], backdrop[1], backdrop[2]],
                 [source[0], source[1], source[2]],
@@ -766,108 +1041,10 @@ pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity:
     }
 }
 
-pub fn composite_atop(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
-    let as_ = (source[3] * opacity).clamp(0.0, 1.0);
-    if as_ <= 0.0 {
-        return backdrop;
-    }
-    let b = blend_rgb(
-        mode,
-        [backdrop[0], backdrop[1], backdrop[2]],
-        [source[0], source[1], source[2]],
-    );
-    let mut out = backdrop;
-    for i in 0..3 {
-        out[i] = (1.0 - as_) * backdrop[i] + as_ * b[i];
-    }
-    out
-}
+
 
 #[cfg(test)]
-mod nuke_light_tests {
-    use super::*;
+mod tests;
 
-    fn close(a: f32, b: f32) -> bool {
-        (a - b).abs() < 1e-5
-    }
-
-    #[test]
-    fn hard_light_matches_nuke_merge_math_and_keeps_float() {
-        // A = source (top), B = backdrop. Multiply below A = 0.5, screen above, continuous at 0.5.
-        let hl = |a: f32, b: f32| blend_channel(BlendMode::HardLight, b, a);
-        assert!(close(hl(0.25, 0.4), 0.2));
-        // A > 0.5 over a dark backdrop: 1 - 2(1-A)(1-B), not A (the old max() fallback bug).
-        assert!(close(hl(0.6, 0.1), 0.28));
-        assert!(close(hl(0.9, 0.2), 0.84));
-        for b in [0.0f32, 0.1, 0.4, 0.5, 0.9, 1.0, 3.0] {
-            assert!(close(hl(0.5, b), b), "neutral at A = 0.5 for B = {b}");
-            assert!((hl(0.5 - 1e-4, b) - hl(0.5 + 1e-4, b)).abs() < 1e-3, "continuous at 0.5 for B = {b}");
-        }
-        // 32-bit: values above 1 are not clamped to 1.
-        assert!(hl(0.75, 2.0) > 1.9);
-        assert!(hl(3.0, 0.5) > 4.9);
-        // Overlay is hard light with A and B swapped (decided by B).
-        assert!(close(blend_channel(BlendMode::Overlay, 0.6, 0.1), hl(0.6, 0.1)));
-    }
-
-    #[test]
-    fn menu_hidden_and_psd_mapping_are_consistent() {
-        // Nuke, Photoshop-only and hidden lists are disjoint and cover every mode but pass-through.
-        for m in BlendMode::LAYER_MODES {
-            assert!(!BlendMode::HIDDEN_MODES.contains(&m), "{m:?} is both listed and hidden");
-            assert!(!BlendMode::PS_MODES.contains(&m), "{m:?} is both Nuke and Photoshop-only");
-        }
-        for m in BlendMode::PS_MODES {
-            assert!(!BlendMode::HIDDEN_MODES.contains(&m), "{m:?} is both listed and hidden");
-            assert!(m.is_menu_mode() && m.label().ends_with("(PS)"), "{m:?}");
-        }
-        assert_eq!(BlendMode::layer_modes().count(), 42);
-        // Every mode with a Photoshop equivalent round-trips through its PSD key.
-        for m in BlendMode::layer_modes().filter(|m| m.has_psd_equivalent()) {
-            assert_eq!(BlendMode::from_psd_key(m.psd_key()), Some(m), "{}", m.label());
-        }
-        // Photoshop Subtract (B − A) is Nuke `from`, not `minus`.
-        assert_eq!(BlendMode::from_psd_key(*b"fsub"), Some(BlendMode::PaintNetColorBurn));
-        assert_eq!(BlendMode::PaintNetColorBurn.label(), "from");
-        // Photoshop modes without a Merge equivalent import as their Photoshop-only mode.
-        assert_eq!(BlendMode::from_psd_key(*b"lbrn"), Some(BlendMode::PsLinearBurn));
-        assert_eq!(BlendMode::from_psd_key(*b"fdiv"), Some(BlendMode::PsDivide));
-        assert_eq!(BlendMode::from_psd_key(*b"hue "), Some(BlendMode::PsHue));
-        assert_eq!(BlendMode::from_psd_key(*b"diss"), Some(BlendMode::Dissolve));
-        // Every Photoshop layer key maps to a mode.
-        for key in [
-            b"norm", b"diss", b"dark", b"mul ", b"idiv", b"lbrn", b"dkCl", b"lite", b"scrn", b"div ", b"lddg", b"lgCl", b"over", b"sLit", b"hLit",
-            b"vLit", b"lLit", b"pLit", b"hMix", b"diff", b"smud", b"fsub", b"fdiv", b"hue ", b"sat ", b"colr", b"lum ",
-        ] {
-            assert!(BlendMode::from_psd_key(*key).is_some(), "{}", String::from_utf8_lossy(key));
-        }
-        // Nuke modes without an equivalent are written as Normal.
-        assert_eq!(BlendMode::Subtract.psd_key(), *b"norm");
-        assert_eq!(BlendMode::Divide.psd_key(), *b"norm");
-    }
-
-    #[test]
-    fn photoshop_only_modes_use_photoshops_maths() {
-        let c = |m: BlendMode, cb: f32, cs: f32| blend_channel(m, cb, cs);
-        assert!(close(c(BlendMode::PsLinearBurn, 0.75, 0.5), 0.25));
-        assert!(close(c(BlendMode::PsLinearBurn, 0.2, 0.3), 0.0));
-        assert!(close(c(BlendMode::PsLinearLight, 0.25, 0.5), 0.25), "neutral at 0.5");
-        assert!(close(c(BlendMode::PsPinLight, 0.8, 0.25), 0.5));
-        assert!(close(c(BlendMode::PsPinLight, 0.2, 0.75), 0.5));
-        assert!(close(c(BlendMode::PsHardMix, 0.6, 0.6), 1.0));
-        assert!(close(c(BlendMode::PsHardMix, 0.2, 0.2), 0.0));
-        assert!(close(c(BlendMode::PsDivide, 0.5, 0.25), 2.0), "backdrop ÷ source, unclamped");
-        assert!(close(c(BlendMode::PsVividLight, 0.5, 0.5), 0.5), "neutral at 0.5");
-        // Darker / Lighter Color pick a whole pixel by luminance.
-        let (dark, light) = ([0.1, 0.1, 0.1], [0.9, 0.2, 0.9]);
-        assert_eq!(blend_rgb(BlendMode::PsDarkerColor, light, dark), dark);
-        assert_eq!(blend_rgb(BlendMode::PsLighterColor, dark, light), light);
-        // Hue keeps the backdrop's luminance.
-        let h = blend_rgb(BlendMode::PsHue, [0.2, 0.6, 0.2], [1.0, 0.0, 0.0]);
-        assert!((lum(h) - lum([0.2, 0.6, 0.2])).abs() < 1e-4 && h[0] > h[1]);
-        // A Photoshop-only mode composites through the general formula, opaque over opaque = B.
-        let o = composite(BlendMode::PsLinearBurn, [0.75, 0.75, 0.75, 1.0], [0.5, 0.5, 0.5, 1.0], 1.0);
-        assert!(close(o[0], 0.25) && close(o[3], 1.0));
-    }
-
-}
+#[cfg(test)]
+mod nuke_tests;

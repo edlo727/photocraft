@@ -17,12 +17,13 @@ fn bad(msg: impl Into<String>) -> EngineError {
 pub fn neutral_color(mode: BlendMode) -> Option<([f32; 3], &'static str)> {
     use BlendMode::*;
     match mode {
-        // Nuke min / multiply / color-burn and Photoshop's Linear Burn, Darker Color, Divide.
-        Darken | Multiply | ColorBurn | PsLinearBurn | PsDarkerColor | PsDivide => Some(([1.0; 3], "white")),
-        // Nuke max / screen / color-dodge / plus / difference / exclusion / from (Subtract), and
-        // Photoshop's Lighter Color.
-        Lighten | Screen | ColorDodge | LinearDodge | PsLighterColor | Difference | Exclusion | PaintNetColorBurn => Some(([0.0; 3], "black")),
-        Overlay | SoftLight | HardLight | PsVividLight | PsLinearLight | PsPinLight => Some(([0.5; 3], "50% gray")),
+        Darken | Multiply | ColorBurn | LinearBurn | DarkerColor | Divide => Some(([1.0; 3], "white")),
+        Lighten | Screen | ColorDodge | LinearDodge | LighterColor | Difference | Exclusion | Subtract => Some(([0.0; 3], "black")),
+        Overlay | SoftLight | HardLight | VividLight | LinearLight | PinLight => Some(([0.5; 3], "50% gray")),
+        // Nuke Merge operations with a neutral colour.
+        NukeMin | NukeMultiply | NukeColorBurn => Some(([1.0; 3], "white")),
+        NukeMax | NukeScreen | NukeColorDodge | NukePlus | NukeDifference | NukeExclusion | NukeFrom => Some(([0.0; 3], "black")),
+        NukeOverlay | NukeSoftLight | NukeHardLight => Some(([0.5; 3], "50% gray")),
         _ => None,
     }
 }
@@ -145,7 +146,7 @@ mod tests {
             let s0 = busy(mode, depth);
             let doc0 = s0.active().unwrap().doc.clone();
             let shown = photocraft_compose::render(&doc0, doc0.bounds());
-            for m in BlendMode::menu_modes().filter(|m| neutral_color(*m).is_some()) {
+            for m in BlendMode::LAYER_MODES.into_iter().filter(|m| neutral_color(*m).is_some()) {
                 let mut s = busy(mode, depth);
                 s.execute("layer.new.layer", json!({"mode": m.label(), "fillNeutral": true})).unwrap();
                 let doc = &s.active().unwrap().doc;
@@ -163,7 +164,7 @@ mod tests {
             let doc = &s.active().unwrap().doc;
             assert!(max_diff(&photocraft_compose::render(doc, doc.bounds()), &shown) > 0.1, "{mode}/{depth}: the control changes it");
         }
-        for m in [BlendMode::Normal, BlendMode::Dissolve, BlendMode::PsHardMix, BlendMode::PsHue, BlendMode::Saturation, BlendMode::Color, BlendMode::Luminosity] {
+        for m in [BlendMode::Normal, BlendMode::Dissolve, BlendMode::HardMix, BlendMode::Hue, BlendMode::Saturation, BlendMode::Color, BlendMode::Luminosity] {
             assert!(neutral_color(m).is_none(), "{m:?}");
         }
     }

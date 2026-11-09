@@ -194,7 +194,7 @@ mod tests {
     fn nuke_plus_preserves_hdr_above_one() {
         let b = [0.8, 0.5, 0.2, 1.0];
         let a = [0.7, 0.9, 1.4, 1.0];
-        let out = composite(BlendMode::LinearDodge, b, a, 1.0);
+        let out = composite(BlendMode::NukePlus, b, a, 1.0);
         assert!((out[0] - 1.5).abs() < 1e-5);
         assert!((out[1] - 1.4).abs() < 1e-5);
         assert!((out[2] - 1.6).abs() < 1e-5);
@@ -204,17 +204,23 @@ mod tests {
     fn nuke_screen_handles_hdr_without_inverting() {
         let b = [2.0, 0.5, 0.2, 1.0];
         let a = [1.5, 0.5, 0.5, 1.0];
-        let out = composite(BlendMode::Screen, b, a, 1.0);
+        let out = composite(BlendMode::NukeScreen, b, a, 1.0);
         assert!((out[0] - 2.0).abs() < 1e-5);
         assert!((out[1] - 0.75).abs() < 1e-5);
+    }
+
+    #[test]
+    fn photoshop_add_keeps_32_bit_values_above_one() {
+        let out = composite(BlendMode::LinearDodge, [0.8, 0.5, 0.2, 1.0], [0.7, 0.9, 1.4, 1.0], 1.0);
+        assert!((out[0] - 1.5).abs() < 1e-5 && (out[2] - 1.6).abs() < 1e-5, "{out:?}");
     }
 
     #[test]
     fn nuke_geometric_and_conjoint_over_delegate_cleanly() {
         let b = [0.5, 0.5, 0.5, 0.8];
         let a = [0.5, 0.5, 0.5, 0.4];
-        let geo = composite(BlendMode::VividLight, b, a, 1.0);
-        let conj = composite(BlendMode::Glow, b, a, 1.0);
+        let geo = composite(BlendMode::NukeGeometric, b, a, 1.0);
+        let conj = composite(BlendMode::NukeConjointOver, b, a, 1.0);
         assert!(geo[3] > 0.0 && conj[3] > 0.0);
     }
 }

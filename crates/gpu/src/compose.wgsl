@@ -102,9 +102,111 @@ fn lut(row: i32, v: f32) -> f32 {
 
 const F32_MAX: f32 = 0x1.fffffep+127f;
 
-// Mode indices the shader tests by name (gpu::plan::lower::mode_index: BlendMode order).
+// Mode indices the shader tests by name (gpu::plan::lower::mode_index: BlendMode order). Modes
+// 0..33 are Photoshop's and Paint.NET's (photocraft_color::blend::channel); the Nuke Merge
+// operations start at NUKE_BASE (photocraft_color::blend::nuke_channel / nuke_composite).
 const M_NORMAL: i32 = 1;
 const M_DISSOLVE: i32 = 2;
+const NUKE_BASE: i32 = 34;
+
+// ---- Photoshop and Paint.NET modes (photocraft_color::blend, 32-bit values kept: f32::MAX) ----
+
+fn color_burn(cb: f32, cs: f32) -> f32 {
+    if (cb >= 1.0) { return 1.0; }
+    if (cs <= 0.0) { return 0.0; }
+    return 1.0 - min((1.0 - cb) / cs, 1.0);
+}
+fn color_dodge(cb: f32, cs: f32) -> f32 {
+    if (cb <= 0.0) { return 0.0; }
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb / (1.0 - cs), 1.0);
+}
+fn hard_light(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return cb * 2.0 * cs; }
+    let s = 2.0 * cs - 1.0;
+    return cb + s - cb * s;
+}
+// The W3C curve, as Photoshop: D(cb) is the cubic below a quarter, sqrt above it (#8804).
+fn soft_light_ps(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return 2.0 * cb * cs + cb * cb * (1.0 - 2.0 * cs); }
+    let b = max(cb, 0.0);
+    var d = sqrt(b);
+    if (b <= 0.25) { d = ((16.0 * b - 12.0) * b + 4.0) * b; }
+    return 2.0 * cb * (1.0 - cs) + d * (2.0 * cs - 1.0);
+}
+// Vivid Light as Hard Mix thresholds it (backdrop extremes within 1e-4 of 0 / 1 count as exact).
+fn vivid_light_hard_mix(cb: f32, cs: f32) -> f32 {
+    let edge = 1e-4;
+    if (cs <= 0.5) {
+        if (cb >= 1.0 - edge) { return 1.0; }
+        if (cs <= 0.0) { return 0.0; }
+        return 1.0 - min((1.0 - cb) / (2.0 * cs), 1.0);
+    }
+    if (cb <= edge) { return 0.0; }
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb / (2.0 * (1.0 - cs)), 1.0);
+}
+
+fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
+    if (mode >= NUKE_BASE) { return nuke_channel(mode, cb, cs); }
+    switch mode {
+        case 3: { return min(cb, cs); }                         // Darken
+        case 4: { return cb * cs; }                             // Multiply
+        case 5: { return color_burn(cb, cs); }                  // Color Burn
+        case 6: { return max(cb + cs - 1.0, 0.0); }             // Linear Burn
+        case 8: { return max(cb, cs); }                         // Lighten
+        case 9: { return cb + cs - cb * cs; }                   // Screen
+        case 10: { return color_dodge(cb, cs); }                // Color Dodge
+        case 11: { return min(cb + cs, F32_MAX); }              // Linear Dodge (Add)
+        case 13: { return hard_light(cs, cb); }                 // Overlay
+        case 14: { return soft_light_ps(cb, cs); }              // Soft Light
+        case 15: { return hard_light(cb, cs); }                 // Hard Light
+        case 16: {                                              // Vivid Light
+            if (cs <= 0.0) { return 0.0; }
+            if (cs >= 1.0) { return 1.0; }
+            if (cs <= 0.5) { return color_burn(cb, 2.0 * cs); }
+            return color_dodge(cb, 2.0 * (cs - 0.5));
+        }
+        case 17: { return clamp(cb + 2.0 * cs - 1.0, 0.0, 1.0); } // Linear Light
+        case 18: {                                              // Pin Light
+            if (cs <= 0.5) { return min(cb, 2.0 * cs); }
+            return max(cb, 2.0 * cs - 1.0);
+        }
+        case 19: { return select(0.0, 1.0, vivid_light_hard_mix(cb, cs) >= 0.5 - 1e-6); } // Hard Mix
+        case 20: { return abs(cb - cs); }                       // Difference
+        case 21: { return cb + cs - 2.0 * cb * cs; }            // Exclusion
+        case 22: { return max(cb - cs, 0.0); }                  // Subtract
+        case 23: {                                              // Divide
+            if (cs <= 0.0) { return select(1.0, 0.0, cb <= 0.0); }
+            return min(cb / cs, F32_MAX);
+        }
+        case 28: {                                              // Reflect
+            if (cs >= 1.0) { return 1.0; }
+            return min(cb * cb / (1.0 - cs), 1.0);
+        }
+        case 29: {                                              // Glow
+            if (cb >= 1.0) { return 1.0; }
+            return min(cs * cs / (1.0 - cb), 1.0);
+        }
+        case 30: { return 1.0 - abs(1.0 - cb - cs); }           // Negation
+        case 31: {                                              // XOR (8-bit channel operation)
+            let b = u32(floor(clamp(cb, 0.0, 1.0) * 255.0 + 0.5));
+            let s = u32(floor(clamp(cs, 0.0, 1.0) * 255.0 + 0.5));
+            return f32(b ^ s) / 255.0;
+        }
+        case 32: {                                              // Color Burn (Paint.NET)
+            if (cs <= 0.0) { return 0.0; }
+            return max(1.0 - (1.0 - cb) / cs, 0.0);
+        }
+        case 33: {                                              // Color Dodge (Paint.NET)
+            if (cs >= 1.0) { return 1.0; }
+            return min(cb / (1.0 - cs), 1.0);
+        }
+        default: { return cs; }                                 // Normal, Dissolve, Pass Through
+    }
+}
+
+// ---- Nuke Merge operations (A = source, B = backdrop; Nuke's 32-bit maths, nothing clamped) ----
 
 fn nuke_screen(a: f32, b: f32) -> f32 {
     if (a >= 0.0 && a <= 1.0 && b >= 0.0 && b <= 1.0) { return a + b - a * b; }
@@ -132,85 +234,48 @@ fn nuke_divide(a: f32, b: f32) -> f32 {
     return a / b;
 }
 
-// Photoshop-only modes (photocraft_color::blend::ps_color_burn / ps_color_dodge / ps_vivid_hard_mix).
-fn ps_color_burn(cb: f32, cs: f32) -> f32 {
-    if (cb >= 1.0) { return 1.0; }
-    if (cs <= 0.0) { return 0.0; }
-    return 1.0 - min((1.0 - cb) / cs, 1.0);
-}
-fn ps_color_dodge(cb: f32, cs: f32) -> f32 {
-    if (cb <= 0.0) { return 0.0; }
-    if (cs >= 1.0) { return 1.0; }
-    return min(cb / (1.0 - cs), 1.0);
-}
-fn ps_vivid_hard_mix(cb: f32, cs: f32) -> f32 {
-    let edge = 1e-4;
-    if (cs <= 0.5) {
-        if (cb >= 1.0 - edge) { return 1.0; }
-        if (cs <= 0.0) { return 0.0; }
-        return 1.0 - min((1.0 - cb) / (2.0 * cs), 1.0);
-    }
-    if (cb <= edge) { return 0.0; }
-    if (cs >= 1.0) { return 1.0; }
-    return min(cb / (2.0 * (1.0 - cs)), 1.0);
-}
-
-fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
+fn nuke_channel(mode: i32, cb: f32, cs: f32) -> f32 {
     switch mode {
-        case 34: { return max(cb + cs - 1.0, 0.0); }    // Linear Burn (PS)
-        case 37: {                                       // Vivid Light (PS)
-            if (cs <= 0.0) { return 0.0; }
-            if (cs >= 1.0) { return 1.0; }
-            if (cs <= 0.5) { return ps_color_burn(cb, 2.0 * cs); }
-            return ps_color_dodge(cb, 2.0 * (cs - 0.5));
-        }
-        case 38: { return clamp(cb + 2.0 * cs - 1.0, 0.0, 1.0); } // Linear Light (PS)
-        case 39: {                                       // Pin Light (PS)
-            if (cs <= 0.5) { return min(cb, 2.0 * cs); }
-            return max(cb, 2.0 * cs - 1.0);
-        }
-        case 40: { return select(0.0, 1.0, ps_vivid_hard_mix(cb, cs) >= 0.5 - 1e-6); } // Hard Mix (PS)
-        case 41: {                                       // Divide (PS): backdrop / source
-            if (cs <= 0.0) { return select(1.0, 0.0, cb <= 0.0); }
-            return min(cb / cs, F32_MAX);
-        }
-        case 3, 7: { return min(cb, cs); }               // min / in
-        case 4: { return cb * cs; }                      // multiply
-        case 32: { return cb - cs; }                     // from
-        case 6: { return cb; }                           // under
-        case 8, 12: { return max(cb, cs); }              // max / out
-        case 9: { return nuke_screen(cs, cb); }          // screen
-        case 10: {                                       // color-dodge
+        case 34, 38: { return min(cb, cs); }             // min / in
+        case 35: { return cb * cs; }                     // multiply
+        case 60: { return cb - cs; }                     // from
+        case 37, 61: { return cb; }                      // under / atop (RGBA in nuke_composite)
+        case 39, 43: { return max(cb, cs); }             // max / out
+        case 40: { return nuke_screen(cs, cb); }         // screen
+        case 41: {                                       // color-dodge
             let denom = 1.0 - cs;
             if (abs(denom) <= 1e-6) { return cb; }
             return cb / denom;
         }
-        case 5: {                                        // color-burn
+        case 36: {                                       // color-burn
             if (abs(cs) <= 1e-6) { return 0.0; }
             return 1.0 - (1.0 - cb) / cs;
         }
-        case 11: { return cs + cb; }                     // plus
-        case 13: { return nuke_overlay(cs, cb); }        // overlay
-        case 14: { return nuke_soft_light(cs, cb); }     // soft-light
-        case 15: { return nuke_hard_light(cs, cb); }    // hard-light
-        case 16: {                                       // geometric
+        case 42: { return cs + cb; }                     // plus
+        case 44: { return nuke_overlay(cs, cb); }        // overlay
+        case 45: { return nuke_soft_light(cs, cb); }     // soft-light
+        case 46: { return nuke_hard_light(cs, cb); }     // hard-light
+        case 47: {                                       // geometric
             let sum = cs + cb;
             if (abs(sum) <= 1e-7) { return 0.0; }
             return (2.0 * cs * cb) / sum;
         }
-        case 17: { return sqrt(cs * cs + cb * cb); }     // hypot
-        case 20: { return abs(cs - cb); }                // difference
-        case 21: { return cs + cb - 2.0 * cs * cb; }     // exclusion
-        case 22: { return cs - cb; }                     // minus
-        case 23: { return nuke_divide(cs, cb); }         // divide
-        case 28: { return 0.5 * (cs + cb); }             // average
-        case 33: { return cb; }                          // atop (RGBA in composite)
+        case 48: { return sqrt(cs * cs + cb * cb); }     // hypot
+        case 51: { return abs(cs - cb); }                // difference
+        case 52: { return cs + cb - 2.0 * cs * cb; }     // exclusion
+        case 53: { return cs - cb; }                     // minus
+        case 54: { return nuke_divide(cs, cb); }         // divide
+        case 56: { return 0.5 * (cs + cb); }             // average
         default: { return cs; }
     }
 }
 
-fn lum(c: vec3<f32>) -> f32 { return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b; }
+// ---- non-separable helpers (W3C Compositing Level 1; photocraft_color::blend::lum) ----
 
+fn lum(c: vec3<f32>) -> f32 { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+
+// photocraft_color::blend::clip_color: towards grey until within 0..top; a luminosity outside
+// that range has no in-gamut colour (and max − lum is rounding noise), so it gives its grey.
 fn clip_color(c: vec3<f32>, top: f32) -> vec3<f32> {
     let l = lum(c);
     let n = min(min(c.r, c.g), c.b);
@@ -236,22 +301,37 @@ fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
     return vec3(0.0);
 }
 
+// photocraft_color::blend::blend_rgb_hdr: 32-bit values above 1 are kept (top f32::MAX).
 fn blend_rgb(mode: i32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
     let top = F32_MAX;
     switch mode {
-        case 24, 42: { return set_lum(set_sat(cs, sat(cb)), lum(cb), top); } // Hue (blend_rgb_within)
-        case 35: { return select(cb, cs, lum(cs) < lum(cb)); } // Darker Color (PS)
-        case 36: { return select(cb, cs, lum(cs) > lum(cb)); } // Lighter Color (PS)
-        case 25: { return set_lum(set_sat(cb, sat(cs)), lum(cb), top); }
-        case 26: { return set_lum(cs, lum(cb), top); }
-        case 27: { return set_lum(cb, lum(cs), top); }
+        case 24: { return set_lum(set_sat(cs, sat(cb)), lum(cb), top); } // Hue
+        case 25: { return set_lum(set_sat(cb, sat(cs)), lum(cb), top); } // Saturation
+        case 26: { return set_lum(cs, lum(cb), top); }                  // Color
+        case 27: { return set_lum(cb, lum(cs), top); }                  // Luminosity
+        case 7: { return select(cb, cs, lum(cs) < lum(cb)); }          // Darker Color
+        case 12: { return select(cb, cs, lum(cs) > lum(cb)); }         // Lighter Color
         default: {
             return vec3(blend_channel(mode, cb.r, cs.r), blend_channel(mode, cb.g, cs.g), blend_channel(mode, cb.b, cs.b));
         }
     }
 }
 
-fn composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<f32> {
+// photocraft_color::blend::composite: the W3C general formula for Photoshop's and Paint.NET's
+// modes; Nuke's premultiplied maths for the Nuke Merge operations.
+fn composite(mode: i32, b: vec4<f32>, s: vec4<f32>, opacity: f32) -> vec4<f32> {
+    if (mode >= NUKE_BASE) { return nuke_composite(mode, b, s, opacity); }
+    let ab = b.a;
+    let as_ = s.a * opacity;
+    if (as_ <= 0.0) { return b; }
+    let bl = blend_rgb(mode, b.rgb, s.rgb);
+    let ao = as_ + ab * (1.0 - as_);
+    if (ao <= 0.0) { return vec4(0.0); }
+    let rgb = ((1.0 - as_) * ab * b.rgb + (1.0 - ab) * as_ * s.rgb + as_ * ab * bl) / ao;
+    return vec4(rgb, ao);
+}
+
+fn nuke_composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<f32> {
     let mix = clamp(opacity, 0.0, 1.0);
     if (mix <= 0.0) { return b_in; }
 
@@ -260,73 +340,68 @@ fn composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<
     let sa = s_in.a;
     let a = vec4(s_in.rgb * sa, sa);
 
-    if (sa <= 0.0 && mode != 7 && mode != 18 && mode != 3) {
+    // in, mask and min change the backdrop even where the source is empty.
+    if (sa <= 0.0 && mode != 38 && mode != 49 && mode != 34) {
         return b_in;
     }
 
     var m = vec4(0.0);
     switch mode {
-        case 1: { // over
+        case 55: { // matte
             m = vec4(a.rgb + b.rgb * (1.0 - sa), sa + ba * (1.0 - sa));
         }
-        case 2: { // Dissolve (PS): the noise is decided by the caller (M_DISSOLVE); here plain over
-            m = vec4(a.rgb + b.rgb * (1.0 - sa), sa + ba * (1.0 - sa));
-        }
-        case 24: { // matte
-            m = vec4(a.rgb + b.rgb * (1.0 - sa), sa + ba * (1.0 - sa));
-        }
-        case 6: { // under
+        case 37: { // under
             m = vec4(a.rgb * (1.0 - ba) + b.rgb, sa * (1.0 - ba) + ba);
         }
-        case 11: { // plus
+        case 42: { // plus
             m = vec4(a.rgb + b.rgb, min(sa + ba, 1.0));
         }
-        case 22: { // minus
+        case 53: { // minus
             m = vec4(a.rgb - b.rgb, clamp(sa - ba, 0.0, 1.0));
         }
-        case 32: { // from
+        case 60: { // from
             m = vec4(b.rgb - a.rgb, clamp(ba - sa, 0.0, 1.0));
         }
-        case 4: { // multiply
+        case 35: { // multiply
             m = vec4(a.rgb * b.rgb + b.rgb * (1.0 - sa), sa + ba * (1.0 - sa));
         }
-        case 9: { // screen
+        case 40: { // screen
             m = vec4(nuke_screen(a.r, b.r), nuke_screen(a.g, b.g), nuke_screen(a.b, b.b), nuke_screen(sa, ba));
         }
-        case 3: { // min
+        case 34: { // min
             m = vec4(min(a.rgb, b.rgb), min(sa, ba));
         }
-        case 8: { // max
+        case 39: { // max
             m = vec4(max(a.rgb, b.rgb), max(sa, ba));
         }
-        case 20: { // difference
+        case 51: { // difference
             m = vec4(abs(a.rgb - b.rgb), abs(sa - ba));
         }
-        case 21: { // exclusion
+        case 52: { // exclusion
             m = vec4(a.rgb + b.rgb - 2.0 * a.rgb * b.rgb, sa + ba - 2.0 * sa * ba);
         }
-        case 23: { // divide
+        case 54: { // divide
             m = vec4(nuke_divide(a.r, b.r), nuke_divide(a.g, b.g), nuke_divide(a.b, b.b), sa + ba * (1.0 - sa));
         }
-        case 17: { // hypot
+        case 48: { // hypot
             m = vec4(sqrt(a.rgb * a.rgb + b.rgb * b.rgb), min(sqrt(sa * sa + ba * ba), 1.0));
         }
-        case 7: { // in
+        case 38: { // in
             m = vec4(a.rgb * ba, sa * ba);
         }
-        case 12: { // out
+        case 43: { // out
             m = vec4(a.rgb * (1.0 - ba), sa * (1.0 - ba));
         }
-        case 18: { // mask
+        case 49: { // mask
             m = vec4(b.rgb * sa, ba * sa);
         }
-        case 19: { // stencil
+        case 50: { // stencil
             m = vec4(b.rgb * (1.0 - sa), ba * (1.0 - sa));
         }
-        case 33: { // atop
+        case 61: { // atop
             m = vec4(a.rgb * ba + b.rgb * (1.0 - sa), ba);
         }
-        case 5: { // color-burn
+        case 36: { // color-burn
             m = vec4(
                 select(1.0 - (1.0 - b.r) / a.r, 0.0, a.r <= 1e-6),
                 select(1.0 - (1.0 - b.g) / a.g, 0.0, a.g <= 1e-6),
@@ -334,7 +409,7 @@ fn composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<
                 sa + ba * (1.0 - sa)
             );
         }
-        case 10: { // color-dodge
+        case 41: { // color-dodge
             m = vec4(
                 select(b.r / (1.0 - a.r), b.r, 1.0 - a.r <= 1e-6),
                 select(b.g / (1.0 - a.g), b.g, 1.0 - a.g <= 1e-6),
@@ -342,10 +417,10 @@ fn composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<
                 sa + ba * (1.0 - sa)
             );
         }
-        case 31: { // xor
+        case 59: { // xor
             m = vec4(a.rgb * (1.0 - ba) + b.rgb * (1.0 - sa), clamp(sa * (1.0 - ba) + ba * (1.0 - sa), 0.0, 1.0));
         }
-        case 29: { // conjoint-over
+        case 57: { // conjoint-over
             if (sa > ba || ba <= 1e-7) {
                 m = vec4(a.rgb, sa);
             } else {
@@ -353,7 +428,7 @@ fn composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<
                 m = vec4(a.rgb + b.rgb * k, sa + ba * k);
             }
         }
-        case 30: { // disjoint-over
+        case 58: { // disjoint-over
             if (sa + ba < 1.0 || ba <= 1e-7) {
                 m = vec4(a.rgb + b.rgb, min(sa + ba, 1.0));
             } else {
@@ -361,7 +436,7 @@ fn composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<
                 m = vec4(a.rgb + b.rgb * k, 1.0);
             }
         }
-        default: {
+        default: { // overlay, soft-light, hard-light, geometric, average: the general formula
             let blended = blend_rgb(mode, b_in.rgb, s_in.rgb);
             let ao = sa + ba * (1.0 - sa);
             m = vec4((1.0 - sa) * b.rgb + (1.0 - ba) * a.rgb + sa * ba * blended, ao);
@@ -369,7 +444,7 @@ fn composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<
     }
 
     let out_pm = vec4(b.rgb + (m.rgb - b.rgb) * mix, clamp(b.a + (m.a - b.a) * mix, 0.0, 1.0));
-    
+
     if (out_pm.a <= 1e-7) { return vec4(0.0); }
     return vec4(out_pm.rgb / out_pm.a, out_pm.a);
 }

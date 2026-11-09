@@ -26,10 +26,10 @@ pub(super) fn simple_lock_toggle(background: bool, l: &Layer, targets: &Value) -
     ("layer.setProps".into(), p)
 }
 
-/// The Layers panel's blend modes: the menu's Nuke Merge colour operations, then the Photoshop-only
-/// modes labelled "(PS)" ([`BlendMode::PS_MODES`]), plus the layer's own
-/// mode when it is a hidden one ([`BlendMode::HIDDEN_MODES`], e.g. from a script or older file),
-/// so the dropdown can still show it.
+/// The Layers panel's blend modes: Photoshop's, then the Nuke Merge colour operations when the
+/// panel's "Nuke blend modes" switch is on ([`BlendMode::menu_modes`]), plus the layer's own mode
+/// when the menu doesn't list it (a Paint.NET mode, a Nuke operation while they are hidden), so
+/// the dropdown can still show it.
 pub(crate) fn blend_options(groups: bool, current: BlendMode) -> Vec<(BlendMode, &'static str)> {
     let own = Some(current).filter(|m| *m != BlendMode::PassThrough && !m.is_menu_mode());
     std::iter::once(BlendMode::PassThrough).filter(|_| groups).chain(BlendMode::menu_modes()).chain(own).map(|m| (m, m.label())).collect()
@@ -178,6 +178,20 @@ pub(super) fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     }
                 });
             });
+        });
+        // Nuke blend modes: the Nuke Merge operations join Photoshop's in every blend menu. A
+        // layer keeps its mode either way, so documents look the same with it on or off.
+        ui.horizontal(|ui| {
+            let mut nuke = app.ui.layers_panel_options.show_nuke_blend_modes;
+            let r = widgets::checkbox(ui, &mut nuke, tl!("Nuke blend modes")).on_hover_text(tl!(
+                "List Nuke's Merge operations (multiply, plus, hypot, average…) after Photoshop's blend modes. Off: Photoshop's only. Layers keep their mode either way."
+            ));
+            if r.changed() || nuke != app.ui.layers_panel_options.show_nuke_blend_modes {
+                app.ui.layers_panel_options.show_nuke_blend_modes = nuke;
+                photocraft_color::blend::set_nuke_modes_in_menus(nuke);
+                // Remembered with the panel's other options.
+                crate::layers_panel_ui::persist_options(app);
+            }
         });
         // Docks zero the item spacing: keep the Opacity and Fill fields apart (#155).
         ui.add_space((theme::ROW_GAP - ui.spacing().item_spacing.y).max(0.0));

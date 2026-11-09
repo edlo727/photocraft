@@ -182,9 +182,6 @@ pub fn separable(mode: BlendMode) -> bool {
             | BlendMode::Luminosity
             | BlendMode::DarkerColor
             | BlendMode::LighterColor
-            | BlendMode::PsHue
-            | BlendMode::PsDarkerColor
-            | BlendMode::PsLighterColor
     )
 }
 
