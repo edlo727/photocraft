@@ -154,13 +154,33 @@ pub fn nuke_merge_operation(mode: BlendMode) -> (&'static str, bool) {
     }
 }
 
-/// Extra Merge2 knobs `op` needs to match the canvas. PhotoCraft's multiply leaves B unchanged
-/// where the layer is transparent (A×B + B×(1−a), alpha a+b−ab); Nuke's plain multiply is A×B,
-/// which blacks out B wherever A's alpha is 0. Merge's "alpha masking" (`screen_alpha`) gives
-/// exactly PhotoCraft's: "the input images are unchanged where the other image has zero alpha,
-/// and the output alpha is set to a+b-a*b".
-fn merge_knobs(op: &str) -> &'static str {
-    if op == "multiply" { " screen_alpha true\n" } else { "" }
+/// Extra Merge2 knobs the Merge for `mode` needs to match the canvas.
+///
+/// Where a layer is transparent the canvas leaves the comp beneath unchanged, and its alpha is
+/// a+b−ab, for every mode whose maths doesn't use alpha itself (multiply, average, divide,
+/// overlay, geometric…). Nuke's plain operation doesn't: multiply blacks B out where A is empty,
+/// average halves it. Merge's "alpha masking" (`screen_alpha`) is exactly the canvas's: "the input
+/// images are unchanged where the other image has zero alpha, and the output alpha is set to
+/// a+b-a*b". It is turned on wherever the canvas's own maths gives that alpha; never for the
+/// Porter-Duff operations, which use alpha themselves (Nuke greys the option out for them).
+fn merge_knobs(mode: BlendMode) -> &'static str {
+    if needs_alpha_masking(mode) { " screen_alpha true\n" } else { "" }
+}
+
+fn needs_alpha_masking(mode: BlendMode) -> bool {
+    use photocraft_color::blend::composite;
+    const PORTER_DUFF: [&str; 12] = ["over", "under", "in", "out", "atop", "xor", "mask", "stencil", "matte", "conjoint-over", "disjoint-over", "copy"];
+    let (op, exact) = nuke_merge_operation(mode);
+    if !exact || PORTER_DUFF.contains(&op) {
+        return false;
+    }
+    const SAMPLES: [[f32; 4]; 4] = [[0.2, 0.5, 0.9, 1.0], [0.8, 0.3, 0.1, 0.6], [0.5, 0.5, 0.5, 0.25], [0.9, 0.7, 0.05, 0.9]];
+    SAMPLES.iter().all(|&b| {
+        SAMPLES.iter().all(|&a| {
+            let out = composite(mode, b, a, 1.0);
+            (out[3] - (a[3] + b[3] - a[3] * b[3])).abs() < 1e-4
+        })
+    })
 }
 
 /// The mode whose maths the script's Merge for `mode` runs.
@@ -418,7 +438,7 @@ impl Script {
         let (op, _) = nuke_merge_operation(l.blend_mode);
         self.nk.push_str(&format!(
             "push ${a}\npush ${comp}\nMerge2 {{\n inputs 2\n operation {op}\n{} mix {mix}\n{} name Merge_{name}\n xpos {x}\n ypos {y}\n}}\nset NMerge_{name} [stack 0]\n",
-            merge_knobs(op),
+            merge_knobs(l.blend_mode),
             if l.visible { "" } else { " disable true\n" }
         ));
         format!("NMerge_{name}")
@@ -491,7 +511,7 @@ impl Script {
                 let (op, _) = nuke_merge_operation(c.blend_mode);
                 self.nk.push_str(&format!(
                     "push ${base}\npush ${a}\npush ${base}\nMerge2 {{\n inputs 2+1\n operation {op}\n{} output {{rgba.red rgba.green rgba.blue -rgba.alpha}}\n maskChannelInput rgba.alpha\n mix {mix}\n{disable} name Clip_{name}\n xpos {x}\n ypos {y}\n}}\nset NClip_{name} [stack 0]\n",
-                    merge_knobs(op)
+                    merge_knobs(c.blend_mode)
                 ));
             }
             base = format!("NClip_{name}");

@@ -347,10 +347,14 @@ fn export_reports_progress_and_can_be_cancelled_before_writing() {
 }
 
 #[test]
-fn only_multiply_merges_need_alpha_masking() {
-    assert_eq!(merge_knobs("multiply"), " screen_alpha true\n");
-    for op in ["over", "screen", "plus", "min", "difference", "atop"] {
-        assert_eq!(merge_knobs(op), "", "{op}");
+fn alpha_masking_is_on_for_modes_that_ignore_alpha() {
+    // Nuke's multiply and average change B where A is empty; the canvas doesn't.
+    for mode in [BlendMode::Multiply, BlendMode::Reflect] {
+        assert_eq!(merge_knobs(mode), " screen_alpha true\n", "{mode:?} ({})", mode.label());
+    }
+    // Porter-Duff operations use alpha themselves; plus, min, max and difference already leave B.
+    for mode in [BlendMode::Normal, BlendMode::LinearBurn, BlendMode::LinearDodge, BlendMode::Darken, BlendMode::Lighten, BlendMode::Difference] {
+        assert_eq!(merge_knobs(mode), "", "{mode:?} ({})", mode.label());
     }
 }
 
