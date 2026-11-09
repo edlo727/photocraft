@@ -341,8 +341,8 @@ impl Script {
         a
     }
 
-    /// An adjustment node on `comp` at (`x`, `y`). Its mask is read from its own input (every
-    /// stream carries the Read's channels), so no extra wire.
+    /// An adjustment node on `comp` at (`x`, `y`). Its mask, like a layer's, is Shuffled off the
+    /// bus beside it and wired to the node's mask input (the node mixes by it, as the canvas does).
     fn adjustment(&mut self, l: &ExportLayer, adj: &photocraft_doc::Adjustment, comp: &str, x: i32, y: i32) -> (String, &'static str) {
         let name = &l.name;
         let (class, knobs, op) = match adj {
@@ -354,9 +354,21 @@ impl Script {
             ),
             _ => ("ColorLookup", nk_lookup_knobs(adj), "colorlookup"),
         };
-        let mask = l.mask.as_ref().map_or(String::new(), |m| format!(" maskChannelMask {m}.alpha\n"));
+        let mask = match &l.mask {
+            Some(m) => {
+                let bus = self.bus(&format!("{name}_mask"), x + MASK_DX);
+                self.nk.push_str(&format!(
+                    "push ${bus}\nShuffle {{\n in {m}\n out rgba\n name ShuffleMask_{name}\n xpos {}\n ypos {y}\n}}\nset NShuffleMask_{name} [stack 0]\n",
+                    x + MASK_DX
+                ));
+                // Inputs: 0 = the image (top of the stack), then the mask: push mask, image.
+                self.nk.push_str(&format!("push $NShuffleMask_{name}\n"));
+                " inputs 1+1\n maskChannelInput rgba.alpha\n".to_string()
+            }
+            None => String::new(),
+        };
         self.nk.push_str(&format!(
-            "push ${comp}\n{class} {{\n{knobs}{mask}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
+            "push ${comp}\n{class} {{\n{mask}{knobs}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
             if l.visible { "" } else { " disable true\n" },
             l.opacity.clamp(0.0, 1.0)
         ));

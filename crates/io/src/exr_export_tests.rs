@@ -163,14 +163,19 @@ fn a_masked_layer_in_any_mode_is_masked_before_its_merge() {
 }
 
 #[test]
-fn a_masked_adjustment_reads_its_mask_from_its_input() {
+fn a_masked_adjustment_takes_its_mask_on_its_mask_input() {
     let mut d = doc();
     let mut g = grade("Warm");
     g.mask = Some(half_mask());
     d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]), g];
     let nk = script(&d, GroupExport::Branches);
+    // Like a layer mask: Shuffled off the bus beside the Grade…
+    let shuffle = node(&nk, "ShuffleMask_Warm");
+    assert!(shuffle.starts_with("push $NDot_Warm_mask\n") && shuffle.contains("in Warm_mask"), "{shuffle}");
+    // …into the Grade's mask input (pushed first, the image on top).
     let grade = node(&nk, "Grade_Warm");
-    assert!(grade.contains("maskChannelMask Warm_mask.alpha") && !grade.contains("inputs"), "{grade}");
+    assert!(grade.contains("push $NShuffleMask_Warm\npush $NDot_Comp_Base\nGrade"), "{grade}");
+    assert!(grade.contains("inputs 1+1") && grade.contains("maskChannelInput rgba.alpha"), "{grade}");
     assert!(nk.contains("add_layer {Warm_mask Warm_mask.red"), "{nk}");
 }
 
@@ -347,4 +352,17 @@ fn only_multiply_merges_need_alpha_masking() {
     for op in ["over", "screen", "plus", "min", "difference", "atop"] {
         assert_eq!(merge_knobs(op), "", "{op}");
     }
+}
+
+#[test]
+fn a_clipped_masked_curves_takes_its_mask_beside_its_base_column() {
+    let mut d = doc();
+    let mut g = grade("Warm");
+    g.clipped = true;
+    g.mask = Some(half_mask());
+    d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]), g];
+    let nk = script(&d, GroupExport::Branches);
+    let grade = node(&nk, "Grade_Warm");
+    assert!(grade.contains("push $NShuffleMask_Warm\npush $NPremult_Base\nGrade"), "{grade}");
+    assert!(grade.contains("inputs 1+1"), "{grade}");
 }
