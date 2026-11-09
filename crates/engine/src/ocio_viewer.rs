@@ -42,8 +42,8 @@ pub struct OcioViewer {
     /// The colour space the LUT expects (a DP's LUT usually ARRI LogC3 or ACEScct). Empty: the
     /// config's `color_timing` / `compositing_log` role, else its scene-linear space.
     pub lut_space: String,
-    /// What the LUT is: [`LutMode::Replace`] (its output is shown as is) or [`LutMode::Look`]
-    /// (applied before the display / view).
+    /// Always [`LutMode::Look`] once resolved: like Nuke's viewer input process, the LUT runs
+    /// before the display / view. Kept so older settings and scripts still load.
     pub lut_mode: LutMode,
     /// The colour space the document's pixel values are in, as the colorspace knob of Nuke's
     /// Read: empty is automatic (the document's own profile: sRGB images are decoded to linear,
@@ -71,15 +71,16 @@ pub fn display_referred(doc: &Document) -> bool {
     !crate::cmd::image_cmds::is_linear_rgb_profile(&crate::color_cmds::composite_profile(doc))
 }
 
-/// How a viewer LUT is used.
+/// How a viewer LUT is used. The viewer always applies it as [`LutMode::Look`], before the
+/// display / view, as Nuke's viewer input process does; `Replace` is only read from older
+/// settings and is treated as `Look`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LutMode {
-    /// The LUT turns its input space into display values (a show LUT from log to Rec.709 / sRGB):
-    /// it replaces the display / view.
-    #[default]
+    /// Formerly: the LUT replaced the display / view. No longer used (see [`OcioViewer::resolved`]).
     Replace,
-    /// The LUT is a creative look (log in, log out): applied, then the display / view.
+    /// The LUT is applied, then the display / view.
+    #[default]
     Look,
 }
 
@@ -125,7 +126,8 @@ impl OcioViewer {
         } else {
             default_lut_space(cfg)
         };
-        OcioViewer { enabled: self.enabled, display, view, look, lut: self.lut.clone(), lut_space, lut_mode: self.lut_mode, input }
+        // The LUT always runs before the display / view, as in Nuke's viewer.
+        OcioViewer { enabled: self.enabled, display, view, look, lut: self.lut.clone(), lut_space, lut_mode: LutMode::Look, input }
     }
 }
 
@@ -392,7 +394,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "OCIO Viewer Settings",
             menu: &[],
             shortcut: None,
-            params: r##"{"enabled":bool,"display":str,"view":str,"look":str (empty: none),"lut":"path to .cube/.3dl/.csp/.spi1d/.spi3d/.clf/.cdl… (empty: none)","lutSpace":"the colour space the LUT expects","lutMode":"replace|look","input":"the colour space of the document's pixels (empty: automatic, from its profile; @display: display-referred, the view inverted)"} → {enabled,display,view,look,lut,lutSpace,lutMode,input,colorspaces,displays:[{name,views}],looks,recentLuts,config} (the active document's viewer process through the OCIO config: display only; no params turns it on)"##,
+            params: r##"{"enabled":bool,"display":str,"view":str,"look":str (empty: none),"lut":"path to .cube/.3dl/.csp/.spi1d/.spi3d/.clf/.cdl… (empty: none)","lutSpace":"the colour space the LUT expects","lutMode":"look (the LUT runs before the display / view; replace is accepted and treated as look)","input":"the colour space of the document's pixels (empty: automatic, from its profile; @display: display-referred, the view inverted)"} → {enabled,display,view,look,lut,lutSpace,lutMode,input,colorspaces,displays:[{name,views}],looks,recentLuts,config} (the active document's viewer process through the OCIO config: display only; no params turns it on)"##,
             enabled: has_doc,
             run: ocio_viewer_cmd,
             journal: false,
@@ -527,7 +529,10 @@ mod tests {
         let r = s.execute("view.ocioViewer", json!({"lut": path.to_string_lossy()})).unwrap();
         assert_eq!(r["enabled"], true, "choosing a LUT turns the viewer on");
         assert_eq!(r["lutSpace"], "ACEScct");
-        assert_eq!(r["lutMode"], "replace");
+        assert_eq!(r["lutMode"], "look", "the LUT runs before the view, as in Nuke");
+        // An old "replace" setting is still accepted, and still runs before the view.
+        let r = s.execute("view.ocioViewer", json!({"lutMode": "replace"})).unwrap();
+        assert_eq!(r["lutMode"], "look");
         assert_eq!(r["recentLuts"][0], path.to_string_lossy().as_ref());
         assert!(gpu_viewer_lut(&s.color, &d, "").unwrap().is_some());
         assert!(s.execute("view.ocioViewer", json!({"lut": dir.join("missing.cube").to_string_lossy()})).is_err(), "a bad file is reported");

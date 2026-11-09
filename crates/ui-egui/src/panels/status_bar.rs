@@ -167,14 +167,6 @@ fn viewer_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                                 if widgets::dropdown_literal(ui, "viewer-lut-space", tl!("LUT input"), &mut space, &spaces, 170.0) {
                                     run = Some(("view.ocioViewer", serde_json::json!({"lutSpace": space})));
                                 }
-                                let mut mode = v.lut_mode;
-                                let modes = [
-                                    (photocraft_engine::ocio_viewer::LutMode::Replace, tl!("Replaces view")),
-                                    (photocraft_engine::ocio_viewer::LutMode::Look, tl!("Before view")),
-                                ];
-                                if widgets::dropdown(ui, "viewer-lut-mode", tl!("LUT mode"), &mut mode, &modes, 110.0) {
-                                    run = Some(("view.ocioViewer", serde_json::json!({"lutMode": mode.id()})));
-                                }
                             }
                         });
                     }
