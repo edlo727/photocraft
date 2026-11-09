@@ -154,6 +154,15 @@ pub fn nuke_merge_operation(mode: BlendMode) -> (&'static str, bool) {
     }
 }
 
+/// Extra Merge2 knobs `op` needs to match the canvas. PhotoCraft's multiply leaves B unchanged
+/// where the layer is transparent (A×B + B×(1−a), alpha a+b−ab); Nuke's plain multiply is A×B,
+/// which blacks out B wherever A's alpha is 0. Merge's "alpha masking" (`screen_alpha`) gives
+/// exactly PhotoCraft's: "the input images are unchanged where the other image has zero alpha,
+/// and the output alpha is set to a+b-a*b".
+fn merge_knobs(op: &str) -> &'static str {
+    if op == "multiply" { " screen_alpha true\n" } else { "" }
+}
+
 /// The mode whose maths the script's Merge for `mode` runs.
 fn merged_as(mode: BlendMode) -> BlendMode {
     if mode == BlendMode::PassThrough || mode.is_photoshop_only() { BlendMode::Normal } else { mode }
@@ -396,7 +405,8 @@ impl Script {
         };
         let (op, _) = nuke_merge_operation(l.blend_mode);
         self.nk.push_str(&format!(
-            "push ${a}\npush ${comp}\nMerge2 {{\n inputs 2\n operation {op}\n mix {mix}\n{} name Merge_{name}\n xpos {x}\n ypos {y}\n}}\nset NMerge_{name} [stack 0]\n",
+            "push ${a}\npush ${comp}\nMerge2 {{\n inputs 2\n operation {op}\n{} mix {mix}\n{} name Merge_{name}\n xpos {x}\n ypos {y}\n}}\nset NMerge_{name} [stack 0]\n",
+            merge_knobs(op),
             if l.visible { "" } else { " disable true\n" }
         ));
         format!("NMerge_{name}")
@@ -468,7 +478,8 @@ impl Script {
                 // opaque or empty; its soft edges are close.
                 let (op, _) = nuke_merge_operation(c.blend_mode);
                 self.nk.push_str(&format!(
-                    "push ${base}\npush ${a}\npush ${base}\nMerge2 {{\n inputs 2+1\n operation {op}\n output {{rgba.red rgba.green rgba.blue -rgba.alpha}}\n maskChannelInput rgba.alpha\n mix {mix}\n{disable} name Clip_{name}\n xpos {x}\n ypos {y}\n}}\nset NClip_{name} [stack 0]\n"
+                    "push ${base}\npush ${a}\npush ${base}\nMerge2 {{\n inputs 2+1\n operation {op}\n{} output {{rgba.red rgba.green rgba.blue -rgba.alpha}}\n maskChannelInput rgba.alpha\n mix {mix}\n{disable} name Clip_{name}\n xpos {x}\n ypos {y}\n}}\nset NClip_{name} [stack 0]\n",
+                    merge_knobs(op)
                 ));
             }
             base = format!("NClip_{name}");

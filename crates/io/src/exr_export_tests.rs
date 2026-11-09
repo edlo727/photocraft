@@ -158,6 +158,8 @@ fn a_masked_layer_in_any_mode_is_masked_before_its_merge() {
     let nk = script(&d, GroupExport::Branches);
     let merge = node(&nk, "Merge_Top");
     assert!(merge.contains("push $NMask_Top\n") && merge.contains("operation multiply"), "{merge}");
+    // Nuke's multiply blacks out B where A is transparent; alpha masking keeps it, as the canvas.
+    assert!(merge.contains("screen_alpha true"), "{merge}");
 }
 
 #[test]
@@ -205,7 +207,7 @@ fn an_isolated_group_composites_its_children_then_merges_in_its_mode() {
     let merge = node(&nk, "Merge_Shade");
     assert!(merge.contains("push $NMask_Shade\npush $NDot_Comp_BG"), "{merge}");
     assert!(node(&nk, "Mask_Shade").contains("push $NShuffleMask_Shade\npush $NMerge_B"), "{nk}");
-    assert!(merge.contains("operation multiply") && merge.contains("mix 0.75"), "{merge}");
+    assert!(merge.contains("operation multiply") && merge.contains("mix 0.75") && merge.contains("screen_alpha true"), "{merge}");
     assert!(nk.contains("Shade_mask.alpha"), "{nk}");
     assert!(nk.contains(" name BD_Shade\n"), "a backdrop frames the group");
 }
@@ -337,4 +339,12 @@ fn export_reports_progress_and_can_be_cancelled_before_writing() {
     assert_eq!(r, Err("cancelled".to_string()));
     assert!(!path.exists() && !path.with_extension("nk").exists());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn only_multiply_merges_need_alpha_masking() {
+    assert_eq!(merge_knobs("multiply"), " screen_alpha true\n");
+    for op in ["over", "screen", "plus", "min", "difference", "atop"] {
+        assert_eq!(merge_knobs(op), "", "{op}");
+    }
 }
