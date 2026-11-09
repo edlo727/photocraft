@@ -371,8 +371,8 @@ fn a_clipped_masked_curves_takes_its_mask_beside_its_base_column() {
     let nk = script(&d, GroupExport::Branches);
     let mix = node(&nk, "MaskMix_Warm");
     assert!(mix.contains("push $NShuffleMask_Warm\npush $NGrade_Warm\npush $NPremult_Base\nKeymix"), "{mix}");
-    // The base merges onto the comp from the Keymix.
-    assert!(node(&nk, "Merge_Base").contains("push $NMaskMix_Warm\n") || nk.contains("push $NMaskMix_Warm\nDot"), "{nk}");
+    // The base (the bottom layer here) starts the comp from the Keymix.
+    assert!(nk.contains("push $NMaskMix_Warm\nDot {\n name Dot_Comp_Base"), "{nk}");
 }
 
 #[test]
