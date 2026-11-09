@@ -382,9 +382,9 @@ impl Script {
         format!("N{id}")
     }
 
-    /// An adjustment node on `comp` at (`x`, `y`). With a mask, the node grades everything and a
-    /// Keymix below it mixes the graded image back over `comp` by the mask, Shuffled off the bus
-    /// beside it like a layer's: the canvas mixes an adjustment by its mask the same way.
+    /// An adjustment node on `comp` at (`x`, `y`). Its mask, like a layer's, is Shuffled off the
+    /// bus beside it and wired straight into the node's mask input: the node mixes by it, as the
+    /// canvas mixes an adjustment by its mask.
     fn adjustment(&mut self, l: &ExportLayer, adj: &photocraft_doc::Adjustment, comp: &str, x: i32, y: i32) -> (String, &'static str) {
         let name = &l.name;
         let (class, knobs, op) = match adj {
@@ -396,15 +396,22 @@ impl Script {
             ),
             _ => ("ColorLookup", nk_lookup_knobs(adj), "colorlookup"),
         };
+        // With `inputs 1+1` Nuke takes the mask input from the top of the stack, the image from
+        // under it: push the image, then the mask (checked in Nuke).
+        let mask = match &l.mask {
+            Some(m) => {
+                let shuffle = self.mask_shuffle(m, name, x + MASK_DX, y);
+                format!("push ${comp}\npush ${shuffle}\n")
+            }
+            None => format!("push ${comp}\n"),
+        };
+        let mask_knobs = if l.mask.is_some() { " inputs 1+1\n maskChannelInput rgba.alpha\n" } else { "" };
         self.nk.push_str(&format!(
-            "push ${comp}\n{class} {{\n{knobs}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
+            "{mask}{class} {{\n{mask_knobs}{knobs}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
             if l.visible { "" } else { " disable true\n" },
             l.opacity.clamp(0.0, 1.0)
         ));
-        let node = format!("N{class}_{name}");
-        let Some(m) = &l.mask else { return (node, op) };
-        let shuffle = self.mask_shuffle(m, name, x + MASK_DX, y);
-        (self.keymix(comp, &node, &shuffle, 1.0, !l.visible, &format!("MaskMix_{name}"), x, y + 40), op)
+        (format!("N{class}_{name}"), op)
     }
 
     fn adjustment_label(l: &ExportLayer, op: &str) -> String {

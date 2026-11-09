@@ -169,16 +169,14 @@ fn a_masked_adjustment_takes_its_mask_on_its_mask_input() {
     g.mask = Some(half_mask());
     d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]), g];
     let nk = script(&d, GroupExport::Branches);
-    // The Grade grades the comp…
-    let grade = node(&nk, "Grade_Warm");
-    assert!(grade.starts_with("push $NDot_Comp_Base\nGrade") && !grade.contains("inputs"), "{grade}");
-    // …its mask is Shuffled off the bus beside it, like a layer's…
+    // The mask is Shuffled off the bus beside the Grade, like a layer's…
     let shuffle = node(&nk, "ShuffleMask_Warm");
     assert!(shuffle.starts_with("push $NDot_Warm_mask\n") && shuffle.contains("in Warm_mask"), "{shuffle}");
-    // …and a Keymix mixes the graded comp over the ungraded one by it (mask, A, B pushed).
-    let mix = node(&nk, "MaskMix_Warm");
-    assert!(mix.contains("push $NShuffleMask_Warm\npush $NGrade_Warm\npush $NDot_Comp_Base\nKeymix"), "{mix}");
-    assert!(mix.contains("inputs 3") && mix.contains("maskChannel rgba.alpha"), "{mix}");
+    // …and wired straight into its mask input: image pushed first, the mask on top.
+    let grade = node(&nk, "Grade_Warm");
+    assert!(grade.contains("push $NDot_Comp_Base\npush $NShuffleMask_Warm\nGrade"), "{grade}");
+    assert!(grade.contains("inputs 1+1") && grade.contains("maskChannelInput rgba.alpha"), "{grade}");
+    assert!(!nk.contains("Keymix"), "{nk}");
     assert!(nk.contains("add_layer {Warm_mask Warm_mask.red"), "{nk}");
 }
 
@@ -369,15 +367,15 @@ fn a_clipped_masked_curves_takes_its_mask_beside_its_base_column() {
     g.mask = Some(half_mask());
     d.layers = vec![raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]), g];
     let nk = script(&d, GroupExport::Branches);
-    let mix = node(&nk, "MaskMix_Warm");
-    assert!(mix.contains("push $NShuffleMask_Warm\npush $NGrade_Warm\npush $NPremult_Base\nKeymix"), "{mix}");
-    // The base (the bottom layer here) starts the comp from the Keymix.
-    assert!(nk.contains("push $NMaskMix_Warm\nDot {\n name Dot_Comp_Base"), "{nk}");
+    let grade = node(&nk, "Grade_Warm");
+    assert!(grade.contains("push $NPremult_Base\npush $NShuffleMask_Warm\nGrade"), "{grade}");
+    assert!(grade.contains("inputs 1+1"), "{grade}");
+    // The base (the bottom layer here) starts the comp from the Grade.
+    assert!(nk.contains("push $NGrade_Warm\nDot {\n name Dot_Comp_Base"), "{nk}");
 }
 
 #[test]
-fn no_node_uses_a_mask_input_slot() {
-    // Nuke didn't keep `inputs 1+1` / `2+1` mask inputs from the script; Keymix carries masks.
+fn clipped_layers_and_masked_pass_through_groups_mix_with_keymix() {
     let mut d = doc();
     let mut base = raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]);
     base.mask = Some(half_mask());
@@ -392,9 +390,11 @@ fn no_node_uses_a_mask_input_slot() {
     folder.mask = Some(half_mask());
     d.layers = vec![raster(&d, "BG", [0.2; 4]), base, g, m, folder];
     let nk = script(&d, GroupExport::Branches);
-    assert!(!nk.contains("inputs 1+1") && !nk.contains("inputs 2+1") && !nk.contains("maskChannelInput"), "{nk}");
+    // Only adjustments take a mask input; Merges never do.
+    assert!(!nk.contains("inputs 2+1"), "{nk}");
     // A clipped Multiply: merged, then kept inside the base by a Keymix on the base's alpha.
     let clip = node(&nk, "Clip_Mult");
-    assert!(clip.contains("push $NMaskMix_Warm\npush $NClipOp_Mult\npush $NMaskMix_Warm\nKeymix"), "{clip}");
+    assert!(clip.contains("push $NGrade_Warm\npush $NClipOp_Mult\npush $NGrade_Warm\nKeymix"), "{clip}");
     assert!(node(&nk, "Merge_Folder").contains("Keymix"), "{nk}");
 }
+
