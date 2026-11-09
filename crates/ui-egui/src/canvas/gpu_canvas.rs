@@ -87,10 +87,12 @@ const WHOLE_MIP_SIDE: u32 = 128;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Canvas texture format of high-bit documents (see [`GpuCanvas::format_for`]).
 const FORMAT_HIGH: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-/// Largest high-bit document (in pixels) given an `Rgba16Float` canvas texture: 100 MP is
-/// 800 MB at level 0, about 1.07 GB with mips (twice the `Rgba8Unorm` cost). Bigger 16/32-bit
-/// documents (a 14000² one would need 2.1 GB) use `Rgba8Unorm`, so they stay on the GPU like
-/// 8-bit ones. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas off, `=1` ignores this budget.
+/// Formerly a fixed cap on high-bit documents given an `Rgba16Float` canvas texture. The float
+/// canvas is now limited by the canvas memory budget alone ([`canvas_budget`], sized from the
+/// card's memory and the Performance settings), so a 16K × 8K 32-bit plate (about 1.3 GB with
+/// mips) keeps its values above 1.0 for the viewer's exposure on any card with room for it.
+/// Kept for callers; no longer consulted. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas
+/// off, `=1` ignores the budget.
 pub const F16_BUDGET_PX: u64 = 100_000_000;
 const VIEW_UNIFORM_SIZE: u64 = 144;
 const VIEW_FLOATS: usize = 36;
@@ -305,22 +307,21 @@ impl GpuCanvas {
     }
 
     /// The canvas texture format for a document of `depth` and `size`: `Rgba16Float` for 16/32-bit
-    /// documents when the adapter supports it and the document fits [`F16_BUDGET_PX`], else
-    /// `Rgba8Unorm`.
+    /// documents when the adapter supports it and their float textures fit the canvas budget,
+    /// else `Rgba8Unorm`.
     /// The device's largest 2D texture side (egui textures can use it too).
     pub fn max_texture_side(&self) -> usize {
         self.rs.device.limits().max_texture_dimension_2d as usize
     }
 
     pub fn format_for(&self, depth: photocraft_doc::SampleType, size: [u32; 2]) -> wgpu::TextureFormat {
-        let px = size[0] as u64 * size[1] as u64;
         let high = match self.high {
             HighPolicy::Off => false,
-            // Within the canvas budget too: a 16-bit canvas a small card can't hold as floats
-            // stays on the GPU as `Rgba8Unorm` rather than falling back to the CPU canvas.
-            HighPolicy::Budget => {
-                px <= F16_BUDGET_PX && canvas_texture_bytes(size, self.tile, texel_bytes(FORMAT_HIGH)) <= self.canvas_budget.load(Ordering::Relaxed)
-            }
+            // Within the canvas budget: a high-bit canvas the card can't hold as floats stays on
+            // the GPU as `Rgba8Unorm` rather than falling back to the CPU canvas. No fixed pixel
+            // cap: an 8-bit canvas clips at 1.0, so the viewer's exposure couldn't bring a
+            // 32-bit plate's highlights (the sun) back down.
+            HighPolicy::Budget => canvas_texture_bytes(size, self.tile, texel_bytes(FORMAT_HIGH)) <= self.canvas_budget.load(Ordering::Relaxed),
             HighPolicy::Always => true,
         };
         if high && depth != photocraft_doc::SampleType::U8 { FORMAT_HIGH } else { FORMAT }
