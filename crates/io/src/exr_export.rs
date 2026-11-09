@@ -361,8 +361,30 @@ impl Script {
         a
     }
 
-    /// An adjustment node on `comp` at (`x`, `y`). Its mask, like a layer's, is Shuffled off the
-    /// bus beside it and wired to the node's mask input (the node mixes by it, as the canvas does).
+    /// The mask's EXR layer Shuffled off the bus at (`x`, `y`) into rgba.
+    fn mask_shuffle(&mut self, mask: &str, name: &str, x: i32, y: i32) -> String {
+        let bus = self.bus(&format!("{name}_mask"), x);
+        self.nk.push_str(&format!(
+            "push ${bus}\nShuffle {{\n in {mask}\n out rgba\n name ShuffleMask_{name}\n xpos {x}\n ypos {y}\n}}\nset NShuffleMask_{name} [stack 0]\n"
+        ));
+        format!("NShuffleMask_{name}")
+    }
+
+    /// `a` mixed over `b` by `mask`'s alpha times `mix` (a Keymix: its mask is an ordinary third
+    /// input, so it stays wired and visible in Nuke).
+    #[allow(clippy::too_many_arguments)]
+    fn keymix(&mut self, b: &str, a: &str, mask: &str, mix: f32, disable: bool, id: &str, x: i32, y: i32) -> String {
+        // Keymix inputs: 0 = B (top of the stack), 1 = A, 2 = mask: push mask, A, then B.
+        self.nk.push_str(&format!(
+            "push ${mask}\npush ${a}\npush ${b}\nKeymix {{\n inputs 3\n channels rgba\n maskChannel rgba.alpha\n mix {mix}\n{} name {id}\n xpos {x}\n ypos {y}\n}}\nset N{id} [stack 0]\n",
+            if disable { " disable true\n" } else { "" }
+        ));
+        format!("N{id}")
+    }
+
+    /// An adjustment node on `comp` at (`x`, `y`). With a mask, the node grades everything and a
+    /// Keymix below it mixes the graded image back over `comp` by the mask, Shuffled off the bus
+    /// beside it like a layer's: the canvas mixes an adjustment by its mask the same way.
     fn adjustment(&mut self, l: &ExportLayer, adj: &photocraft_doc::Adjustment, comp: &str, x: i32, y: i32) -> (String, &'static str) {
         let name = &l.name;
         let (class, knobs, op) = match adj {
@@ -374,25 +396,15 @@ impl Script {
             ),
             _ => ("ColorLookup", nk_lookup_knobs(adj), "colorlookup"),
         };
-        let mask = match &l.mask {
-            Some(m) => {
-                let bus = self.bus(&format!("{name}_mask"), x + MASK_DX);
-                self.nk.push_str(&format!(
-                    "push ${bus}\nShuffle {{\n in {m}\n out rgba\n name ShuffleMask_{name}\n xpos {}\n ypos {y}\n}}\nset NShuffleMask_{name} [stack 0]\n",
-                    x + MASK_DX
-                ));
-                // Inputs: 0 = the image (top of the stack), then the mask: push mask, image.
-                self.nk.push_str(&format!("push $NShuffleMask_{name}\n"));
-                " inputs 1+1\n maskChannelInput rgba.alpha\n".to_string()
-            }
-            None => String::new(),
-        };
         self.nk.push_str(&format!(
-            "push ${comp}\n{class} {{\n{mask}{knobs}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
+            "push ${comp}\n{class} {{\n{knobs}{} mix {}\n name {class}_{name}\n xpos {x}\n ypos {y}\n}}\nset N{class}_{name} [stack 0]\n",
             if l.visible { "" } else { " disable true\n" },
             l.opacity.clamp(0.0, 1.0)
         ));
-        (format!("N{class}_{name}"), op)
+        let node = format!("N{class}_{name}");
+        let Some(m) = &l.mask else { return (node, op) };
+        let shuffle = self.mask_shuffle(m, name, x + MASK_DX, y);
+        (self.keymix(comp, &node, &shuffle, 1.0, !l.visible, &format!("MaskMix_{name}"), x, y + 40), op)
     }
 
     fn adjustment_label(l: &ExportLayer, op: &str) -> String {
@@ -505,14 +517,16 @@ impl Script {
                     "push ${a}\npush ${base}\nMerge2 {{\n inputs 2\n operation atop\n mix {mix}\n{disable} name Clip_{name}\n xpos {x}\n ypos {y}\n}}\nset NClip_{name} [stack 0]\n"
                 ));
             } else {
-                // Another mode: merged in its mode, kept inside the base by the base's own
-                // alpha on the mask input, and the base's alpha kept. Exact where the base is
-                // opaque or empty; its soft edges are close.
+                // Another mode: merged in its mode (keeping the base's alpha), then kept inside
+                // the base by a Keymix on the base's own alpha. Exact where the base is opaque or
+                // empty; its soft edges are close.
                 let (op, _) = nuke_merge_operation(c.blend_mode);
                 self.nk.push_str(&format!(
-                    "push ${base}\npush ${a}\npush ${base}\nMerge2 {{\n inputs 2+1\n operation {op}\n{} output {{rgba.red rgba.green rgba.blue -rgba.alpha}}\n maskChannelInput rgba.alpha\n mix {mix}\n{disable} name Clip_{name}\n xpos {x}\n ypos {y}\n}}\nset NClip_{name} [stack 0]\n",
+                    "push ${a}\npush ${base}\nMerge2 {{\n inputs 2\n operation {op}\n{} output {{rgba.red rgba.green rgba.blue -rgba.alpha}}\n mix {mix}\n{disable} name ClipOp_{name}\n xpos {x}\n ypos {y}\n}}\nset NClipOp_{name} [stack 0]\n",
                     merge_knobs(c.blend_mode)
                 ));
+                let merged = format!("NClipOp_{name}");
+                self.keymix(&base, &merged, &base, 1.0, !c.visible, &format!("Clip_{name}"), x, y + 40);
             }
             base = format!("NClip_{name}");
         }
@@ -618,21 +632,18 @@ impl Script {
         comp
     }
 
-    /// `after` mixed over `before` by the layer's opacity and mask (Merge2 copy).
+    /// `after` mixed over `before` by the layer's opacity and mask: a Keymix with the mask, a
+    /// Merge2 copy without.
     fn mix_copy(&mut self, l: &ExportLayer, after: String, before: String, depth: i32, x: i32) -> String {
         let name = &l.name;
         let y = self.row_y(depth);
-        let mut mask_knob = String::new();
-        let mut inputs = "2";
+        let mix = if l.visible { l.opacity.clamp(0.0, 1.0) } else { 0.0 };
         if let Some(m) = &l.mask {
-            let bus = self.bus(&format!("{name}_mask"), x);
-            self.nk.push_str(&format!("push ${bus}\n"));
-            mask_knob = format!(" maskChannelInput {m}.alpha\n");
-            inputs = "2+1";
+            let shuffle = self.mask_shuffle(m, name, x + MASK_DX, y - ROW_DY / 2);
+            return self.keymix(&before, &after, &shuffle, mix, !l.visible, &format!("Merge_{name}"), x, y);
         }
         self.nk.push_str(&format!(
-            "push ${after}\npush ${before}\nMerge2 {{\n inputs {inputs}\n operation copy\n{mask_knob} mix {}\n{} name Merge_{name}\n xpos {x}\n ypos {y}\n}}\nset NMerge_{name} [stack 0]\n",
-            if l.visible { l.opacity.clamp(0.0, 1.0) } else { 0.0 },
+            "push ${after}\npush ${before}\nMerge2 {{\n inputs 2\n operation copy\n mix {mix}\n{} name Merge_{name}\n xpos {x}\n ypos {y}\n}}\nset NMerge_{name} [stack 0]\n",
             if l.visible { "" } else { " disable true\n" }
         ));
         format!("NMerge_{name}")
