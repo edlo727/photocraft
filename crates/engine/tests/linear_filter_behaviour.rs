@@ -196,7 +196,6 @@ const MUST_BE_INVARIANT: &[&str] = &[
     "filter.sharpen.sharpenMore",
     "filter.sharpen.unsharpMask",
     "filter.noise.median",
-    "filter.noise.despeckle",
     "filter.other.maximum",
     "filter.other.minimum",
     "filter.other.offset",
@@ -213,6 +212,16 @@ const MUST_BE_INVARIANT: &[&str] = &[
     "filter.video.deInterlace",
     "filter.adaptiveWideAngle",
 ];
+
+/// Edge-preserving filters whose strength is an absolute difference, so they cannot be exposure
+/// invariant: the threshold means "this many levels of 255" wherever it is used, which on a
+/// scene-linear plate smooths the shadows and leaves the highlights alone. Despeckle and Sharpen
+/// Edges are presets of this kind (Surface Blur threshold 12, Unsharp Mask threshold 6), not the
+/// plain averages their names suggest. Rescaling the control against local brightness would make
+/// them exposure invariant, and would change their 8- and 16-bit behaviour, so it is a decision
+/// rather than a fix.
+const THRESHOLD_BASED: &[&str] =
+    &["filter.noise.despeckle", "filter.sharpen.sharpenEdges", "filter.blur.smartBlur", "filter.blur.surfaceBlur", "filter.noise.dustAndScratches", "filter.noise.reduceNoise"];
 
 /// Symmetric blurs, whose step edge lands on exactly half the step in linear light.
 const SYMMETRIC_BLURS: &[&str] = &["filter.blur.gaussianBlur", "filter.blur.boxBlur", "filter.blur.blur", "filter.blur.blurMore", "filter.blur.motionBlur", "filter.blur.shapeBlur"];
@@ -280,10 +289,18 @@ fn linear_behaviour_report() {
     for (id, p) in filters() {
         let inv = match exposure_error(id, &p) {
             Some(e) if e <= TOL => "yes".to_string(),
+            Some(e) if THRESHOLD_BASED.contains(&id) => format!("no, absolute threshold ({:.1}%)", e * 100.0),
             Some(e) => format!("**no** ({:.1}% of range)", e * 100.0),
             None => "refused".to_string(),
         };
-        let edge = |v: f32| edge_mean(id, &p, v).map_or_else(|| "–".to_string(), |g| format!("{g:.4}"));
+        // A step edge only means something for a symmetric blur; a distort moves the edge instead.
+        let edge = |v: f32| {
+            if SYMMETRIC_BLURS.contains(&id) {
+                edge_mean(id, &p, v).map_or_else(|| "–".to_string(), |g| format!("{g:.4}"))
+            } else {
+                "n/a".to_string()
+            }
+        };
         let col = edge_colour(id, &p).map_or_else(|| "–".to_string(), |r| format!("{:.0}%", r * 100.0));
         let row = format!("| `{id}` | {inv} | {} | {} | {col} |", edge(1.0), edge(4.0));
         println!("{row}");
@@ -291,10 +308,13 @@ fn linear_behaviour_report() {
     }
     let report = format!(
         "# Linear-light filter behaviour (32-bit ACEScg)\n\n\
-         `exposure invariant`: f(8x) == 8*f(x). `edge`: a symmetric blur across a 0→V step reads V/2 \
-         in linear light; `–` means the filter is not a symmetric blur, so the reading says nothing. \
+         `exposure invariant`: f(8x) == 8*f(x), so a grade's position in the stack does not change \
+         the picture. `edge`: a symmetric blur across a 0→V step reads V/2 in linear light, which an \
+         sRGB round-trip inside the filter (≈0.73·V) or a tone-map (a 0→4 reading far from 2.0) would \
+         break; `n/a` is a filter that is not a symmetric blur, where the reading says nothing. \
          `colour at soft edge`: the share of an opaque patch's colour surviving where the filter made \
-         it partly transparent; `–` means it made no soft edge.\n\n{}\n",
+         it partly transparent, so less than 100% is a dark fringe against transparency; `–` means it \
+         made no soft edge to measure.\n\n{}\n",
         rows.join("\n")
     );
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/linear_filter_behaviour.md");
