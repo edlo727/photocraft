@@ -9,16 +9,18 @@ fn nuke_hard_light_matches_nuke_merge_math_and_keeps_float() {
     // A = source (top), B = backdrop. Multiply below A = 0.5, screen above, continuous at 0.5.
     let hl = |a: f32, b: f32| blend_channel(BlendMode::NukeHardLight, b, a);
     assert!(close(hl(0.25, 0.4), 0.2));
-    // A > 0.5 over a dark backdrop: 1 - 2(1-A)(1-B), not A (the old max() fallback bug).
+    // A > 0.5 over a dark backdrop: screen(2A - 1, B).
     assert!(close(hl(0.6, 0.1), 0.28));
     assert!(close(hl(0.9, 0.2), 0.84));
     for b in [0.0f32, 0.1, 0.4, 0.5, 0.9, 1.0, 3.0] {
         assert!(close(hl(0.5, b), b), "neutral at A = 0.5 for B = {b}");
         assert!((hl(0.5 - 1e-4, b) - hl(0.5 + 1e-4, b)).abs() < 1e-3, "continuous at 0.5 for B = {b}");
     }
-    // 32-bit: values above 1 are not clamped to 1.
-    assert!(hl(0.75, 2.0) > 1.9);
-    assert!(hl(3.0, 0.5) > 4.9);
+    // 32-bit: nothing is clamped to 1, and screen's own formula decides what comes out. Past 1
+    // the product outruns the sum, so screening pulls the result back down rather than piling up:
+    // screen(0.5, 2) = 1.5 and screen(5, 0.5) = 3, both as Nuke gives them.
+    assert!(close(hl(0.75, 2.0), 1.5), "{}", hl(0.75, 2.0));
+    assert!(close(hl(3.0, 0.5), 3.0), "{}", hl(3.0, 0.5));
     // Overlay is hard light with A and B swapped (decided by B).
     assert!(close(blend_channel(BlendMode::NukeOverlay, 0.6, 0.1), hl(0.6, 0.1)));
 }
