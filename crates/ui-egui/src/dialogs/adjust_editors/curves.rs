@@ -482,6 +482,52 @@ fn pencil_stroke(ui: &mut egui::Ui, resp: &egui::Response, graph: Rect, mem: egu
     (drawn, commit)
 }
 
+/// The graph's grid. A lookup curve gets lines at round values for its zoom, labelled along the
+/// bottom and left, marks at display white, and the unchanged line y = x across the window; a
+/// Photoshop curve gets quarters and a corner-to-corner diagonal.
+fn draw_grid(p: &egui::Painter, pg: &egui::Painter, graph: Rect, view: &CurveView, lookup: bool, t: &Tokens) {
+    let sx = |x: f32| graph.left() + (x - view.x0) / view.sx * graph.width();
+    let sy = |y: f32| graph.bottom() - (y - view.y0) / view.sy * graph.height();
+    if !lookup {
+        for i in 1..4 {
+            let f = i as f32 / 4.0;
+            let g = Stroke::new(1.0, t.separator);
+            p.line_segment([pos2(graph.left() + f * graph.width(), graph.top()), pos2(graph.left() + f * graph.width(), graph.bottom())], g);
+            p.line_segment([pos2(graph.left(), graph.top() + f * graph.height()), pos2(graph.right(), graph.top() + f * graph.height())], g);
+        }
+        p.line_segment([graph.left_bottom(), graph.right_top()], Stroke::new(1.0, t.separator.gamma_multiply(1.6)));
+        return;
+    }
+    let g = Stroke::new(1.0, t.separator);
+    let label = |v: f32, step: f32| if step >= 1.0 { format!("{v:.0}") } else { format!("{:.*}", (-step.log10()).ceil() as usize, v) };
+    let font = egui::FontId::proportional(9.0);
+    let step = grid_step(view.sx);
+    let mut k = (view.x0 / step).ceil();
+    while k * step <= view.x0 + view.sx && k.is_finite() {
+        let x = sx(k * step);
+        pg.line_segment([pos2(x, graph.top()), pos2(x, graph.bottom())], g);
+        pg.text(pos2(x + 2.0, graph.bottom() - 1.0), egui::Align2::LEFT_BOTTOM, label(k * step, step), font.clone(), t.text_faint);
+        k += 1.0;
+    }
+    let step = grid_step(view.sy);
+    let mut k = (view.y0 / step).ceil();
+    while k * step <= view.y0 + view.sy && k.is_finite() {
+        let y = sy(k * step);
+        pg.line_segment([pos2(graph.left(), y), pos2(graph.right(), y)], g);
+        pg.text(pos2(graph.left() + 2.0, y - 1.0), egui::Align2::LEFT_BOTTOM, label(k * step, step), font.clone(), t.text_faint);
+        k += 1.0;
+    }
+    // Display white (1.0).
+    let w = Stroke::new(1.0, t.accent.gamma_multiply(0.6));
+    pg.line_segment([pos2(sx(1.0), graph.top()), pos2(sx(1.0), graph.bottom())], w);
+    pg.line_segment([pos2(graph.left(), sy(1.0)), pos2(graph.right(), sy(1.0))], w);
+    // The unchanged line y = x across the window.
+    let (a, b) = (view.x0.max(view.y0), (view.x0 + view.sx).min(view.y0 + view.sy));
+    if b > a {
+        pg.line_segment([pos2(sx(a), sy(a)), pos2(sx(b), sy(b))], Stroke::new(1.0, t.separator.gamma_multiply(1.6)));
+    }
+}
+
 pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     let t = Tokens::get(ui.ctx());
     let space = space_of(v);
@@ -558,9 +604,8 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     // Draw: histogram, quarter grid, baseline, gradient bars, other channels, the curve, points.
     let p = ui.painter_at(full.expand(2.0));
     p.rect_filled(graph, 0.0, t.field);
-    // Linear values → screen.
+    // Linear values → screen (x only: the grid draws its own, from the same window).
     let sx = |x: f32| graph.left() + (x - view.x0) / view.sx * graph.width();
-    let sy = |y: f32| graph.bottom() - (y - view.y0) / view.sy * graph.height();
     // Lookup curves are drawn clipped to the graph (with room for handles on its edges).
     let pg = if lookup { ui.painter_at(graph.expand(CURVE_HANDLE_SIZE)) } else { p.clone() };
     if let Some(h) = &cx.hist {
@@ -570,45 +615,7 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
             tone::draw_histogram(&p, hist_rect, &h[hist_i], Color32::from_gray(if t.pro { 88 } else { 190 }).gamma_multiply(0.75));
         }
     }
-    if lookup {
-        // A grid at round values for the zoom, labelled along the bottom and left.
-        let g = Stroke::new(1.0, t.separator);
-        let label = |v: f32, step: f32| if step >= 1.0 { format!("{v:.0}") } else { format!("{:.*}", (-step.log10()).ceil() as usize, v) };
-        let font = egui::FontId::proportional(9.0);
-        let step = grid_step(view.sx);
-        let mut k = (view.x0 / step).ceil();
-        while k * step <= view.x0 + view.sx && k.is_finite() {
-            let x = sx(k * step);
-            pg.line_segment([pos2(x, graph.top()), pos2(x, graph.bottom())], g);
-            pg.text(pos2(x + 2.0, graph.bottom() - 1.0), egui::Align2::LEFT_BOTTOM, label(k * step, step), font.clone(), t.text_faint);
-            k += 1.0;
-        }
-        let step = grid_step(view.sy);
-        let mut k = (view.y0 / step).ceil();
-        while k * step <= view.y0 + view.sy && k.is_finite() {
-            let y = sy(k * step);
-            pg.line_segment([pos2(graph.left(), y), pos2(graph.right(), y)], g);
-            pg.text(pos2(graph.left() + 2.0, y - 1.0), egui::Align2::LEFT_BOTTOM, label(k * step, step), font.clone(), t.text_faint);
-            k += 1.0;
-        }
-        // Display white (1.0).
-        let w = Stroke::new(1.0, t.accent.gamma_multiply(0.6));
-        pg.line_segment([pos2(sx(1.0), graph.top()), pos2(sx(1.0), graph.bottom())], w);
-        pg.line_segment([pos2(graph.left(), sy(1.0)), pos2(graph.right(), sy(1.0))], w);
-        // The unchanged line y = x across the window.
-        let (a, b) = (view.x0.max(view.y0), (view.x0 + view.sx).min(view.y0 + view.sy));
-        if b > a {
-            pg.line_segment([pos2(sx(a), sy(a)), pos2(sx(b), sy(b))], Stroke::new(1.0, t.separator.gamma_multiply(1.6)));
-        }
-    } else {
-        for i in 1..4 {
-            let f = i as f32 / 4.0;
-            let g = Stroke::new(1.0, t.separator);
-            p.line_segment([pos2(graph.left() + f * graph.width(), graph.top()), pos2(graph.left() + f * graph.width(), graph.bottom())], g);
-            p.line_segment([pos2(graph.left(), graph.top() + f * graph.height()), pos2(graph.right(), graph.top() + f * graph.height())], g);
-        }
-        p.line_segment([graph.left_bottom(), graph.right_top()], Stroke::new(1.0, t.separator.gamma_multiply(1.6)));
-    }
+    draw_grid(&p, &pg, graph, &view, lookup, &t);
     p.rect_stroke(
         graph,
         0.0,

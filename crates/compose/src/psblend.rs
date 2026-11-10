@@ -37,9 +37,17 @@ pub fn with_hdr<R>(hdr: bool, f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Whether the document being composited is 32-bit float, whose gamut has no upper bound.
+/// [`with_hdr`] sets it per document (`render::flatten`); Photoshop clips the non-separable
+/// modes and Add at 1 at the integer depths, and the PSD merged-image oracle holds us to that.
+#[inline]
+fn hdr() -> bool {
+    HDR.with(std::cell::Cell::get)
+}
+
 #[inline]
 pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    generic::blend_rgb_hdr(mode, cb, cs)
+    if hdr() { generic::blend_rgb_hdr(mode, cb, cs) } else { generic::blend_rgb(mode, cb, cs) }
 }
 
 #[inline]
@@ -49,7 +57,7 @@ pub fn fill_is_special(_mode: BlendMode) -> bool {
 
 #[inline]
 pub fn blend_rgb_fill(mode: BlendMode, cb: [f32; 3], cs: [f32; 3], _fill: f32) -> [f32; 3] {
-    generic::blend_rgb_hdr(mode, cb, cs)
+    blend_rgb(mode, cb, cs)
 }
 
 #[inline]
@@ -61,12 +69,12 @@ pub fn composite_fill(
     fill: f32,
     _gamma: f32,
 ) -> [f32; 4] {
-    generic::composite(mode, backdrop, source, opacity * fill.clamp(0.0, 1.0))
+    composite(mode, backdrop, source, opacity * fill.clamp(0.0, 1.0))
 }
 
 #[inline]
 pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
-    generic::composite(mode, backdrop, source, opacity)
+    if hdr() { generic::composite_hdr(mode, backdrop, source, opacity) } else { generic::composite(mode, backdrop, source, opacity) }
 }
 
 #[inline]
@@ -179,11 +187,11 @@ pub fn composite_gamma(
     opacity: f32,
     _gamma: f32,
 ) -> [f32; 4] {
-    generic::composite(mode, backdrop, source, opacity)
+    composite(mode, backdrop, source, opacity)
 }
 
 pub fn composite_atop(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
-    generic::composite_atop(mode, backdrop, source, opacity)
+    if hdr() { generic::composite_atop_hdr(mode, backdrop, source, opacity) } else { generic::composite_atop(mode, backdrop, source, opacity) }
 }
 
 #[cfg(test)]
