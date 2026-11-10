@@ -259,13 +259,17 @@ mod tests {
         assert!((out[2] - 1.6).abs() < 1e-5);
     }
 
+    /// `A + B - AB` at every value, with no range assumed.
     #[test]
-    fn nuke_screen_handles_hdr_without_inverting() {
+    fn nuke_screen_is_its_formula_above_one_too() {
         let b = [2.0, 0.5, 0.2, 1.0];
         let a = [1.5, 0.5, 0.5, 1.0];
         let out = composite(BlendMode::NukeScreen, b, a, 1.0);
-        assert!((out[0] - 2.0).abs() < 1e-5);
-        assert!((out[1] - 0.75).abs() < 1e-5);
+        // Above 1 the product outruns the sum, so two bright values darken: 1.5 + 2 - 3 = 0.5.
+        // That is Nuke's screen, and the reason a highlight is composited with `plus` instead.
+        assert!((out[0] - 0.5).abs() < 1e-5, "{out:?}");
+        // Inside 0..1 it brightens as ever: 0.5 + 0.5 - 0.25.
+        assert!((out[1] - 0.75).abs() < 1e-5, "{out:?}");
     }
 
     #[test]

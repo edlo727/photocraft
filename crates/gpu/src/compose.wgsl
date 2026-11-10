@@ -208,9 +208,10 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
 
 // ---- Nuke Merge operations (A = source, B = backdrop; Nuke's 32-bit maths, nothing clamped) ----
 
+// A + B - AB on the values themselves (photocraft_color::blend::nuke_screen): above 1 the
+// product outruns the sum, so screening two bright values darkens, as it does in Nuke.
 fn nuke_screen(a: f32, b: f32) -> f32 {
-    if (a >= 0.0 && a <= 1.0 && b >= 0.0 && b <= 1.0) { return a + b - a * b; }
-    return max(a, b);
+    return a + b - a * b;
 }
 
 // Nuke overlay / hard-light core (photocraft_color::blend::nuke_light): multiply below 0.5 of
@@ -1451,4 +1452,4 @@ fn fs_mbeveltex(in: VOut) -> @location(0) vec4<f32> {
 fn fs_mstroke(in: VOut) -> @location(0) vec4<f32> {
     let d = textureLoad(tex_a, local(in.pos), 0).r;
     return mout(clamp(op.p0.x + 0.5 - d, 0.0, 1.0));
-}
+}
