@@ -161,8 +161,8 @@ use consts::OP_UNIFORM;
 pub use consts::{ACC_FORMAT, CHUNK, FX_BUDGET, PAGE, PATTERN_BUDGET, PATTERN_IDLE_FRAMES, RESIDENT_BUDGET};
 use convert::W;
 #[cfg(test)]
-#[cfg(test)]
 use convert::convert_tiles;
+#[cfg(test)]
 use convert::{CONVERT_BATCH, colour_managed, convert_tile, convert_tiles_ready, rgb_gray16_to_f16, rgb_gray32_to_f16};
 pub use convert::{f16_to_f32, f32_to_f16, preconvert};
 pub use live::{LIVE_SLOTS, LivePaint, LiveSlot};

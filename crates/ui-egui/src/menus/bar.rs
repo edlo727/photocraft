@@ -33,6 +33,8 @@ pub const EXR_EXPORT_JOB: &str = "file.exportNukeExr";
 /// Export the active document to `path` on a worker thread: the window keeps drawing, the
 /// progress dialog shows (with Cancel, or Esc) while it runs, and the result or error is reported
 /// when it ends (see `jobs_ui`).
+// The export is reached through a native save dialog, which rfd does not build for wasm.
+#[cfg(not(target_arch = "wasm32"))]
 fn start_exr_export(app: &mut PhotocraftApp, path: std::path::PathBuf, opts: EXRExportModalState) {
     let Some(active) = app.session.active() else { return };
     let doc = std::sync::Arc::clone(&active.doc);
@@ -325,11 +327,8 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
             });
 
         if save_requested {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("OpenEXR", &["exr"])
-                .set_file_name("multichannel_export.exr")
-                .save_file() 
-            {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = rfd::FileDialog::new().add_filter("OpenEXR", &["exr"]).set_file_name("multichannel_export.exr").save_file() {
                 start_exr_export(app, path, exr_state.clone());
             }
             closed = true;

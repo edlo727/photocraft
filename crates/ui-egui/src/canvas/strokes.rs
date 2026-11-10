@@ -689,6 +689,7 @@ pub(crate) fn tool_state_only(id: &str) -> bool {
 
 /// The threads Large Brush Mode strokes are written on: every core but two (one at least),
 /// apart from the shared pool the UI's parallel work runs on. `None` if it can't be made.
+#[cfg(not(target_arch = "wasm32"))]
 fn commit_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
@@ -722,10 +723,14 @@ fn start_commit(app: &mut PhotocraftApp, c: &mut QueuedCommit) -> bool {
                 }
                 r
             };
+            #[cfg(not(target_arch = "wasm32"))]
             let r = match commit_pool() {
                 Some(pool) => pool.install(|| write(&mut live)),
                 None => write(&mut live),
             };
+            // rayon is a desktop-only dependency: on the web the write runs on this thread.
+            #[cfg(target_arch = "wasm32")]
+            let r = write(&mut live);
             let _ = tx.send(r.map(|_| live).map_err(|e| e.to_string()));
         })
         .is_ok();

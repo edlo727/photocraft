@@ -135,6 +135,9 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
             | Adjustment::GradientMap { .. }
             | Adjustment::SelectiveColor { .. }
             | Adjustment::Unsupported { .. } => {}
+            // Nuke's Grade and the OCIO colour-space change write no Photoshop block at all (see
+            // `adjust_map`), so there is nothing for them to round-trip through PSD.
+            Adjustment::Grade { .. } | Adjustment::OcioColorSpace { .. } => {}
         }
     }
     all
