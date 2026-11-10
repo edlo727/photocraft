@@ -1451,4 +1451,4 @@ fn fs_mbeveltex(in: VOut) -> @location(0) vec4<f32> {
 fn fs_mstroke(in: VOut) -> @location(0) vec4<f32> {
     let d = textureLoad(tex_a, local(in.pos), 0).r;
     return mout(clamp(op.p0.x + 0.5 - d, 0.0, 1.0));
-}
+}
