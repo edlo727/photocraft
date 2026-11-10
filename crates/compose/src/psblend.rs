@@ -45,9 +45,79 @@ pub(crate) fn hdr() -> bool {
     HDR.with(std::cell::Cell::get)
 }
 
+/// Photoshop's Vivid Light, which decides on the source and saturates at both ends.
+fn vivid_light_ps(cb: f32, cs: f32) -> f32 {
+    if cs <= 0.5 {
+        if cs <= 0.0 { 0.0 } else { 1.0 - ((1.0 - cb) / (2.0 * cs)).min(1.0) }
+    } else if cs >= 1.0 {
+        1.0
+    } else {
+        (cb / (2.0 * (1.0 - cs))).min(1.0)
+    }
+}
+
+/// Vivid Light with the backdrop's edges taken into account too, which is the curve Hard Mix
+/// thresholds (not [`vivid_light_ps`], whose edges differ at cb = 0 and cb = 1).
+fn vivid_light_generic(cb: f32, cs: f32) -> f32 {
+    if cs <= 0.5 {
+        if cb >= 1.0 - EDGE {
+            1.0
+        } else if cs <= 0.0 {
+            0.0
+        } else {
+            1.0 - ((1.0 - cb) / (2.0 * cs)).min(1.0)
+        }
+    } else if cb <= EDGE {
+        0.0
+    } else if cs >= 1.0 {
+        1.0
+    } else {
+        (cb / (2.0 * (1.0 - cs))).min(1.0)
+    }
+}
+
+/// Photoshop's Hard Mix: Vivid Light thresholded at a half.
+fn hard_mix_ps(cb: f32, cs: f32) -> f32 {
+    if vivid_light_generic(cb, cs) >= 0.5 - 1e-6 { 1.0 } else { 0.0 }
+}
+
+/// Photoshop's Colour Burn: white backdrop stays white, black source burns to black.
+fn color_burn(cb: f32, cs: f32) -> f32 {
+    if cb >= 1.0 - EDGE {
+        1.0
+    } else if cs <= 0.0 {
+        0.0
+    } else {
+        1.0 - ((1.0 - cb) / cs).min(1.0)
+    }
+}
+
+/// Photoshop's Colour Dodge: black backdrop stays black, white source dodges to white.
+fn color_dodge(cb: f32, cs: f32) -> f32 {
+    if cb <= EDGE {
+        0.0
+    } else if cs >= 1.0 {
+        1.0
+    } else {
+        (cb / (1.0 - cs)).min(1.0)
+    }
+}
+
 #[inline]
 pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
-    if hdr() { generic::blend_rgb_hdr(mode, cb, cs) } else { generic::blend_rgb(mode, cb, cs) }
+    if hdr() {
+        return generic::blend_rgb_hdr(mode, cb, cs);
+    }
+    // Four modes whose edges Photoshop defines differently from the W3C formulas in
+    // `photocraft_color::blend`, measured against its own output. All four saturate at 1, so they
+    // belong to the integer depths; a linear document keeps the unclamped maths above.
+    match mode {
+        BlendMode::VividLight => std::array::from_fn(|i| vivid_light_ps(cb[i], cs[i])),
+        BlendMode::HardMix => std::array::from_fn(|i| hard_mix_ps(cb[i], cs[i])),
+        BlendMode::ColorBurn => std::array::from_fn(|i| color_burn(cb[i], cs[i])),
+        BlendMode::ColorDodge => std::array::from_fn(|i| color_dodge(cb[i], cs[i])),
+        m => generic::blend_rgb(m, cb, cs),
+    }
 }
 
 /// The eight modes where Photoshop folds a Fill below 100 % into the blend itself rather than
@@ -89,20 +159,42 @@ pub fn blend_rgb_fill(mode: BlendMode, cb: [f32; 3], cs: [f32; 3], fill: f32) ->
 }
 
 #[inline]
-pub fn composite_fill(
-    mode: BlendMode,
-    backdrop: [f32; 4],
-    source: [f32; 4],
-    opacity: f32,
-    fill: f32,
-    _gamma: f32,
-) -> [f32; 4] {
-    composite(mode, backdrop, source, opacity * fill.clamp(0.0, 1.0))
+/// [`composite_gamma`], and for [`fill_is_special`] below 100 % Fill the layer blends at its full
+/// alpha while only `alpha * fill` of it stands on its own over the backdrop. Scaling the opacity
+/// instead would fade the blend itself, which is not what Photoshop's Fill does.
+pub fn composite_fill(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32, fill: f32, gamma: f32) -> [f32; 4] {
+    if fill >= 1.0 || !fill_is_special(mode) {
+        return composite_gamma(mode, backdrop, source, opacity * fill.clamp(0.0, 1.0), gamma);
+    }
+    let ab = backdrop[3];
+    let over = source[3] * opacity;
+    let alone = over * fill.clamp(0.0, 1.0);
+    if over <= 0.0 {
+        return backdrop;
+    }
+    let ao = ab + (1.0 - ab) * alone;
+    if ao <= 0.0 {
+        return [0.0; 4];
+    }
+    let cb = [backdrop[0], backdrop[1], backdrop[2]];
+    let cs = [source[0], source[1], source[2]];
+    let b = blend_rgb_fill(mode, cb, cs, fill);
+    let (wb, wbs, ws) = (ab * (1.0 - over) / ao, ab * over / ao, (1.0 - ab) * alone / ao);
+    let mut out = [0.0f32; 4];
+    for i in 0..3 {
+        out[i] = if gamma == 1.0 {
+            wb * cb[i] + wbs * b[i] + ws * cs[i]
+        } else {
+            text_decode(wb * text_encode(cb[i], gamma) + wbs * text_encode(b[i], gamma) + ws * text_encode(cs[i], gamma), gamma)
+        };
+    }
+    out[3] = ao;
+    out
 }
 
 #[inline]
 pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
-    if hdr() { generic::composite_hdr(mode, backdrop, source, opacity) } else { generic::composite(mode, backdrop, source, opacity) }
+    if hdr() { generic::composite_hdr(mode, backdrop, source, opacity) } else { generic::composite_with_blend(mode, backdrop, source, opacity, blend_rgb) }
 }
 
 #[inline]
@@ -150,12 +242,7 @@ fn normal_lanes(b: &mut [[f32; 4]; LANES], s: &[[f32; 4]; LANES], opacity: f32) 
         inv[i] = 1.0 / ao[i];
     }
     for i in 0..LANES {
-        let mix = [
-            (kb[i] * b0[i] + as_[i] * s0[i]) * inv[i],
-            (kb[i] * b1[i] + as_[i] * s1[i]) * inv[i],
-            (kb[i] * b2[i] + as_[i] * s2[i]) * inv[i],
-            ao[i],
-        ];
+        let mix = [(kb[i] * b0[i] + as_[i] * s0[i]) * inv[i], (kb[i] * b1[i] + as_[i] * s1[i]) * inv[i], (kb[i] * b2[i] + as_[i] * s2[i]) * inv[i], ao[i]];
         let keep = (s3[i] <= 0.0) | (as_[i] <= 0.0);
         let gone = ao[i] <= 0.0;
         b[i] = if keep {
@@ -175,12 +262,7 @@ fn normal_rgb(backdrop: [f32; 4], source: [f32; 4], as_: f32, ao: f32) -> [f32; 
     }
     let kb = backdrop[3] * (1.0 - as_);
     let inv = 1.0 / ao;
-    [
-        (kb * backdrop[0] + as_ * source[0]) * inv,
-        (kb * backdrop[1] + as_ * source[1]) * inv,
-        (kb * backdrop[2] + as_ * source[2]) * inv,
-        ao,
-    ]
+    [(kb * backdrop[0] + as_ * source[0]) * inv, (kb * backdrop[1] + as_ * source[1]) * inv, (kb * backdrop[2] + as_ * source[2]) * inv, ao]
 }
 
 pub const TEXT_GAMMA: f32 = 1.45;
@@ -208,13 +290,7 @@ pub fn text_decode(v: f32, gamma: f32) -> f32 {
 }
 
 #[inline]
-pub fn composite_gamma(
-    mode: BlendMode,
-    backdrop: [f32; 4],
-    source: [f32; 4],
-    opacity: f32,
-    gamma: f32,
-) -> [f32; 4] {
+pub fn composite_gamma(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32, gamma: f32) -> [f32; 4] {
     if gamma == 1.0 {
         return composite(mode, backdrop, source, opacity);
     }
@@ -242,7 +318,11 @@ pub fn composite_gamma(
 }
 
 pub fn composite_atop(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
-    if hdr() { generic::composite_atop_hdr(mode, backdrop, source, opacity) } else { generic::composite_atop(mode, backdrop, source, opacity) }
+    if hdr() {
+        generic::composite_atop_hdr(mode, backdrop, source, opacity)
+    } else {
+        generic::composite_atop_with_blend(mode, backdrop, source, opacity, blend_rgb)
+    }
 }
 
 #[cfg(test)]

@@ -812,16 +812,25 @@ fn nuke_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
 /// `αo·Co = (1−αs)·αb·Cb + (1−αb)·αs·Cs + αs·αb·B(Cb,Cs)`.
 /// Dissolve must be resolved by the caller (per-pixel coverage decision) before calling.
 pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
-    composite_with(mode, backdrop, source, opacity, blend_rgb)
+    composite_with_blend(mode, backdrop, source, opacity, blend_rgb)
 }
 
 /// [`composite`] for 32-bit float documents, whose gamut has no upper bound: the blend keeps
 /// values above 1 instead of clipping them, as the GPU compositor does.
 pub fn composite_hdr(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
-    composite_with(mode, backdrop, source, opacity, blend_rgb_hdr)
+    composite_with_blend(mode, backdrop, source, opacity, blend_rgb_hdr)
 }
 
-fn composite_with(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32, blend: fn(BlendMode, [f32; 3], [f32; 3]) -> [f32; 3]) -> [f32; 4] {
+/// [`composite`] with the blend function supplied: `photocraft_compose::psblend` passes its own,
+/// which reproduces Photoshop's edge behaviour for the four modes the W3C formulas here do not.
+/// Nuke operations never reach it — they return through [`nuke_composite`] first.
+pub fn composite_with_blend(
+    mode: BlendMode,
+    backdrop: [f32; 4],
+    source: [f32; 4],
+    opacity: f32,
+    blend: fn(BlendMode, [f32; 3], [f32; 3]) -> [f32; 3],
+) -> [f32; 4] {
     if mode.is_nuke() {
         return nuke_composite(mode, backdrop, source, opacity);
     }
@@ -850,7 +859,7 @@ fn composite_with(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity
 /// Transparency): "source atop", `Co = (1−αs)·Cb + αs·B(Cb,Cs)`, `αo = αb`. Unlike source-over
 /// followed by restoring the alpha, a half-transparent backdrop takes the new colour by `αs` alone.
 pub fn composite_atop(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
-    composite_atop_with(mode, backdrop, source, opacity, blend_rgb)
+    composite_atop_with_blend(mode, backdrop, source, opacity, blend_rgb)
 }
 
 /// [`composite`] or [`composite_hdr`] by the surface's depth: a 32-bit float document keeps
@@ -868,10 +877,17 @@ pub fn composite_atop_for(sample: crate::SampleType, mode: BlendMode, backdrop: 
 
 /// [`composite_atop`] for 32-bit float documents: the blend keeps values above 1.
 pub fn composite_atop_hdr(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
-    composite_atop_with(mode, backdrop, source, opacity, blend_rgb_hdr)
+    composite_atop_with_blend(mode, backdrop, source, opacity, blend_rgb_hdr)
 }
 
-fn composite_atop_with(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32, blend: fn(BlendMode, [f32; 3], [f32; 3]) -> [f32; 3]) -> [f32; 4] {
+/// [`composite_atop`] with the blend function supplied (see [`composite_with_blend`]).
+pub fn composite_atop_with_blend(
+    mode: BlendMode,
+    backdrop: [f32; 4],
+    source: [f32; 4],
+    opacity: f32,
+    blend: fn(BlendMode, [f32; 3], [f32; 3]) -> [f32; 3],
+) -> [f32; 4] {
     let as_ = source[3] * opacity;
     if as_ <= 0.0 {
         return backdrop;
