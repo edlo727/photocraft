@@ -187,13 +187,28 @@ fn add_and_divide_clip_at_integer_depths_but_not_in_float() {
     assert_eq!(blend_channel_hdr(BlendMode::Divide, f32::MAX, 1e-30), f32::MAX);
     assert_eq!(blend_channel_hdr(BlendMode::LinearDodge, f32::MAX, f32::MAX), f32::MAX);
     assert!(blend_channel_hdr(BlendMode::LinearDodge, f32::INFINITY, 1.0).is_finite());
-    // Every other separable mode is unchanged (the non-separable ones keep values above 1:
-    // blend_rgb_within), and the in-range results agree.
-    for m in BlendMode::LAYER_MODES.into_iter().filter(|m| m.is_separable() && !matches!(m, BlendMode::LinearDodge | BlendMode::Divide)) {
-        for (cb, cs) in [(0.2, 0.3), (0.9, 0.05), (2.0, 0.5), (0.4, 1.5)] {
+    // Every other separable mode agrees between the depths on 0..1 values, which is all an
+    // integer document ever holds.
+    let others = || BlendMode::LAYER_MODES.into_iter().filter(|m| m.is_separable() && !matches!(m, BlendMode::LinearDodge | BlendMode::Divide));
+    for m in others() {
+        for (cb, cs) in [(0.2, 0.3), (0.9, 0.05)] {
             assert_eq!(blend_rgb(m, [cb, cs, 0.5], [cs, cb, 0.25]), blend_rgb_hdr(m, [cb, cs, 0.5], [cs, cb, 0.25]), "{m:?} cb={cb} cs={cs}");
         }
     }
+    // Past 0..1 the formulas that only hold there take the brighter input instead (`range_bound`),
+    // so a 32-bit highlight survives Screen rather than inverting through it. The rest still agree.
+    for m in others() {
+        for (cb, cs) in [(2.0, 0.5), (0.4, 1.5)] {
+            if range_bound(m) {
+                assert_eq!(blend_channel_hdr(m, cb, cs), cb.max(cs), "{m:?} cb={cb} cs={cs}");
+            } else {
+                assert_eq!(blend_rgb(m, [cb, cs, 0.5], [cs, cb, 0.25]), blend_rgb_hdr(m, [cb, cs, 0.5], [cs, cb, 0.25]), "{m:?} cb={cb} cs={cs}");
+            }
+        }
+    }
+    // Screen of a 2.0 highlight keeps it; in range it is the formula.
+    assert_eq!(blend_rgb_hdr(BlendMode::Screen, [2.0, 0.5, 0.5], [0.5, 2.0, 0.25]), [2.0, 2.0, 0.625]);
+    assert!(close(blend_channel(BlendMode::Screen, 0.5, 0.5), 0.75));
     let (cb, cs) = ([0.2, 0.3, 0.1], [0.3, 0.4, 0.4]);
     assert_eq!(blend_rgb_hdr(BlendMode::LinearDodge, cb, cs), blend_rgb(BlendMode::LinearDodge, cb, cs));
     assert_eq!(blend_rgb_hdr(BlendMode::Divide, cb, cs), blend_rgb(BlendMode::Divide, cb, cs));

@@ -557,6 +557,40 @@ fn move_typed(view: CurveView, pts: &mut [[f32; 2]], i: usize, typed: [f32; 2]) 
     moved
 }
 
+/// The Input / Output fields for the selected point. Returns whether the point moved and
+/// whether the edit should commit (a typed value commits at once, a drag on release).
+fn point_fields(ui: &mut egui::Ui, pts: &mut Vec<[f32; 2]>, selected: Option<usize>, view: CurveView, lookup: bool, range: f32) -> (bool, bool) {
+    let (mut changed, mut commit) = (false, false);
+    ui.horizontal(|ui| {
+        // Lookup curves show linear values (0..range); Photoshop's show levels (0..255).
+        let shown = |g: [f32; 2]| if lookup { view.levels_from_g(g).map(|l| l / 255.0) } else { g };
+        let (mut vi, mut vo) = selected.map_or((0.0, 0.0), |i| {
+            let s = shown(pts[i]);
+            (s[0], s[1])
+        });
+        let field = |ui: &mut egui::Ui, x: &mut f32, name: &str| {
+            ui.add_enabled_ui(selected.is_some(), |ui| {
+                let r = if lookup { widgets::value_field_prec(ui, x, 0.0..=range, "", 52.0, 3) } else { widgets::value_field(ui, x, 0.0..=255.0, "", 52.0) };
+                r.accessible_name(name)
+            })
+            .inner
+        };
+        label(ui, tl!("Input:"));
+        let ri = field(ui, &mut vi, tl!("Input:"));
+        label(ui, tl!("Output:"));
+        let ro = field(ui, &mut vo, tl!("Output:"));
+        if let Some(i) = selected
+            && (ri.changed() || ro.changed())
+            && (if lookup { move_typed(view, pts, i, [vi, vo]) } else { curve_edit::move_to(pts, i, [vi, vo]) })
+        {
+            changed = true;
+            commit |= !(ri.dragged() || ro.dragged());
+        }
+        commit |= ri.drag_stopped() || ro.drag_stopped();
+    });
+    (changed, commit)
+}
+
 pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     let t = Tokens::get(ui.ctx());
     let space = space_of(v);
@@ -693,38 +727,10 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
 
     // Input / Output of the selected point.
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let i = st.gesture.selected.filter(|i| *i < pts.len() && !pencil);
-        // Lookup curves show linear values (0..range); Photoshop's show levels (0..255).
-        let shown = |g: [f32; 2]| if lookup { view.levels_from_g(g).map(|l| l / 255.0) } else { g };
-        let (mut vi, mut vo) = i.map_or((0.0, 0.0), |i| {
-            let s = shown(pts[i]);
-            (s[0], s[1])
-        });
-        let field = |ui: &mut egui::Ui, x: &mut f32, name: &str| {
-            ui.add_enabled_ui(i.is_some(), |ui| {
-                let r = if lookup { widgets::value_field_prec(ui, x, 0.0..=range, "", 52.0, 3) } else { widgets::value_field(ui, x, 0.0..=255.0, "", 52.0) };
-                r.accessible_name(name)
-            })
-            .inner
-        };
-        label(ui, tl!("Input:"));
-        let ri = field(ui, &mut vi, tl!("Input:"));
-        label(ui, tl!("Output:"));
-        let ro = field(ui, &mut vo, tl!("Output:"));
-        if let Some(i) = i
-            && (ri.changed() || ro.changed())
-        {
-            let moved = if lookup { move_typed(view, &mut pts, i, [vi, vo]) } else { curve_edit::move_to(&mut pts, i, [vi, vo]) };
-            if moved {
-                changed = true;
-                e.commit |= !(ri.dragged() || ro.dragged());
-            }
-        }
-        if ri.drag_stopped() || ro.drag_stopped() {
-            e.commit = true;
-        }
-    });
+    let selected = st.gesture.selected.filter(|i| *i < pts.len() && !pencil);
+    let moved = point_fields(ui, &mut pts, selected, view, lookup, range);
+    changed |= moved.0;
+    e.commit |= moved.1;
     let t2 = Tokens::get(ui.ctx());
     let hint = if pencil {
         crate::i18n::fmt(tl!("Drag to draw the curve · {key}-click draws a straight line"), &[("key", &crate::shortcuts::pretty("Shift"))])
