@@ -40,6 +40,16 @@ pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     }
                     widgets::vline(ui, 16.0);
                     label(ui, &crate::i18n::fmt(tl!("{mode} Color · {bits} bit"), &[("mode", mode), ("bits", &bits.to_string())]));
+                    // 32-bit float documents composite the way Nuke does, which changes enough to
+                    // be worth saying on screen rather than leaving to be inferred from the depth.
+                    if st.doc.depth == photocraft_color::SampleType::F32 {
+                        let t = Tokens::get(ui.ctx());
+                        ui.label(RichText::new(tl!("Linear")).color(t.accent)).on_hover_text(tl!(
+                            "Scene-linear compositing. Blending and filters keep values above 1 and below 0, Add really adds light, \
+                             and Photoshop's Fill rule for the special eight modes and its text blending gamma are both off. Filters \
+                             that work on 0-1 values are unavailable."
+                        ));
+                    }
                     widgets::vline(ui, 16.0);
                     label(ui, &format!("{w} × {h} px"));
                     widgets::vline(ui, 16.0);
