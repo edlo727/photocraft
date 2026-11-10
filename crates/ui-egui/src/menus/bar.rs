@@ -52,11 +52,13 @@ fn start_exr_export(app: &mut PhotocraftApp, path: std::path::PathBuf, opts: EXR
             photocraft_io::exr_export::export_multichannel_exr_with_options(
                 &doc,
                 &path,
-                opts.compression,
-                opts.flat_beauty,
-                opts.bit_depth_32,
-                opts.generate_nuke_script,
-                opts.groups,
+                photocraft_io::exr_export::NukeExportOptions {
+                    compression: opts.compression,
+                    include_flat_beauty: opts.flat_beauty,
+                    use_32bit: opts.bit_depth_32,
+                    write_nuke_script: opts.generate_nuke_script,
+                    groups: opts.groups,
+                },
                 &report,
             )
             .map_err(|e| if ctx.cancelled() { photocraft_engine::EngineError::Cancelled } else { photocraft_engine::EngineError::Other(e) })

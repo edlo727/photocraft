@@ -1002,16 +1002,29 @@ impl<'a> Collector<'a> {
     }
 }
 
-pub fn export_multichannel_exr_with_options(
-    doc: &Document,
-    path: &Path,
-    compression: NukeCompression,
-    include_flat_beauty: bool,
-    use_32bit: bool,
-    write_nuke_script: bool,
-    groups: GroupExport,
-    progress: Progress<'_>,
-) -> std::result::Result<(), String> {
+/// Everything an EXR + `.nk` export decides, apart from the document and where it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NukeExportOptions {
+    /// EXR compression, applied to every part of the file.
+    pub compression: NukeCompression,
+    /// Also write the flattened result as the file's main (beauty) image.
+    pub include_flat_beauty: bool,
+    /// Full float channels rather than half.
+    pub use_32bit: bool,
+    /// Write the matching `.nk` comp beside the EXR.
+    pub write_nuke_script: bool,
+    /// How groups go into the file and the script.
+    pub groups: GroupExport,
+}
+
+impl Default for NukeExportOptions {
+    fn default() -> Self {
+        Self { compression: NukeCompression::ZipScanline, include_flat_beauty: true, use_32bit: true, write_nuke_script: false, groups: GroupExport::Branches }
+    }
+}
+
+pub fn export_multichannel_exr_with_options(doc: &Document, path: &Path, options: NukeExportOptions, progress: Progress<'_>) -> std::result::Result<(), String> {
+    let NukeExportOptions { compression, include_flat_beauty, use_32bit, write_nuke_script, groups } = options;
     const CANCELLED: &str = "cancelled";
     let step = |f: f32, m: &str| if progress(f, m) { Ok(()) } else { Err(CANCELLED.to_string()) };
     let width = doc.size.width as usize;
@@ -1109,7 +1122,7 @@ pub fn export_multichannel_exr_with_options(
 }
 
 pub fn export_multichannel_exr(doc: &Document, path: &Path) -> std::result::Result<(), String> {
-    export_multichannel_exr_with_options(doc, path, NukeCompression::ZipScanline, true, true, false, GroupExport::Branches, NO_PROGRESS)
+    export_multichannel_exr_with_options(doc, path, NukeExportOptions::default(), NO_PROGRESS)
 }
 
 #[cfg(test)]

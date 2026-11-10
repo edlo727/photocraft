@@ -965,7 +965,10 @@ pub fn compress_highlights(c: [f32; 3]) -> [f32; 3] {
     let span = 1.0 - HIGHLIGHT_KNEE;
     let to = HIGHLIGHT_KNEE + span * (1.0 - (-(m - HIGHLIGHT_KNEE) / span).exp());
     let k = to / m;
-    [c[0] * k, c[1] * k, c[2] * k]
+    // The brightest channel takes `to` itself rather than `(to / m) * m`, which rounds twice: at
+    // the top of the shoulder that last-bit error is bigger than the curve's own rise, so a ramp
+    // through it reads as non-monotonic (3.70 and 3.75 both land a hair under 1.0, out of order).
+    c.map(|v| if v == m { to } else { v * k })
 }
 
 /// What `method` makes of linear-light `c` before integer samples clip it at 1.0: the

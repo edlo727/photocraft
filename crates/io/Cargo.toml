@@ -17,7 +17,6 @@ heif = ["photocraft-codecs/heif"]
 
 [dependencies]
 exr = "1.74"
-rfd = "0.15"
 photocraft-geom = { workspace = true }
 photocraft-color = { workspace = true }
 photocraft-cms = { workspace = true }

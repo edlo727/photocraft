@@ -309,7 +309,7 @@ fn export_writes_mask_channels_and_the_script() {
     let dir = std::env::temp_dir().join(format!("photocraft-exr-export-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("comp.exr");
-    export_multichannel_exr_with_options(&d, &path, NukeCompression::ZipScanline, true, true, true, GroupExport::Branches, NO_PROGRESS).expect("export");
+    export_multichannel_exr_with_options(&d, &path, NukeExportOptions { write_nuke_script: true, ..Default::default() }, NO_PROGRESS).expect("export");
 
     let image = exr::prelude::read_all_flat_layers_from_file(&path).expect("read back");
     let names: Vec<String> = image.layer_data[0].channel_data.list.iter().map(|c| c.name.to_string()).collect();
@@ -334,7 +334,7 @@ fn export_reports_progress_and_can_be_cancelled_before_writing() {
         true
     };
     let path = dir.join("ok.exr");
-    export_multichannel_exr_with_options(&d, &path, NukeCompression::ZipScanline, true, true, true, GroupExport::Branches, &record).expect("export");
+    export_multichannel_exr_with_options(&d, &path, NukeExportOptions { write_nuke_script: true, ..Default::default() }, &record).expect("export");
     let seen = seen.into_inner().expect("lock");
     assert!(seen.windows(2).all(|w| w[0] <= w[1]), "progress only goes forward: {seen:?}");
     assert_eq!(seen.last().copied(), Some(1.0));
@@ -343,7 +343,7 @@ fn export_reports_progress_and_can_be_cancelled_before_writing() {
     let calls = std::sync::atomic::AtomicUsize::new(0);
     let cancel = |_: f32, _: &str| calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1;
     let path = dir.join("cancelled.exr");
-    let r = export_multichannel_exr_with_options(&d, &path, NukeCompression::ZipScanline, true, true, true, GroupExport::Branches, &cancel);
+    let r = export_multichannel_exr_with_options(&d, &path, NukeExportOptions { write_nuke_script: true, ..Default::default() }, &cancel);
     assert_eq!(r, Err("cancelled".to_string()));
     assert!(!path.exists() && !path.with_extension("nk").exists());
     let _ = std::fs::remove_dir_all(&dir);
