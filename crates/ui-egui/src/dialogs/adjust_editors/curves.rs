@@ -528,6 +528,35 @@ fn draw_grid(p: &egui::Painter, pg: &egui::Painter, graph: Rect, view: &CurveVie
     }
 }
 
+/// The curve's points as square handles, the selected one filled.
+fn draw_handles(pg: &egui::Painter, pts: &[[f32; 2]], selected: Option<usize>, graph: Rect, t: &Tokens) {
+    for (i, q) in pts.iter().enumerate() {
+        let at = pos2(graph.left() + q[0] / 255.0 * graph.width(), graph.bottom() - q[1] / 255.0 * graph.height());
+        let r = Rect::from_center_size(at, vec2(CURVE_HANDLE_SIZE, CURVE_HANDLE_SIZE));
+        if Some(i) == selected {
+            pg.rect_filled(r, 0.0, t.text);
+            pg.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
+        } else {
+            pg.rect_filled(r, 0.0, t.field);
+            pg.rect_stroke(r, 0.0, Stroke::new(1.0, t.text), StrokeKind::Inside);
+        }
+    }
+}
+
+/// Moves point `i` of a lookup curve to the typed linear `[input, output]`. Typed values are
+/// exact, inside the view or not; the input stays between the neighbouring points'. Returns
+/// whether the point moved.
+fn move_typed(view: CurveView, pts: &mut [[f32; 2]], i: usize, typed: [f32; 2]) -> bool {
+    let g = view.to_g([typed[0] * 255.0, typed[1] * 255.0]);
+    let gap = 0.01;
+    let lo = i.checked_sub(1).and_then(|j| pts.get(j)).map_or(f32::MIN, |q| q[0] + gap);
+    let hi = i.checked_add(1).and_then(|j| pts.get(j)).map_or(f32::MAX, |q| q[0] - gap);
+    let new = [g[0].clamp(lo, hi.max(lo)), g[1]];
+    let moved = pts[i] != new;
+    pts[i] = new;
+    moved
+}
+
 pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     let t = Tokens::get(ui.ctx());
     let space = space_of(v);
@@ -658,15 +687,8 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     } else {
         draw_curve(key, &pts, color, 1.5);
     }
-    for (i, q) in pts.iter().enumerate().filter(|_| !pencil) {
-        let r = Rect::from_center_size(to_scr(*q), vec2(CURVE_HANDLE_SIZE, CURVE_HANDLE_SIZE));
-        if Some(i) == st.gesture.selected {
-            pg.rect_filled(r, 0.0, t.text);
-            pg.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
-        } else {
-            pg.rect_filled(r, 0.0, t.field);
-            pg.rect_stroke(r, 0.0, Stroke::new(1.0, t.text), StrokeKind::Inside);
-        }
+    if !pencil {
+        draw_handles(&pg, &pts, st.gesture.selected, graph, &t);
     }
 
     // Input / Output of the selected point.
@@ -693,20 +715,7 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
         if let Some(i) = i
             && (ri.changed() || ro.changed())
         {
-            let moved = if lookup {
-                // Typed values are exact, inside the view or not; the input stays between the
-                // neighbouring points'.
-                let g = view.to_g([vi * 255.0, vo * 255.0]);
-                let gap = 0.01;
-                let lo = i.checked_sub(1).and_then(|j| pts.get(j)).map_or(f32::MIN, |q| q[0] + gap);
-                let hi = i.checked_add(1).and_then(|j| pts.get(j)).map_or(f32::MAX, |q| q[0] - gap);
-                let new = [g[0].clamp(lo, hi.max(lo)), g[1]];
-                let moved = pts[i] != new;
-                pts[i] = new;
-                moved
-            } else {
-                curve_edit::move_to(&mut pts, i, [vi, vo])
-            };
+            let moved = if lookup { move_typed(view, &mut pts, i, [vi, vo]) } else { curve_edit::move_to(&mut pts, i, [vi, vo]) };
             if moved {
                 changed = true;
                 e.commit |= !(ri.dragged() || ro.dragged());
