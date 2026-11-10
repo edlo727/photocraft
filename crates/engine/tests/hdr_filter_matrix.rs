@@ -6,7 +6,7 @@
 use photocraft_doc::Rect;
 use photocraft_engine::{Session, command_specs};
 use serde_json::json;
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 use std::time::Duration;
 
 const W: i32 = 64;
@@ -36,7 +36,7 @@ fn fixture() -> Session {
     let mut s = Session::new();
     s.execute("file.new", json!({"width": W, "height": H, "depth": 32})).unwrap();
     s.edit("hdr fixture", |doc, active| {
-        doc.icc_profile = Some(Arc::new(photocraft_cms::Builtin::AcesCg.profile().to_bytes()));
+        doc.icc_profile = Some(photocraft_cms::Builtin::AcesCg.profile().to_bytes());
         let surface = doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap();
         let format = surface.format();
         let bytes: Vec<f32> = (0..H).flat_map(|y| (0..W).map(move |x| (x, y))).flat_map(|(x, y)| photocraft_raster::from_rgba(&format, source_pixel(x, y))).collect();
