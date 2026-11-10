@@ -429,9 +429,33 @@ pub fn blend_channel_hdr(mode: BlendMode, cb: f32, cs: f32) -> f32 {
     channel(mode, cb, cs, f32::MAX)
 }
 
+/// The Photoshop modes whose formula is defined on 0..1 only (see [`channel`]).
+fn range_bound(mode: BlendMode) -> bool {
+    matches!(
+        mode,
+        BlendMode::Screen
+            | BlendMode::ColorDodge
+            | BlendMode::Overlay
+            | BlendMode::SoftLight
+            | BlendMode::HardLight
+            | BlendMode::VividLight
+            | BlendMode::LinearLight
+            | BlendMode::Exclusion
+            | BlendMode::Reflect
+            | BlendMode::Glow
+            | BlendMode::Negation
+    )
+}
+
 /// `B(cb, cs)` with Linear Dodge and Divide clipped at `hi` (1 at integer depths).
 #[inline]
 fn channel(mode: BlendMode, cb: f32, cs: f32, hi: f32) -> f32 {
+    // 32-bit float: these formulas only mean something on 0..1. Fed a highlight they go negative
+    // (Screen of two suns is black) or clip it to 1, so outside that range the brighter input
+    // stands, which is the rule Nuke's own screen follows.
+    if hi > 1.0 && range_bound(mode) && !((0.0..=1.0).contains(&cb) && (0.0..=1.0).contains(&cs)) {
+        return cb.max(cs);
+    }
     match mode {
         BlendMode::Normal | BlendMode::Dissolve | BlendMode::PassThrough => cs,
         BlendMode::Darken => cb.min(cs),

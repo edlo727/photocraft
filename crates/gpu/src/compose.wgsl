@@ -147,8 +147,18 @@ fn vivid_light_hard_mix(cb: f32, cs: f32) -> f32 {
     return min(cb / (2.0 * (1.0 - cs)), 1.0);
 }
 
+// The Photoshop modes whose formula is defined on 0..1 only (photocraft_color::blend::range_bound):
+// Screen, Color Dodge, Overlay, Soft Light, Hard Light, Vivid Light, Linear Light, Exclusion,
+// Reflect, Glow, Negation.
+fn range_bound(mode: i32) -> bool {
+    return mode == 9 || mode == 10 || (mode >= 13 && mode <= 17) || mode == 21 || (mode >= 28 && mode <= 30);
+}
+
 fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
     if (mode >= NUKE_BASE) { return nuke_channel(mode, cb, cs); }
+    // Outside 0..1 (a 32-bit highlight) those formulas go negative or clip, so the brighter input
+    // stands, as in Nuke's screen. Integer documents never leave the range, so nothing changes there.
+    if (range_bound(mode) && (cb < 0.0 || cb > 1.0 || cs < 0.0 || cs > 1.0)) { return max(cb, cs); }
     switch mode {
         case 3: { return min(cb, cs); }                         // Darken
         case 4: { return cb * cs; }                             // Multiply

@@ -24,6 +24,18 @@ fn nuke_hard_light_matches_nuke_merge_math_and_keeps_float() {
 }
 
 #[test]
+fn photoshop_modes_keep_highlights_in_32_bit() {
+    // Screen of a 50.0 sun over itself is the sun, not 100 - 2500.
+    for mode in [BlendMode::Screen, BlendMode::Overlay, BlendMode::HardLight, BlendMode::SoftLight, BlendMode::ColorDodge, BlendMode::Exclusion] {
+        assert!(close(blend_channel_hdr(mode, 50.0, 50.0), 50.0), "{mode:?}");
+        assert!(blend_channel_hdr(mode, 50.0, 0.3) >= 50.0, "{mode:?} keeps a bright backdrop");
+        // Inside 0..1 the formula is untouched, and so is every integer depth.
+        assert_eq!(blend_channel_hdr(mode, 0.4, 0.7), blend_channel(mode, 0.4, 0.7), "{mode:?}");
+    }
+    assert!(close(blend_channel(BlendMode::Screen, 0.5, 0.5), 0.75));
+}
+
+#[test]
 fn photoshop_modes_are_photoshops_and_nuke_modes_are_nukes() {
     // Photoshop's Subtract is backdrop − source, clipped at 0; Nuke's minus is A − B.
     assert!(close(blend_channel(BlendMode::Subtract, 0.75, 0.25), 0.5));
