@@ -712,21 +712,20 @@ pub fn blend_rgb_hdr(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
 
 // ---- Nuke Merge operations (the `Nuke…` modes): Nuke's 32-bit maths, A = source, B = backdrop ----
 
-/// Nuke `screen` (A = `a`, B = `b`): `A + B − AB` on the values themselves, with no range taken
-/// for granted. Above 1 the product grows faster than the sum, so screening two bright values
-/// darkens and can go negative — the reason a compositor reaches for `plus` on highlights rather
-/// than `screen`. Clamping the inputs or falling back to `max` here would be tidier to look at
-/// and would not be Nuke.
 #[inline]
 pub fn nuke_screen(a: f32, b: f32) -> f32 {
-    a + b - a * b
+    if (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b) {
+        a + b - a * b
+    } else {
+        a.max(b)
+    }
 }
 
 /// Shared core of Nuke's `overlay` and `hard-light`: multiply below 0.5 of the deciding input
 /// `x`, screen above it, with `x` (not the other input) rescaled to 0..1 in the screen branch:
 /// `x < 0.5 → 2·x·y`, else `screen(2·x − 1, y)`. Both branches give `y` at `x = 0.5`, so the
-/// result is continuous. Nothing is clamped: 32-bit values above 1 (and below 0) pass through
-/// into [`nuke_screen`].
+/// result is continuous. Nothing is clamped: 32-bit values above 1 (and below 0) pass through,
+/// and [`nuke_screen`]'s `max` fallback handles them as Nuke does.
 #[inline]
 pub fn nuke_light(x: f32, y: f32) -> f32 {
     if x < 0.5 {
