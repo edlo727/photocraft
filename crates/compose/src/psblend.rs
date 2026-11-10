@@ -194,6 +194,11 @@ pub fn composite_fill(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opa
 
 #[inline]
 pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    // Normal goes through the same arithmetic, in the same order, as the buffer loop's fast path
+    // (`normal_rgb`), so a pixel comes out bit-identical whichever of the two composites it.
+    if mode == BlendMode::Normal {
+        return composite_normal_rgb(backdrop, source, opacity);
+    }
     if hdr() { generic::composite_hdr(mode, backdrop, source, opacity) } else { generic::composite_with_blend(mode, backdrop, source, opacity, blend_rgb) }
 }
 
