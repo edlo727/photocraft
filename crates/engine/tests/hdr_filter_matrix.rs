@@ -39,7 +39,8 @@ fn fixture() -> Session {
         doc.icc_profile = Some(photocraft_cms::Builtin::AcesCg.profile().to_bytes());
         let surface = doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap();
         let format = surface.format();
-        let bytes: Vec<f32> = (0..H).flat_map(|y| (0..W).map(move |x| (x, y))).flat_map(|(x, y)| photocraft_raster::from_rgba(&format, source_pixel(x, y))).collect();
+        let bytes: Vec<f32> =
+            (0..H).flat_map(|y| (0..W).map(move |x| (x, y))).flat_map(|(x, y)| photocraft_raster::from_rgba(&format, source_pixel(x, y))).collect();
         surface.write_region(Rect::from_xywh(0, 0, W as u32, H as u32), &bytes);
         Ok(())
     })

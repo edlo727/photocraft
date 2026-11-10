@@ -118,7 +118,7 @@ pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool) 
         app.secondary_erase = false;
         // A barrel press while the menu is up is not one to open the picker for later.
         if let Some(n) = app.services.barrel_presses.as_ref().map(|f| f()) {
-            response.ctx.data_mut(|d| d.insert_temp(egui::Id::new("pc_barrel_presses_seen"), n));
+            response.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("pc_barrel_presses_seen"), n));
         }
         return Buttons::default();
     }
@@ -209,12 +209,12 @@ pub fn canvas_buttons(app: &mut PhotocraftApp, response: &Response, tool: Tool) 
 /// already let go when the tap's release frame runs) is read from the press frame.
 fn barrel_clicks(app: &PhotocraftApp, response: &Response, physical_right: bool) -> (bool, bool, bool) {
     let presses = app.services.barrel_presses.as_ref().map(|f| f());
-    let seen_id = egui::Id::new("pc_barrel_presses_seen");
+    let seen_id = egui::Id::unique("pc_barrel_presses_seen");
     let seen = response.ctx.data(|d| d.get_temp::<u32>(seen_id));
     if let Some(n) = presses {
         response.ctx.data_mut(|d| d.insert_temp(seen_id, n));
     }
-    let barrel_id = egui::Id::new("pc_barrel_was_down");
+    let barrel_id = egui::Id::unique("pc_barrel_was_down");
     let barrel_was = response.ctx.data(|d| d.get_temp::<bool>(barrel_id)).unwrap_or(false);
     response.ctx.data_mut(|d| d.insert_temp(barrel_id, physical_right));
     let barrel_edge = match (presses, seen) {
@@ -222,7 +222,7 @@ fn barrel_clicks(app: &PhotocraftApp, response: &Response, physical_right: bool)
         (Some(_), None) => false,
         (None, _) => physical_right && !barrel_was,
     };
-    let at_press_id = egui::Id::new("pc_barrel_at_press");
+    let at_press_id = egui::Id::unique("pc_barrel_at_press");
     let primary_pressed = response.ctx.input(|i| i.pointer.primary_pressed());
     if primary_pressed {
         response.ctx.data_mut(|d| d.insert_temp(at_press_id, physical_right));

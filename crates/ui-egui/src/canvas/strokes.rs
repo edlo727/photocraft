@@ -1145,11 +1145,11 @@ pub(crate) fn end_gpu_stroke(app: &mut PhotocraftApp) {
 pub(crate) fn sweep_gpu_stroke(app: &mut PhotocraftApp, ctx: &egui::Context) {
     // A stroke landing in bands finishes before the next lands (that would refresh the rest at
     // once); the next one's write carries on meanwhile.
-    if app.gpu_band.as_ref().is_some_and(|b| app.session.documents().iter().all(|st| st.doc.id != b.doc)) {
-        if let (Some(b), Some(gpu)) = (app.gpu_band.take(), &app.gpu) {
-            for slot in b.slots {
-                gpu.stroke_end(slot);
-            }
+    if app.gpu_band.as_ref().is_some_and(|b| app.session.documents().iter().all(|st| st.doc.id != b.doc))
+        && let (Some(b), Some(gpu)) = (app.gpu_band.take(), &app.gpu)
+    {
+        for slot in b.slots {
+            gpu.stroke_end(slot);
         }
     }
     if !app.gpu_commits.is_empty() && app.gpu_band.is_none() {

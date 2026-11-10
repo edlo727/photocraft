@@ -37,8 +37,7 @@ fn write(s: &mut Session, px: impl Fn(i32, i32) -> [f32; 4]) {
         doc.icc_profile = Some(photocraft_cms::Builtin::AcesCg.profile().to_bytes());
         let surface = doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap();
         let format = surface.format();
-        let bytes: Vec<f32> =
-            (0..H).flat_map(|y| (0..W).map(move |x| (x, y))).flat_map(|(x, y)| photocraft_raster::from_rgba(&format, px(x, y))).collect();
+        let bytes: Vec<f32> = (0..H).flat_map(|y| (0..W).map(move |x| (x, y))).flat_map(|(x, y)| photocraft_raster::from_rgba(&format, px(x, y))).collect();
         surface.write_region(Rect::from_xywh(0, 0, W as u32, H as u32), &bytes);
         Ok(())
     })
@@ -220,14 +219,22 @@ const MUST_BE_INVARIANT: &[&str] = &[
 /// plain averages their names suggest. Rescaling the control against local brightness would make
 /// them exposure invariant, and would change their 8- and 16-bit behaviour, so it is a decision
 /// rather than a fix.
-const THRESHOLD_BASED: &[&str] =
-    &["filter.noise.despeckle", "filter.sharpen.sharpenEdges", "filter.blur.smartBlur", "filter.blur.surfaceBlur", "filter.noise.dustAndScratches", "filter.noise.reduceNoise"];
+const THRESHOLD_BASED: &[&str] = &[
+    "filter.noise.despeckle",
+    "filter.sharpen.sharpenEdges",
+    "filter.blur.smartBlur",
+    "filter.blur.surfaceBlur",
+    "filter.noise.dustAndScratches",
+    "filter.noise.reduceNoise",
+];
 
 /// Symmetric blurs, whose step edge lands on exactly half the step in linear light.
-const SYMMETRIC_BLURS: &[&str] = &["filter.blur.gaussianBlur", "filter.blur.boxBlur", "filter.blur.blur", "filter.blur.blurMore", "filter.blur.motionBlur", "filter.blur.shapeBlur"];
+const SYMMETRIC_BLURS: &[&str] =
+    &["filter.blur.gaussianBlur", "filter.blur.boxBlur", "filter.blur.blur", "filter.blur.blurMore", "filter.blur.motionBlur", "filter.blur.shapeBlur"];
 
 /// Blurs that spread an opaque patch into transparency, where its colour must survive.
-const SOFTENING_BLURS: &[&str] = &["filter.blur.gaussianBlur", "filter.blur.boxBlur", "filter.blur.motionBlur", "filter.blur.shapeBlur", "filter.blur.lensBlur"];
+const SOFTENING_BLURS: &[&str] =
+    &["filter.blur.gaussianBlur", "filter.blur.boxBlur", "filter.blur.motionBlur", "filter.blur.shapeBlur", "filter.blur.lensBlur"];
 
 /// Looks up a filter's settings from [`filters`].
 fn params(id: &str) -> Value {
@@ -295,11 +302,7 @@ fn linear_behaviour_report() {
         };
         // A step edge only means something for a symmetric blur; a distort moves the edge instead.
         let edge = |v: f32| {
-            if SYMMETRIC_BLURS.contains(&id) {
-                edge_mean(id, &p, v).map_or_else(|| "–".to_string(), |g| format!("{g:.4}"))
-            } else {
-                "n/a".to_string()
-            }
+            if SYMMETRIC_BLURS.contains(&id) { edge_mean(id, &p, v).map_or_else(|| "–".to_string(), |g| format!("{g:.4}")) } else { "n/a".to_string() }
         };
         let col = edge_colour(id, &p).map_or_else(|| "–".to_string(), |r| format!("{:.0}%", r * 100.0));
         let row = format!("| `{id}` | {inv} | {} | {} | {col} |", edge(1.0), edge(4.0));

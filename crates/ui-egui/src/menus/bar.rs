@@ -211,7 +211,7 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
         } else if id == "help.safeUpdate" {
             #[cfg(target_os = "windows")]
             let _ = std::process::Command::new("cmd")
-                .args(&["/C", "git fetch origin && git rebase origin/main"])
+                .args(["/C", "git fetch origin && git rebase origin/main"])
                 .spawn();
             
             #[cfg(not(target_os = "windows"))]
@@ -258,21 +258,21 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                         .spacing([12.0, 8.0])
                         .show(ui, |ui| {
                             ui.label("Compression:");
-                            egui::ComboBox::from_id_salt("exr_comp_combo")
-                                .selected_text(match exr_state.compression {
-                                    photocraft_io::exr_export::NukeCompression::None => "Uncompressed",
-                                    photocraft_io::exr_export::NukeCompression::Rle => "RLE (run length)",
-                                    photocraft_io::exr_export::NukeCompression::ZipScanline => "ZIP (1 scanline)",
-                                    photocraft_io::exr_export::NukeCompression::ZipBlock => "ZIP (16 scanlines)",
-                                    photocraft_io::exr_export::NukeCompression::Piz => "PIZ (wavelet lossless)",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut exr_state.compression, photocraft_io::exr_export::NukeCompression::ZipScanline, "ZIP (1 scanline)");
-                                    ui.selectable_value(&mut exr_state.compression, photocraft_io::exr_export::NukeCompression::ZipBlock, "ZIP (16 scanlines)");
-                                    ui.selectable_value(&mut exr_state.compression, photocraft_io::exr_export::NukeCompression::Piz, "PIZ (wavelet lossless)");
-                                    ui.selectable_value(&mut exr_state.compression, photocraft_io::exr_export::NukeCompression::Rle, "RLE (run length)");
-                                    ui.selectable_value(&mut exr_state.compression, photocraft_io::exr_export::NukeCompression::None, "Uncompressed");
-                                });
+                            use photocraft_io::exr_export::NukeCompression as Comp;
+                            crate::widgets::dropdown(
+                                ui,
+                                "exr_comp_combo",
+                                "Compression",
+                                &mut exr_state.compression,
+                                &[
+                                    (Comp::ZipScanline, "ZIP (1 scanline)"),
+                                    (Comp::ZipBlock, "ZIP (16 scanlines)"),
+                                    (Comp::Piz, "PIZ (wavelet lossless)"),
+                                    (Comp::Rle, "RLE (run length)"),
+                                    (Comp::None, "Uncompressed"),
+                                ],
+                                220.0,
+                            );
                             ui.end_row();
 
                             ui.label("Data Type:");
@@ -283,17 +283,26 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                             ui.end_row();
 
                             ui.label("Groups:");
-                            egui::ComboBox::from_id_salt("exr_groups_combo")
-                                .selected_text(match exr_state.groups {
-                                    photocraft_io::exr_export::GroupExport::Branches => "Keep layers (group branches)",
-                                    photocraft_io::exr_export::GroupExport::Merged => "Merge each group into one layer",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut exr_state.groups, photocraft_io::exr_export::GroupExport::Branches, "Keep layers (group branches)")
-                                        .on_hover_text("Every layer is its own EXR layer; each group is rebuilt in the .nk as a branch merged with the group's blend mode, opacity and mask.");
-                                    ui.selectable_value(&mut exr_state.groups, photocraft_io::exr_export::GroupExport::Merged, "Merge each group into one layer")
-                                        .on_hover_text("Each group is merged into one EXR layer, as Layer › Merge Group does, keeping the group's blend mode, opacity and mask. Your document is not changed.");
-                                });
+                            use photocraft_io::exr_export::GroupExport as Groups;
+                            crate::widgets::dropdown_with_tooltips(
+                                ui,
+                                "exr_groups_combo",
+                                "Groups",
+                                &mut exr_state.groups,
+                                &[
+                                    (
+                                        Groups::Branches,
+                                        "Keep layers (group branches)",
+                                        "Every layer is its own EXR layer; each group is rebuilt in the .nk as a branch merged with the group's blend mode, opacity and mask.",
+                                    ),
+                                    (
+                                        Groups::Merged,
+                                        "Merge each group into one layer",
+                                        "Each group is merged into one EXR layer, as Layer \u{203a} Merge Group does, keeping the group's blend mode, opacity and mask. Your document is not changed.",
+                                    ),
+                                ],
+                                260.0,
+                            );
                             ui.end_row();
                         });
 

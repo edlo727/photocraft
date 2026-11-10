@@ -326,6 +326,29 @@ fn handle_eyedropper_event(app: &mut PhotocraftApp, tool: Tool, ev: ToolEvent, m
 }
 
 /// Tool state machine. Shared by mouse input and automation.
+/// A press on a locked layer (the Background without a selection, say) gets no drag, and
+/// Photoshop's message once the pointer moves — a click on its own says nothing. `true` when the
+/// event was spent here. ⌘ with a selection tool lands in this case (#896); the Move tool is
+/// handled later, once Auto-Select has picked the layer.
+fn handle_locked_layer(app: &mut PhotocraftApp, ev: ToolEvent, tool: Tool, mods: egui::Modifiers) -> bool {
+    match ev {
+        ToolEvent::Down { x, y, .. } if tool != Tool::Move && app.ui.transform.is_none() && crate::move_lock::blocked(app, tool, [x, y], mods) => {
+            app.move_blocked = true;
+            true
+        }
+        ToolEvent::Move { .. } if app.move_blocked => {
+            app.move_blocked = false;
+            crate::move_lock::prompt(app);
+            true
+        }
+        ToolEvent::Up { .. } if app.move_blocked => {
+            app.move_blocked = false;
+            true
+        }
+        _ => false,
+    }
+}
+
 pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) {
     if consumes_cancelled_vector_event(app, ev) {
         return;
@@ -336,24 +359,8 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
     if handle_eyedropper_event(app, tool, ev, mods) {
         return;
     }
-    // A locked layer (the Background without a selection, say): no drag, and Photoshop's message
-    // once the pointer moves (a click says nothing). ⌘ with a selection tool here (#896); the Move
-    // tool below, once Auto-Select has picked the layer.
-    match ev {
-        ToolEvent::Down { x, y, .. } if tool != Tool::Move && app.ui.transform.is_none() && crate::move_lock::blocked(app, tool, [x, y], mods) => {
-            app.move_blocked = true;
-            return;
-        }
-        ToolEvent::Move { .. } if app.move_blocked => {
-            app.move_blocked = false;
-            crate::move_lock::prompt(app);
-            return;
-        }
-        ToolEvent::Up { .. } if app.move_blocked => {
-            app.move_blocked = false;
-            return;
-        }
-        _ => {}
+    if handle_locked_layer(app, ev, tool, mods) {
+        return;
     }
     if handle_move_pointer(app, ev, tool, mods) {
         return;

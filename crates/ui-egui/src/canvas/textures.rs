@@ -452,6 +452,59 @@ pub(crate) fn effect_reach(layers: &[photocraft_doc::Layer]) -> i32 {
         .unwrap_or(0)
 }
 
+/// What [`gpu_damage`] needs about the document and the view, beyond `app` itself.
+struct DamageCx {
+    idx: usize,
+    id: photocraft_doc::DocId,
+    /// The revision and display key the GPU cache last saw, if it has seen this document at all.
+    seen: Option<(u64, u64)>,
+    /// This frame's revision and raw display key.
+    now: (u64, u64),
+    display_key: u64,
+    last_damage: Option<DRect>,
+    /// The region a blend preview may have to refresh, and the viewport itself.
+    blend_visible: DRect,
+    visible: DRect,
+}
+
+/// The region the GPU canvas must redraw for this document: what changed since the cache last
+/// saw it, widened by the stroke bands and dialog previews that land outside it. Also returns the
+/// Large Brush Mode damage taken on the way, which the caller draws again further down.
+fn gpu_damage(app: &mut PhotocraftApp, cx: &DamageCx) -> (Option<DRect>, Option<DRect>) {
+    let (revision, raw_key) = cx.now;
+    let damage_start = crate::gpu_canvas::now_ms();
+    let mut damage = cx.seen.and_then(|seen| damage_since(app, cx.idx, seen, cx.now, cx.display_key, cx.last_damage));
+    if let Some(region) = damage {
+        damage = Some(crate::blend_preview::clip_damage(app, cx.id, revision, raw_key, region, cx.blend_visible));
+    }
+    app.perf.stage.damage_ms += crate::gpu_canvas::now_ms() - damage_start;
+    // A stroke landing in bands that another edit overtook: the rows it hadn't refreshed go with
+    // this refresh.
+    if let Some(rest) = super::strokes::flush_band(app, cx.id, revision) {
+        damage = damage.map(|d| d.union(&rest));
+    }
+    // Large Brush Mode strokes painted into their layers: where their new dabs land.
+    let live_damage = super::strokes::take_live_damage(app, cx.id);
+    if let Some(r) = live_damage {
+        damage = damage.map(|d| d.union(&r));
+    }
+    // To an adjustment dialog's preview: only what the view shows now (the rest as it moves there).
+    // Nothing to move if there is no damage: the previews only narrow what is already redrawn.
+    let from = cx.seen.filter(|s| s.0 == revision && damage.is_some()).map(|s| s.1 ^ cx.display_key);
+    if let Some(from) = from
+        && let Some(r) = crate::adjust_preview::switch_region(app, cx.id, revision, from, raw_key)
+    {
+        damage = Some(crate::adjust_preview::switch_damage(app, raw_key, r, cx.visible));
+    }
+    // The same for a Properties-panel drag's previews.
+    if let Some(from) = from
+        && let Some(r) = crate::adjust_preview::live_switch_region(app, cx.id, revision, from, raw_key)
+    {
+        damage = Some(crate::adjust_preview::live_switch_damage(app, raw_key, r, cx.visible));
+    }
+    (damage, live_damage)
+}
+
 /// GPU path: make sure document `idx` is current in the GPU canvas. Edits draw their damage;
 /// unchanged lower-stack composites can be reused by the compositor inside that region.
 /// Returns false if there is no GPU canvas.
@@ -473,34 +526,7 @@ pub(super) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     // The texture is shared by every display: only what it stores counts, not the monitor.
     let display_key = texture_key(display.as_deref());
     let seen = app.canvases.get(&(id, GPU_OUTPUT)).map(|c| (c.revision, c.preview_key));
-    let damage_start = crate::gpu_canvas::now_ms();
-    let mut damage = seen.and_then(|seen| damage_since(app, idx, seen, (revision, raw_key), display_key, last_damage));
-    if let Some(region) = damage {
-        damage = Some(crate::blend_preview::clip_damage(app, id, revision, raw_key, region, blend_visible));
-    }
-    app.perf.stage.damage_ms += crate::gpu_canvas::now_ms() - damage_start;
-    // A stroke landing in bands that another edit overtook: the rows it hadn't refreshed go with
-    // this refresh.
-    if let Some(rest) = super::strokes::flush_band(app, id, revision) {
-        damage = damage.map(|d| d.union(&rest));
-    }
-    // Large Brush Mode strokes painted into their layers: where their new dabs land.
-    let live_damage = super::strokes::take_live_damage(app, id);
-    if let Some(r) = live_damage {
-        damage = damage.map(|d| d.union(&r));
-    }
-    // To an adjustment dialog's preview: only what the view shows now (the rest as it moves there).
-    if damage.is_some()
-        && let Some(r) = seen.filter(|s| s.0 == revision).and_then(|s| crate::adjust_preview::switch_region(app, id, revision, s.1 ^ display_key, raw_key))
-    {
-        damage = Some(crate::adjust_preview::switch_damage(app, raw_key, r, visible));
-    }
-    // The same for a Properties-panel drag's previews.
-    if damage.is_some()
-        && let Some(r) = seen.filter(|s| s.0 == revision).and_then(|s| crate::adjust_preview::live_switch_region(app, id, revision, s.1 ^ display_key, raw_key))
-    {
-        damage = Some(crate::adjust_preview::live_switch_damage(app, raw_key, r, visible));
-    }
+    let (mut damage, live_damage) = gpu_damage(app, &DamageCx { idx, id, seen, now: (revision, raw_key), display_key, last_damage, blend_visible, visible });
     let preview_key = raw_key ^ display_key;
     // The Navigator may draw this texture while it holds the plain document or a drag preview
     // that updates the full texture (not an adjustment preview composited only where the view is).

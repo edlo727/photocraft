@@ -400,12 +400,12 @@ impl CurveView {
     }
 
     /// Levels (255 = 1.0) → graph units (0..255 across the shown window).
-    fn to_g(&self, q: [f32; 2]) -> [f32; 2] {
+    fn to_g(self, q: [f32; 2]) -> [f32; 2] {
         [(q[0] / 255.0 - self.x0) / self.sx * 255.0, (q[1] / 255.0 - self.y0) / self.sy * 255.0]
     }
 
     /// Graph units → levels.
-    fn from_g(&self, g: [f32; 2]) -> [f32; 2] {
+    fn levels_from_g(self, g: [f32; 2]) -> [f32; 2] {
         [(self.x0 + g[0] / 255.0 * self.sx) * 255.0, (self.y0 + g[1] / 255.0 * self.sy) * 255.0]
     }
 
@@ -431,6 +431,55 @@ fn grid_step(span: f32) -> f32 {
     let raw = (span / 4.0).max(1e-6);
     let p = 10f32.powf(raw.log10().floor());
     [1.0, 2.0, 5.0, 10.0].into_iter().map(|m| m * p).find(|s| *s >= raw).unwrap_or(10.0 * p)
+}
+
+/// Nuke-style navigation for a lookup curve: the wheel zooms about the pointer and Alt- or
+/// middle-drag pans. Returns whether this drag is a pan, which must not move any point.
+fn zoom_and_pan(ui: &mut egui::Ui, resp: &egui::Response, graph: Rect, view: &mut CurveView, view_id: egui::Id) -> bool {
+    if resp.hovered()
+        && let Some(pos) = resp.hover_pos()
+    {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            let at = [(pos.x - graph.left()) / graph.width().max(1.0), (graph.bottom() - pos.y) / graph.height().max(1.0)];
+            view.zoom((-scroll / 300.0).exp(), at);
+            // The wheel zooms the graph, not the panel around it.
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        }
+    }
+    let alt = ui.input(|i| i.modifiers.alt);
+    if resp.dragged_by(egui::PointerButton::Middle) || (alt && resp.dragged_by(egui::PointerButton::Primary)) {
+        let d = resp.drag_delta();
+        view.pan([d.x / graph.width().max(1.0), d.y / graph.height().max(1.0)]);
+    }
+    ui.data_mut(|d| d.insert_temp(view_id, view.store()));
+    alt || resp.dragged_by(egui::PointerButton::Middle)
+}
+
+/// The Pencil's freehand stroke: it draws while the button is down and commits on release, and
+/// Shift carries on from the last stroke's end in a straight line. Returns whether the map
+/// changed, and whether the stroke has just ended (which commits the edit).
+fn pencil_stroke(ui: &mut egui::Ui, resp: &egui::Response, graph: Rect, mem: egui::Id, map: &mut [f32]) -> (bool, bool) {
+    let stroke_id = mem.with("curves-pencil");
+    let (mut active, mut last): (bool, Option<[f32; 2]>) = ui.data(|d| d.get_temp(stroke_id)).unwrap_or_default();
+    let (mut drawn, mut commit) = (false, false);
+    if resp.is_pointer_button_down_on()
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let q = [
+            ((pos.x - graph.left()) / graph.width().max(1.0) * 255.0).clamp(0.0, 255.0),
+            ((graph.bottom() - pos.y) / graph.height().max(1.0) * 255.0).clamp(0.0, 255.0),
+        ];
+        let from = if active || ui.input(|i| i.modifiers.shift) { last.unwrap_or(q) } else { q };
+        drawn = curve_edit::pencil_line(map, from, q);
+        active = true;
+        last = Some(q);
+    } else if active {
+        active = false;
+        commit = true;
+    }
+    ui.data_mut(|d| d.insert_temp(stroke_id, (active, last)));
+    (drawn, commit)
 }
 
 pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
@@ -489,27 +538,7 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     let (full, resp) = ui.allocate_exact_size(vec2(side, side + 14.0), Sense::click_and_drag());
     let graph = curve_graph(full, side);
     // Zoom (wheel, about the pointer) and pan (Alt or middle drag) before the points are placed.
-    let mut panning = false;
-    if lookup {
-        if resp.hovered()
-            && let Some(pos) = resp.hover_pos()
-        {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                let at = [(pos.x - graph.left()) / graph.width().max(1.0), (graph.bottom() - pos.y) / graph.height().max(1.0)];
-                view.zoom((-scroll / 300.0).exp(), at);
-                // The wheel zooms the graph, not the panel around it.
-                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
-            }
-        }
-        let alt = ui.input(|i| i.modifiers.alt);
-        if resp.dragged_by(egui::PointerButton::Middle) || (alt && resp.dragged_by(egui::PointerButton::Primary)) {
-            let d = resp.drag_delta();
-            view.pan([d.x / graph.width().max(1.0), d.y / graph.height().max(1.0)]);
-        }
-        panning = alt || resp.dragged_by(egui::PointerButton::Middle);
-        ui.data_mut(|d| d.insert_temp(view_id, view.store()));
-    }
+    let panning = lookup && zoom_and_pan(ui, &resp, graph, &mut view, view_id);
     // Points in graph units (0..255 across the shown window); the params hold levels (255 = 1.0).
     let mut pts: Vec<[f32; 2]> = levels.iter().map(|q| view.to_g(*q)).collect();
     ui.data_mut(|d| d.insert_temp(cx.mem.with("curves-graph"), graph));
@@ -517,26 +546,9 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     let mut changed = false;
     let mut drawn = false;
     if pencil {
-        // Pencil: a stroke draws while the button is down and commits on release; Shift
-        // continues from the previous stroke's end in a straight line.
-        let stroke_id = cx.mem.with("curves-pencil");
-        let (mut active, mut last): (bool, Option<[f32; 2]>) = ui.data(|d| d.get_temp(stroke_id)).unwrap_or_default();
-        if resp.is_pointer_button_down_on()
-            && let Some(pos) = resp.interact_pointer_pos()
-        {
-            let q = [
-                ((pos.x - graph.left()) / graph.width().max(1.0) * 255.0).clamp(0.0, 255.0),
-                ((graph.bottom() - pos.y) / graph.height().max(1.0) * 255.0).clamp(0.0, 255.0),
-            ];
-            let from = if active || ui.input(|i| i.modifiers.shift) { last.unwrap_or(q) } else { q };
-            drawn = curve_edit::pencil_line(&mut map, from, q);
-            active = true;
-            last = Some(q);
-        } else if active {
-            active = false;
-            e.commit = true;
-        }
-        ui.data_mut(|d| d.insert_temp(stroke_id, (active, last)));
+        let (stroked, commit) = pencil_stroke(ui, &resp, graph, cx.mem, &mut map);
+        drawn = stroked;
+        e.commit |= commit;
     } else if !panning {
         let interaction = crate::point_curve::interact(ui, &resp, graph, &mut pts, &mut st.gesture);
         changed = interaction.changed;
@@ -655,7 +667,7 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     ui.horizontal(|ui| {
         let i = st.gesture.selected.filter(|i| *i < pts.len() && !pencil);
         // Lookup curves show linear values (0..range); Photoshop's show levels (0..255).
-        let shown = |g: [f32; 2]| if lookup { view.from_g(g).map(|l| l / 255.0) } else { g };
+        let shown = |g: [f32; 2]| if lookup { view.levels_from_g(g).map(|l| l / 255.0) } else { g };
         let (mut vi, mut vo) = i.map_or((0.0, 0.0), |i| {
             let s = shown(pts[i]);
             (s[0], s[1])
@@ -719,7 +731,7 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
         // Back to levels (hundredths of a level, the params' precision; whole levels for
         // Photoshop's curves).
         let out: Vec<[f32; 2]> = if lookup {
-            pts.iter().map(|q| view.from_g(*q).map(|l| (l.clamp(0.0, 255.0 * range) * 100.0).round() / 100.0)).collect()
+            pts.iter().map(|q| view.levels_from_g(*q).map(|l| (l.clamp(0.0, 255.0 * range) * 100.0).round() / 100.0)).collect()
         } else {
             pts.iter().map(|q| [q[0].round(), q[1].round()]).collect()
         };
@@ -1010,7 +1022,7 @@ mod curve_view_tests {
         assert_eq!(full.to_g([510.0, 255.0]), [127.5, 63.75]);
         let v = CurveView { range: 4.0, x0: 0.5, y0: -0.25, sx: 2.0, sy: 1.5 };
         for q in [[0.0, 0.0], [255.0, 127.5], [1020.0, 900.0]] {
-            let back = v.from_g(v.to_g(q));
+            let back = v.levels_from_g(v.to_g(q));
             assert!((back[0] - q[0]).abs() < 1e-3 && (back[1] - q[1]).abs() < 1e-3, "{q:?} → {back:?}");
         }
     }

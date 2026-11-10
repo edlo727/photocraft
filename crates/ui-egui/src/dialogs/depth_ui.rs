@@ -212,7 +212,7 @@ fn preview(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
         return;
     };
     // Lay the box out first, so a press on it this frame shows the original this frame.
-    let scale = (PREVIEW_SIDE as f32 / size.x.max(size.y).max(1.0)).min(1.0).max(f32::MIN_POSITIVE);
+    let scale = (PREVIEW_SIDE as f32 / size.x.max(size.y).max(1.0)).clamp(f32::MIN_POSITIVE, 1.0);
     let box_size = vec2(PREVIEW_SIDE as f32, (size.y * scale).min(PREVIEW_SIDE as f32));
     let (r, resp) = ui.allocate_exact_size(box_size, Sense::click_and_drag());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tl!("Press and hold to see the original"));

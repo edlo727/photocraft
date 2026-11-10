@@ -11,10 +11,14 @@
 use photocraft_engine::Session;
 use serde_json::json;
 
+/// This fork composites text in linear light, so the default is 1.0 rather than Photoshop's
+/// 1.45; the test tracks the constant so the two cannot drift apart again.
+const DEFAULT: f32 = photocraft_compose::psblend::TEXT_GAMMA;
+
 #[test]
 fn blend_text_gamma_setting() {
     let mut s = Session::new();
-    assert!((s.color.settings.blend_text_gamma - 1.45).abs() < 1e-6);
+    assert!((s.color.settings.blend_text_gamma - DEFAULT).abs() < 1e-6);
     assert!(s.execute("edit.colorSettings", json!({"blendTextGamma": 3.0})).is_err());
     // The compositor's (application-wide) gamma follows the setting.
     s.execute("edit.colorSettings", json!({"blendTextGamma": 1.45})).unwrap();
@@ -25,8 +29,8 @@ fn blend_text_gamma_setting() {
     s.execute("edit.colorSettings", json!({"blendTextGamma": 1.8})).unwrap();
     assert!((photocraft_compose::psblend::text_gamma() - 1.8).abs() < 1e-6);
     s.execute("edit.colorSettings", json!({"blendTextGamma": true})).unwrap();
-    assert!((s.color.settings.blend_text_gamma - 1.45).abs() < 1e-6);
-    assert!((photocraft_compose::psblend::text_gamma() - 1.45).abs() < 1e-6);
+    assert!((s.color.settings.blend_text_gamma - DEFAULT).abs() < 1e-6);
+    assert!((photocraft_compose::psblend::text_gamma() - DEFAULT).abs() < 1e-6);
 
     // `prefs.set` and `prefs.reset` on `colorSettings` move the compositor's gamma too (#987).
     // Same function, not a second test: tests in one binary run concurrently.
@@ -36,12 +40,12 @@ fn blend_text_gamma_setting() {
     assert_eq!(photocraft_compose::psblend::text_gamma(), 1.0);
     assert!(in_sync(&s));
     s.execute("prefs.reset", json!({"path": "colorSettings.blendTextGamma"})).unwrap();
-    assert!((photocraft_compose::psblend::text_gamma() - 1.45).abs() < 1e-6);
+    assert!((photocraft_compose::psblend::text_gamma() - DEFAULT).abs() < 1e-6);
     assert!(in_sync(&s));
     for reset in [json!({"path": "colorSettings"}), json!({})] {
         s.execute("edit.colorSettings", json!({"blendTextGamma": 1.8})).unwrap();
         s.execute("prefs.reset", reset).unwrap();
-        assert!((photocraft_compose::psblend::text_gamma() - 1.45).abs() < 1e-6);
+        assert!((photocraft_compose::psblend::text_gamma() - DEFAULT).abs() < 1e-6);
         assert!(in_sync(&s));
     }
 }

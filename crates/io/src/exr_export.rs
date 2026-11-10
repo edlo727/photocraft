@@ -1023,7 +1023,12 @@ impl Default for NukeExportOptions {
     }
 }
 
-pub fn export_multichannel_exr_with_options(doc: &Document, path: &Path, options: NukeExportOptions, progress: Progress<'_>) -> std::result::Result<(), String> {
+pub fn export_multichannel_exr_with_options(
+    doc: &Document,
+    path: &Path,
+    options: NukeExportOptions,
+    progress: Progress<'_>,
+) -> std::result::Result<(), String> {
     let NukeExportOptions { compression, include_flat_beauty, use_32bit, write_nuke_script, groups } = options;
     const CANCELLED: &str = "cancelled";
     let step = |f: f32, m: &str| if progress(f, m) { Ok(()) } else { Err(CANCELLED.to_string()) };
