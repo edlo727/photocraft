@@ -121,22 +121,22 @@ pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
 }
 
 /// The eight modes where Photoshop folds a Fill below 100 % into the blend itself rather than
-/// treating it as opacity. A 32-bit document composites as Nuke does, where Fill is plain
-/// opacity, so the rule applies only at the integer depths ([`hdr`]).
+/// treating it as opacity. It is a property of the mode, not of the document: `advanced_active`
+/// asks it while planning, outside any render scope, so it must not depend on [`hdr`]. What the
+/// depth does decide is clipping, which [`blend_rgb`] handles inside [`blend_rgb_fill`].
 #[inline]
 pub fn fill_is_special(mode: BlendMode) -> bool {
-    !hdr()
-        && matches!(
-            mode,
-            BlendMode::ColorBurn
-                | BlendMode::LinearBurn
-                | BlendMode::ColorDodge
-                | BlendMode::LinearDodge
-                | BlendMode::VividLight
-                | BlendMode::LinearLight
-                | BlendMode::HardMix
-                | BlendMode::Difference
-        )
+    matches!(
+        mode,
+        BlendMode::ColorBurn
+            | BlendMode::LinearBurn
+            | BlendMode::ColorDodge
+            | BlendMode::LinearDodge
+            | BlendMode::VividLight
+            | BlendMode::LinearLight
+            | BlendMode::HardMix
+            | BlendMode::Difference
+    )
 }
 
 /// [`blend_rgb`] with Fill folded in for [`fill_is_special`]: the source moves towards the mode's
