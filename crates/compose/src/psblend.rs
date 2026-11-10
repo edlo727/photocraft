@@ -41,7 +41,7 @@ pub fn with_hdr<R>(hdr: bool, f: impl FnOnce() -> R) -> R {
 /// [`with_hdr`] sets it per document (`render::flatten`); Photoshop clips the non-separable
 /// modes and Add at 1 at the integer depths, and the PSD merged-image oracle holds us to that.
 #[inline]
-fn hdr() -> bool {
+pub(crate) fn hdr() -> bool {
     HDR.with(std::cell::Cell::get)
 }
 
@@ -50,14 +50,42 @@ pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
     if hdr() { generic::blend_rgb_hdr(mode, cb, cs) } else { generic::blend_rgb(mode, cb, cs) }
 }
 
+/// The eight modes where Photoshop folds a Fill below 100 % into the blend itself rather than
+/// treating it as opacity. A 32-bit document composites as Nuke does, where Fill is plain
+/// opacity, so the rule applies only at the integer depths ([`hdr`]).
 #[inline]
-pub fn fill_is_special(_mode: BlendMode) -> bool {
-    false
+pub fn fill_is_special(mode: BlendMode) -> bool {
+    !hdr()
+        && matches!(
+            mode,
+            BlendMode::ColorBurn
+                | BlendMode::LinearBurn
+                | BlendMode::ColorDodge
+                | BlendMode::LinearDodge
+                | BlendMode::VividLight
+                | BlendMode::LinearLight
+                | BlendMode::HardMix
+                | BlendMode::Difference
+        )
 }
 
+/// [`blend_rgb`] with Fill folded in for [`fill_is_special`]: the source moves towards the mode's
+/// neutral by `fill` before it blends.
 #[inline]
-pub fn blend_rgb_fill(mode: BlendMode, cb: [f32; 3], cs: [f32; 3], _fill: f32) -> [f32; 3] {
-    blend_rgb(mode, cb, cs)
+pub fn blend_rgb_fill(mode: BlendMode, cb: [f32; 3], cs: [f32; 3], fill: f32) -> [f32; 3] {
+    let f = fill.clamp(0.0, 1.0);
+    if f >= 1.0 || !fill_is_special(mode) {
+        return blend_rgb(mode, cb, cs);
+    }
+    let toward = |neutral: f32| -> [f32; 3] { std::array::from_fn(|i| neutral + (cs[i] - neutral) * f) };
+    match mode {
+        // Hard Mix at Fill f: (cb − f·(1 − cs)) / (1 − f), clamped. At f = 1 it is the hard
+        // threshold (cb + cs ≥ 1), at f = 0 the backdrop.
+        BlendMode::HardMix => std::array::from_fn(|i| ((cb[i] - f * (1.0 - cs[i])) / (1.0 - f)).clamp(0.0, 1.0)),
+        BlendMode::ColorBurn | BlendMode::LinearBurn => blend_rgb(mode, cb, toward(1.0)),
+        BlendMode::VividLight | BlendMode::LinearLight => blend_rgb(mode, cb, toward(0.5)),
+        _ => blend_rgb(mode, cb, toward(0.0)),
+    }
 }
 
 #[inline]
@@ -155,10 +183,9 @@ fn normal_rgb(backdrop: [f32; 4], source: [f32; 4], as_: f32, ao: f32) -> [f32; 
     ]
 }
 
-pub const TEXT_GAMMA: f32 = 1.0;
+pub const TEXT_GAMMA: f32 = 1.45;
 
-static TEXT_GAMMA_SETTING: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0x3f80_0000); // 1.0f32
+static TEXT_GAMMA_SETTING: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3fb9_999a); // 1.45f32
 
 pub fn set_text_gamma(gamma: f32) {
     let g = if gamma.is_finite() { gamma.clamp(1.0, 2.2) } else { TEXT_GAMMA };
@@ -169,14 +196,15 @@ pub fn text_gamma() -> f32 {
     f32::from_bits(TEXT_GAMMA_SETTING.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// Into the text blending space: linear light raised to `1 / gamma`.
 #[inline]
-pub fn text_encode(v: f32, _gamma: f32) -> f32 {
-    v
+pub fn text_encode(v: f32, gamma: f32) -> f32 {
+    photocraft_color::convert::srgb_to_linear(v.max(0.0)).powf(1.0 / gamma)
 }
 
 #[inline]
-pub fn text_decode(v: f32, _gamma: f32) -> f32 {
-    v
+pub fn text_decode(v: f32, gamma: f32) -> f32 {
+    photocraft_color::convert::linear_to_srgb(v.max(0.0).powf(gamma))
 }
 
 #[inline]
@@ -185,9 +213,32 @@ pub fn composite_gamma(
     backdrop: [f32; 4],
     source: [f32; 4],
     opacity: f32,
-    _gamma: f32,
+    gamma: f32,
 ) -> [f32; 4] {
-    composite(mode, backdrop, source, opacity)
+    if gamma == 1.0 {
+        return composite(mode, backdrop, source, opacity);
+    }
+    let ab = backdrop[3];
+    let as_ = source[3] * opacity;
+    if as_ <= 0.0 {
+        return backdrop;
+    }
+    let ao = as_ + ab * (1.0 - as_);
+    if ao <= 0.0 {
+        return [0.0; 4];
+    }
+    let cb = [backdrop[0], backdrop[1], backdrop[2]];
+    let cs = [source[0], source[1], source[2]];
+    let b = blend_rgb(mode, cb, cs);
+    let (wb, ws, wbs) = ((1.0 - as_) * ab / ao, (1.0 - ab) * as_ / ao, as_ * ab / ao);
+    let g = |v: f32| text_encode(v, gamma);
+    let ginv = |v: f32| text_decode(v, gamma);
+    let mut out = [0.0f32; 4];
+    for i in 0..3 {
+        out[i] = ginv(wb * g(cb[i]) + ws * g(cs[i]) + wbs * g(b[i]));
+    }
+    out[3] = ao;
+    out
 }
 
 pub fn composite_atop(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {

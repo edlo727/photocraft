@@ -11,8 +11,8 @@
 use photocraft_engine::Session;
 use serde_json::json;
 
-/// This fork composites text in linear light, so the default is 1.0 rather than Photoshop's
-/// 1.45; the test tracks the constant so the two cannot drift apart again.
+/// Photoshop's default. The test tracks the constant so the setting and the compositor cannot
+/// drift apart again (32-bit documents skip the gamma in `composite::text_gamma`, not here).
 const DEFAULT: f32 = photocraft_compose::psblend::TEXT_GAMMA;
 
 #[test]
