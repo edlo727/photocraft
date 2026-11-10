@@ -18,6 +18,12 @@ use crate::image::Image;
 use crate::noise::hash01;
 use crate::{Ctx, MezzotintType};
 
+/// A Pointillize dot's colour with its brightness jitter. In-range samples stay in 0..1 as they
+/// always did; a 32-bit highlight above 1.0 or a wide-gamut negative keeps its value.
+fn jittered(v: f32, j: f32) -> f32 {
+    if (0.0..=1.0).contains(&v) { (v + j).clamp(0.0, 1.0) } else { v + j }
+}
+
 /// Colour Halftone: each channel is screened at its own angle into dots
 /// whose area follows the channel's ink (1 − value in additive models).
 pub(crate) fn color_halftone(src: &Image, out: Rect, ctx: &Ctx, max_radius: f32, angles: [f32; 4]) -> Vec<f32> {
@@ -364,7 +370,7 @@ fn pointillize_direct(src: &Image, out: Rect, ctx: &Ctx, cell_size: f32, seed: u
             let cc = ncol(ctx, n);
             let sub = subtractive(ctx);
             for d in dot.iter_mut().take(cc) {
-                *d = (*d + if sub { -j } else { j }).clamp(0.0, 1.0);
+                *d = jittered(*d, if sub { -j } else { j });
             }
             let k = (depth + 0.5).clamp(0.0, 1.0);
             for c in 0..n {

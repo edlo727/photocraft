@@ -64,7 +64,7 @@ impl Grid {
                 let radius = if dots {
                     let j = (hash01(gx, gy, 17, seed) - 0.5) * 0.08;
                     for value in color.iter_mut().take(cc) {
-                        *value = (*value + if sub { -j } else { j }).clamp(0.0, 1.0);
+                        *value = super::jittered(*value, if sub { -j } else { j });
                     }
                     cell * (0.45 + 0.35 * hash01(gx, gy, 13, seed))
                 } else {

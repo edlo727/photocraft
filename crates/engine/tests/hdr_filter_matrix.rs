@@ -170,3 +170,31 @@ fn hdr_filter_matrix() {
     let _ = std::fs::write(&path, &report);
     println!("written to {}", path.display());
 }
+
+/// One filter at its defaults on the fixture.
+fn run(id: &str) -> Measure {
+    let mut s = fixture();
+    let before = pixels(&s);
+    s.execute(id, json!({})).unwrap();
+    measure(&before, &pixels(&s))
+}
+
+/// The filters fixed after the first report keep 32-bit values (unlike the report, this one fails).
+#[test]
+fn fixed_filters_keep_32_bit_values() {
+    // A warp moves pixels: the 4.0 highlight survives.
+    let m = run("filter.adaptiveWideAngle");
+    assert!(m.max > 1.5, "Adaptive Wide Angle clipped the highlight: max {}", m.max);
+    // Relief across the edge of the highlight is brighter than 1.0, and never negative.
+    let m = run("filter.stylize.emboss");
+    assert!(m.max > 1.0 + 1e-3 && m.min >= 0.0, "Emboss: max {}, min {}", m.max, m.min);
+    // Dots take the colour under them, highlight included.
+    let m = run("filter.pixelate.pointillize");
+    assert!(m.max > 1.5, "Pointillize clipped the highlight: max {}", m.max);
+    // Highlights invert to black, not below it.
+    let m = run("filter.stylize.solarize");
+    assert!(m.hot_core.iter().all(|&v| v >= 0.0), "Solarize went negative: {:?}", m.hot_core);
+    // Wide-gamut negatives survive being lit.
+    let m = run("filter.render.lightingEffects");
+    assert!(m.min < 0.0, "Lighting Effects clamped negatives: min {}", m.min);
+}

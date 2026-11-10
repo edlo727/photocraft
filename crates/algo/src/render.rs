@@ -323,7 +323,9 @@ pub(crate) fn lighting(src: &Image, out: Rect, ctx: &Ctx, spec: &LightingSpec) -
             }
         }
         for k in 0..3 {
-            c[k] = ((base[k] * lit[k] + spc[k]) * expo).max(0.0);
+            // A negative sample (wide-gamut 32-bit) stays negative, scaled by the light; anything
+            // else can't be pushed below black.
+            c[k] = if base[k] < 0.0 { (base[k] * lit[k].max(0.0) + spc[k]) * expo } else { ((base[k] * lit[k] + spc[k]) * expo).max(0.0) };
         }
         set_rgba(ctx, px, c);
     }
