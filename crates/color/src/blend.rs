@@ -852,6 +852,19 @@ pub fn composite_atop(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opa
     composite_atop_with(mode, backdrop, source, opacity, blend_rgb)
 }
 
+/// [`composite`] or [`composite_hdr`] by the surface's depth: a 32-bit float document keeps
+/// values above 1 (Add is how light adds in HDR, and Nuke's operations work the same way), while
+/// the integer depths clip as Photoshop does. Editing and painting commands choose with this, the
+/// way the compositor chooses from the document.
+pub fn composite_for(sample: crate::SampleType, mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    if sample == crate::SampleType::F32 { composite_hdr(mode, backdrop, source, opacity) } else { composite(mode, backdrop, source, opacity) }
+}
+
+/// [`composite_atop`] or [`composite_atop_hdr`] by the surface's depth (see [`composite_for`]).
+pub fn composite_atop_for(sample: crate::SampleType, mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    if sample == crate::SampleType::F32 { composite_atop_hdr(mode, backdrop, source, opacity) } else { composite_atop(mode, backdrop, source, opacity) }
+}
+
 /// [`composite_atop`] for 32-bit float documents: the blend keeps values above 1.
 pub fn composite_atop_hdr(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
     composite_atop_with(mode, backdrop, source, opacity, blend_rgb_hdr)

@@ -76,8 +76,6 @@ fn composite_area(
     // Composite tile by tile (in parallel on native); tiles with zero coverage are left untouched,
     // so their copy-on-write storage (and GPU residency) survives.
     let fmt = s.format();
-    // A 32-bit surface keeps values above 1: Add really adds light there.
-    let hdr = fmt.sample == photocraft_color::SampleType::F32;
     let n = fmt.channels();
     let tiles: Vec<Rect> = area.tiles().map(|tc| tc.rect().intersect(&area)).filter(|r| !r.is_empty()).collect();
     let src: &Surface = s;
@@ -100,10 +98,8 @@ fn composite_area(
                 let px = &mut region[i..i + n];
                 let d = photocraft_raster::to_rgba(&fmt, px);
                 let o = match mode {
-                    FillMode::Blend(m) if lock_transparency && hdr => blend::composite_atop_hdr(m, d, color(x, y), k),
-                    FillMode::Blend(m) if lock_transparency => blend::composite_atop(m, d, color(x, y), k),
-                    FillMode::Blend(m) if hdr => blend::composite_hdr(m, d, color(x, y), k),
-                    FillMode::Blend(m) => blend::composite(m, d, color(x, y), k),
+                    FillMode::Blend(m) if lock_transparency => blend::composite_atop_for(fmt.sample, m, d, color(x, y), k),
+                    FillMode::Blend(m) => blend::composite_for(fmt.sample, m, d, color(x, y), k),
                     // Locked transparency keeps the alpha, so Clear leaves the pixel as it is.
                     FillMode::Clear if lock_transparency => d,
                     FillMode::Clear => [d[0], d[1], d[2], d[3] * (1.0 - k.min(1.0))],

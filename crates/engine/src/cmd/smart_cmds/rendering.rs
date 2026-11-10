@@ -90,7 +90,7 @@ pub(super) fn blend_surfaces(base: &Surface, top: &Surface, mode: BlendMode, opa
         let b = photocraft_raster::to_rgba(&fmt, bp);
         let t = photocraft_raster::to_rgba(&fmt, tp);
         if composite_coverage {
-            let rgba = photocraft_color::blend::composite(mode, b, t, opacity);
+            let rgba = photocraft_color::blend::composite_for(fmt.sample, mode, b, t, opacity);
             photocraft_raster::from_rgba_into(&fmt, rgba, op);
             continue;
         }

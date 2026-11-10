@@ -265,7 +265,7 @@ fn stamp_dab(
                 }
             } else {
                 let d = to_rgba(fmt, dst);
-                let o = photocraft_color::blend::composite(mode, d, *px, k);
+                let o = photocraft_color::blend::composite_for(fmt.sample, mode, d, *px, k);
                 from_rgba_into(fmt, o, &mut enc);
                 if let Some(src) = enc.get(..n) {
                     dst.copy_from_slice(src);
