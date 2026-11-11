@@ -678,6 +678,7 @@ pub fn apply_liquify(src: &Surface, field: &LiquifyField) -> Surface {
     let fmt = src.format();
     let n = fmt.channels();
     let alpha = fmt.alpha;
+    let hdr = fmt.sample == photocraft_color::SampleType::F32;
     let b = field.bounds;
     let mut out = src.clone();
     if field.is_identity() || b.is_empty() {
@@ -775,15 +776,19 @@ pub fn apply_liquify(src: &Surface, field: &LiquifyField) -> Surface {
                     }
                 }
                 let o = (y * w + x) * n;
+                // Alpha is coverage and belongs in 0..1 whatever the depth; colour on a float
+                // surface is scene-linear, where a warp moves the highlights rather than clipping
+                // them (`crate::warp` does the same).
                 if alpha {
                     let al = acc[n - 1].clamp(0.0, 1.0);
                     outp[o + n - 1] = al as f32;
                     for c in 0..n - 1 {
-                        outp[o + c] = if al > 0.0 { (acc[c] / al).clamp(0.0, 1.0) as f32 } else { 0.0 };
+                        let v = if al > 0.0 { acc[c] / al } else { 0.0 };
+                        outp[o + c] = if hdr { v } else { v.clamp(0.0, 1.0) } as f32;
                     }
                 } else {
                     for c in 0..n {
-                        outp[o + c] = acc[c].clamp(0.0, 1.0) as f32;
+                        outp[o + c] = if hdr { acc[c] } else { acc[c].clamp(0.0, 1.0) } as f32;
                     }
                 }
             }
