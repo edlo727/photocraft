@@ -559,7 +559,7 @@ fn move_typed(view: CurveView, pts: &mut [[f32; 2]], i: usize, typed: [f32; 2]) 
 
 /// The Input / Output fields for the selected point. Returns whether the point moved and
 /// whether the edit should commit (a typed value commits at once, a drag on release).
-fn point_fields(ui: &mut egui::Ui, pts: &mut Vec<[f32; 2]>, selected: Option<usize>, view: CurveView, lookup: bool, range: f32) -> (bool, bool) {
+fn point_fields(ui: &mut egui::Ui, pts: &mut [[f32; 2]], selected: Option<usize>, view: CurveView, lookup: bool, range: f32) -> (bool, bool) {
     let (mut changed, mut commit) = (false, false);
     ui.horizontal(|ui| {
         // Lookup curves show linear values (0..range); Photoshop's show levels (0..255).
@@ -589,6 +589,24 @@ fn point_fields(ui: &mut egui::Ui, pts: &mut Vec<[f32; 2]>, selected: Option<usi
         commit |= ri.drag_stopped() || ro.drag_stopped();
     });
     (changed, commit)
+}
+
+/// Drops the composite curve from the params (see the call site: Lab has no composite).
+fn strip_composite(v: &mut Value, strip: bool) {
+    if strip && let Some(o) = v.as_object_mut() {
+        o.remove("points");
+    }
+}
+
+/// The edited points back into the params as levels: hundredths of a level for a lookup curve,
+/// which is the params' precision, and whole levels for Photoshop's.
+fn write_points(v: &mut Value, key: &str, pts: &[[f32; 2]], view: CurveView, lookup: bool, range: f32) {
+    let out: Vec<[f32; 2]> = if lookup {
+        pts.iter().map(|q| view.levels_from_g(*q).map(|l| (l.clamp(0.0, 255.0 * range) * 100.0).round() / 100.0)).collect()
+    } else {
+        pts.iter().map(|q| [q[0].round(), q[1].round()]).collect()
+    };
+    v[key] = json!(out);
 }
 
 pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
@@ -739,31 +757,16 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     };
     ui.label(RichText::new(hint).color(t2.text_faint).size(11.0));
     ui.data_mut(|d| d.insert_temp(state_id, st));
+    // Lab has no composite, so a "points" key there would alias lightness.
+    let strip_points = space == ToneSpace::Lab && isolated.is_none_or(|c| c.components.is_none());
     if drawn {
         write_map(v, key, &map);
-        if space == ToneSpace::Lab
-            && isolated.is_none_or(|c| c.components.is_none())
-            && let Some(o) = v.as_object_mut()
-        {
-            o.remove("points");
-        }
+        strip_composite(v, strip_points);
         e.changed = true;
     }
     if changed && !pencil {
-        // Back to levels (hundredths of a level, the params' precision; whole levels for
-        // Photoshop's curves).
-        let out: Vec<[f32; 2]> = if lookup {
-            pts.iter().map(|q| view.levels_from_g(*q).map(|l| (l.clamp(0.0, 255.0 * range) * 100.0).round() / 100.0)).collect()
-        } else {
-            pts.iter().map(|q| [q[0].round(), q[1].round()]).collect()
-        };
-        v[key] = json!(out);
-        if space == ToneSpace::Lab && isolated.is_none_or(|c| c.components.is_none()) {
-            // Lab has no composite: "points" would alias lightness.
-            if let Some(o) = v.as_object_mut() {
-                o.remove("points");
-            }
-        }
+        write_points(v, key, &pts, view, lookup, range);
+        strip_composite(v, strip_points);
         e.changed = true;
     }
     e
