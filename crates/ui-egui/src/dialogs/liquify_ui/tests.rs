@@ -59,7 +59,7 @@ fn native_component_liquify_preserves_proxy_detail_and_captured_commit_targets()
                 let mut field = LiquifyField::new(bounds, 8.0);
                 field.d.fill([2.0, 0.0]);
                 let mut out = vec![[0; 4]; 64 * 48];
-                assert!(render_components(&before, bounds, &field, 1.0, &d.target, bounds, bounds, &mut out));
+                assert!(render_components(&before, bounds, &field, 1.0, &d.target, bounds, bounds, &mut out, crate::distort_ui::PreviewDisplay::identity()));
                 for y in 0..48 {
                     for x in 0..64 {
                         let mut native = before.pixel(x, y);
@@ -76,7 +76,7 @@ fn native_component_liquify_preserves_proxy_detail_and_captured_commit_targets()
                 d.rebuild();
                 d.render_dirty();
                 let mut detail = vec![[0; 4]; 64 * 48];
-                assert!(render_components(&before, bounds, &d.field, 1.0, &d.target, bounds, bounds, &mut detail));
+                assert!(render_components(&before, bounds, &d.field, 1.0, &d.target, bounds, bounds, &mut detail, crate::distort_ui::PreviewDisplay::identity()));
                 assert_eq!(d.out, detail, "proxy at 100% equals the detail path");
                 app.run("channel.target", json!({"channel":{"color":1}})).unwrap();
                 commit(&mut app).unwrap();

@@ -499,7 +499,7 @@ impl LiquifyDialog {
         }
         let started = crate::gpu_canvas::now_ms();
         let rendered = if self.native_proxy.is_some() {
-            render_components(&self.source, self.canvas, &self.field, 1.0, &self.target, bounds, dirty, &mut self.view_out)
+            render_components(&self.source, self.canvas, &self.field, 1.0, &self.target, bounds, dirty, &mut self.view_out, self.display)
         } else {
             let display = self.display;
             ProxyImage::render_full_resolution(&self.source, &self.field, bounds, dirty, &mut self.view_out, &mut self.view_source_scratch, &move |p| {
