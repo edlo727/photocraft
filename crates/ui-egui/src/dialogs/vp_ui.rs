@@ -797,12 +797,14 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
     let canvas = st.doc.bounds();
     let (base, doc_revision) = (st.doc.clone(), st.revision);
     let key = app.ui.alloc_id();
+    // Pasted content is shown the way the canvas shows the document it is going into.
+    let display = crate::distort_ui::PreviewDisplay::for_doc(app, &base);
     let clip = app.session.clipboard.as_ref().and_then(|c| {
         let r = c.surface.content_bounds();
         (!r.is_empty()).then(|| Clip {
             surface: c.surface.clone(),
             rect: r,
-            texture: ctx.load_texture(format!("vp-paste-{key}"), crate::distort_ui::surface_image(&c.surface, r, 1024, crate::distort_ui::PreviewDisplay::identity()), egui::TextureOptions::LINEAR),
+            texture: ctx.load_texture(format!("vp-paste-{key}"), crate::distort_ui::surface_image(&c.surface, r, 1024, &display), egui::TextureOptions::LINEAR),
             width: f64::from(r.width()),
             height: f64::from(r.height()),
         })

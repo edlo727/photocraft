@@ -39,7 +39,7 @@ fn render_components(
     bounds: Rect,
     dirty: Rect,
     out: &mut [[u8; 4]],
-    display: crate::distort_ui::PreviewDisplay,
+    display: &crate::distort_ui::PreviewDisplay,
 ) -> bool {
     let Ok(Some(colors)) = photocraft_engine::color_channels::explicit(&json!({"target":target}), source.format().mode.color_channels()) else { return false };
     let width = bounds.width() as usize;
@@ -444,9 +444,9 @@ impl LiquifyDialog {
             if let Some(source) = &self.native_proxy {
                 let bounds = Rect::new(0, 0, self.proxy.w as i32, self.proxy.h as i32);
                 let dirty = Rect::new(r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32);
-                render_components(source, bounds, &self.field, self.proxy.scale, &self.target, bounds, dirty, &mut self.out, self.display);
+                render_components(source, bounds, &self.field, self.proxy.scale, &self.target, bounds, dirty, &mut self.out, &self.display);
             } else {
-                let display = self.display;
+                let display = self.display.clone();
                 self.proxy.render(&self.field, r, &mut self.out, &move |p| display.apply(p));
             }
         }
@@ -499,9 +499,9 @@ impl LiquifyDialog {
         }
         let started = crate::gpu_canvas::now_ms();
         let rendered = if self.native_proxy.is_some() {
-            render_components(&self.source, self.canvas, &self.field, 1.0, &self.target, bounds, dirty, &mut self.view_out, self.display)
+            render_components(&self.source, self.canvas, &self.field, 1.0, &self.target, bounds, dirty, &mut self.view_out, &self.display)
         } else {
-            let display = self.display;
+            let display = self.display.clone();
             ProxyImage::render_full_resolution(&self.source, &self.field, bounds, dirty, &mut self.view_out, &mut self.view_source_scratch, &move |p| {
                 display.apply(p)
             })
@@ -618,8 +618,9 @@ fn open_on(
     let canvas = st.doc.bounds();
     let name = st.doc.layer(layer).map(|l| l.name.clone()).unwrap_or_default();
     let display = crate::distort_ui::PreviewDisplay::for_doc(app, &st.doc);
-    let mut proxy = ProxyImage::new(&surf, canvas, PROXY_SIDE);
-    proxy.map_pixels(|p| display.apply(p));
+    // The proxy keeps the document's own values; both renderers put them on screen through
+    // `display` as they quantise, so the warp interpolates scene light and the display runs once.
+    let proxy = ProxyImage::new(&surf, canvas, PROXY_SIDE);
     let target = if smart_filter.is_some() { json!("pixels") } else { crate::distort_ui::colour_set_target(app) };
     let colors = photocraft_engine::color_channels::explicit(&json!({"target":target}), surf.format().mode.color_channels()).map_err(|e| e.to_string())?;
     let native_proxy = colors.map(|_| crate::gallery_ui::reduce(&surf, canvas, proxy.scale as u32));
@@ -927,7 +928,7 @@ fn load_backdrop(app: &PhotocraftApp, ctx: &egui::Context, of: Option<u64>, canv
     let mut s = photocraft_raster::Surface::new(photocraft_color::PixelFormat::RGBA8);
     let flat: Vec<f32> = buf.px.iter().flat_map(|p| *p).collect();
     s.write_region(canvas, &flat);
-    Some(ctx.load_texture("liquify-backdrop", crate::distort_ui::surface_image(&s, canvas, PROXY_SIDE, crate::distort_ui::PreviewDisplay::for_doc(app, &st.doc)), egui::TextureOptions::LINEAR))
+    Some(ctx.load_texture("liquify-backdrop", crate::distort_ui::surface_image(&s, canvas, PROXY_SIDE, &crate::distort_ui::PreviewDisplay::for_doc(app, &st.doc)), egui::TextureOptions::LINEAR))
 }
 
 /// The document [`load_backdrop`] renders for Use `of`.

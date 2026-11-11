@@ -46,12 +46,15 @@ pub struct WideAngleDialog {
     pub residual: f64,
     pub render_ms: f64,
     history: EditHistory<WideAngle>,
+    /// The canvas display chain, so a 32-bit document previews the way the canvas shows it.
+    display: crate::distort_ui::PreviewDisplay,
 }
 
-fn tex_image(s: &Surface, w: usize, h: usize) -> egui::ColorImage {
-    let mut row = vec![[0u8; 4]; w * h];
-    s.read_rgba8_into(Rect::new(0, 0, w as i32, h as i32), &mut row);
-    egui::ColorImage::new([w, h], row.iter().map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])).collect())
+fn tex_image(s: &Surface, w: usize, h: usize, display: &crate::distort_ui::PreviewDisplay) -> egui::ColorImage {
+    let mut row = vec![[0.0f32; 4]; w * h];
+    s.read_rgba_into(Rect::new(0, 0, w as i32, h as i32), &mut row);
+    let opaque = !s.format().alpha;
+    egui::ColorImage::new([w, h], row.iter().map(|p| display.premultiplied(if opaque { [p[0], p[1], p[2], 1.0] } else { *p })).collect())
 }
 
 impl WideAngleDialog {
@@ -88,13 +91,13 @@ impl WideAngleDialog {
     fn render(&mut self, ctx: &egui::Context) {
         let t0 = crate::gpu_canvas::now_ms();
         let Ok(out) = self.preview_surface() else { return };
-        let img = tex_image(&out, self.pw, self.ph);
+        let img = tex_image(&out, self.pw, self.ph, &self.display);
         match &mut self.out_tex {
             Some(t) => t.set(img, egui::TextureOptions::LINEAR),
             None => self.out_tex = Some(ctx.load_texture("awa-out", img, egui::TextureOptions::LINEAR)),
         }
         if self.src_tex.is_none() {
-            self.src_tex = Some(ctx.load_texture("awa-src", tex_image(&self.proxy, self.pw, self.ph), egui::TextureOptions::LINEAR));
+            self.src_tex = Some(ctx.load_texture("awa-src", tex_image(&self.proxy, self.pw, self.ph, &self.display), egui::TextureOptions::LINEAR));
         }
         self.render_ms = crate::gpu_canvas::now_ms() - t0;
         self.dirty = false;
@@ -120,6 +123,7 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
     let st = app.session.active().ok_or("no document")?;
     let frame = st.doc.bounds();
     let name = st.doc.layer(layer).map(|l| l.name.clone()).unwrap_or_default();
+    let display = crate::distort_ui::PreviewDisplay::for_doc(app, &st.doc);
     let (w, h) = (frame.width() as usize, frame.height() as usize);
     let k = w.max(h).div_ceil(PROXY_SIDE).max(1);
     let (pw, ph) = (w.div_ceil(k), h.div_ceil(k));
@@ -159,6 +163,7 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> 
         menu_for: None,
         residual: 0.0,
         render_ms: 0.0,
+        display,
     };
     d.render(ctx);
     app.wide_angle = Some(d);

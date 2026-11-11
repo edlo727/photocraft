@@ -35,6 +35,7 @@ mod pixels;
 pub mod prefs;
 pub mod preset_store;
 pub mod presets;
+pub mod preview_display;
 pub mod proof_sim;
 pub mod ocio_viewer;
 pub mod select_mask_edits;
