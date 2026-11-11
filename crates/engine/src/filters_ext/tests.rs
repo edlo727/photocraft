@@ -113,6 +113,12 @@ fn new_filters_work_at_16_and_32_bit() {
         s.execute("layer.new.layer", json!({})).unwrap();
         s.execute("edit.fill", json!({"color": "#3366cc"})).ok();
         for id in IDS {
+            // Colour Halftone, Mezzotint, Trace Contour and HSB/HSL work on 0..1 values and are
+            // unavailable on a 32-bit float document (`filters::has_filterable_layer_in_range`).
+            if depth == 32 && !s.is_enabled(id) {
+                assert!(s.execute(id, test_params(id)).is_err(), "{id} at {depth}-bit {mode}");
+                continue;
+            }
             s.execute(id, test_params(id)).unwrap_or_else(|e| panic!("{id} at {depth}-bit {mode}: {e}"));
         }
     }

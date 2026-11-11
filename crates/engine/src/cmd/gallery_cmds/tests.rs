@@ -37,7 +37,7 @@ fn pixels(s: &Session) -> Vec<f32> {
 
 #[test]
 fn every_gallery_filter_runs_at_every_depth_and_undoes() {
-    for depth in [8, 16, 32] {
+    for depth in [8, 16] {
         for f in GalleryFilter::ALL {
             let mut s = session(depth, "rgb");
             let before = pixels(&s);
@@ -50,6 +50,23 @@ fn every_gallery_filter_runs_at_every_depth_and_undoes() {
             assert_eq!(pixels(&s), before, "{} undo", f.key());
         }
     }
+}
+
+/// The gallery works on 0..1 values, so a 32-bit float document would lose its highlights to
+/// it: the commands are unavailable there rather than quietly clipping (`hdr_filter_matrix`
+/// measured every one of them clamping).
+#[test]
+fn the_gallery_is_unavailable_in_32_bit() {
+    let mut s = session(32, "rgb");
+    for f in GalleryFilter::ALL {
+        assert!(!s.is_enabled(f.command_id()), "{}", f.key());
+        assert!(s.execute(f.command_id(), json!({})).is_err(), "{}", f.key());
+    }
+    assert!(!s.is_enabled("filter.filterGallery"));
+    // Every other depth still runs them.
+    let mut s = session(16, "rgb");
+    assert!(s.is_enabled(GalleryFilter::ALL[0].command_id()));
+    assert!(s.execute(GalleryFilter::ALL[0].command_id(), json!({})).is_ok());
 }
 
 #[test]
