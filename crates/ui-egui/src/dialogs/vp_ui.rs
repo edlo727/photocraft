@@ -802,7 +802,7 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String>
         (!r.is_empty()).then(|| Clip {
             surface: c.surface.clone(),
             rect: r,
-            texture: ctx.load_texture(format!("vp-paste-{key}"), crate::distort_ui::surface_image(&c.surface, r, 1024), egui::TextureOptions::LINEAR),
+            texture: ctx.load_texture(format!("vp-paste-{key}"), crate::distort_ui::surface_image(&c.surface, r, 1024, crate::distort_ui::PreviewDisplay::identity()), egui::TextureOptions::LINEAR),
             width: f64::from(r.width()),
             height: f64::from(r.height()),
         })

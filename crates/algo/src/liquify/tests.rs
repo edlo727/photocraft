@@ -352,18 +352,18 @@ fn full_resolution_preview_matches_the_unit_scale_proxy_and_partial_updates() {
         let proxy = ProxyImage::new(&source, canvas, 96);
         assert_eq!(proxy.scale, 1.0);
         let mut want = vec![[0; 4]; proxy.w * proxy.h];
-        proxy.render(&field, [0, 0, proxy.w, proxy.h], &mut want);
+        proxy.render(&field, [0, 0, proxy.w, proxy.h], &mut want, NO_ENCODE);
 
         let mut got = vec![[0; 4]; proxy.w * proxy.h];
         let mut scratch = Vec::new();
-        assert!(ProxyImage::render_full_resolution(&source, &field, canvas, canvas, &mut got, &mut scratch));
+        assert!(ProxyImage::render_full_resolution(&source, &field, canvas, canvas, &mut got, &mut scratch, NO_ENCODE));
         assert_eq!(got, want, "full-resolution render at {sample_type:?}");
 
         let mut more = LiquifyStroke::new(LiquifyTool::Bloat, 16.0);
         more.points = vec![vec![43.0, 32.0, 1.0]];
         let dirty = field.apply_stroke(&more);
-        proxy.render(&field, proxy.proxy_rect(dirty), &mut want);
-        assert!(ProxyImage::render_full_resolution(&source, &field, canvas, dirty, &mut got, &mut scratch));
+        proxy.render(&field, proxy.proxy_rect(dirty), &mut want, NO_ENCODE);
+        assert!(ProxyImage::render_full_resolution(&source, &field, canvas, dirty, &mut got, &mut scratch, NO_ENCODE));
         assert_eq!(got, want, "partial update at {sample_type:?}");
     }
 }
@@ -516,7 +516,7 @@ fn proxy_matches_the_full_render_roughly() {
     let p = ProxyImage::new(&src, bounds(), 96);
     assert_eq!((p.w, p.h, p.scale), (96, 64, 1.0));
     let mut out = vec![[0u8; 4]; p.w * p.h];
-    p.render(&f, [0, 0, p.w, p.h], &mut out);
+    p.render(&f, [0, 0, p.w, p.h], &mut out, NO_ENCODE);
     let full = apply_liquify(&src, &f);
     let mut bad = 0;
     for y in 0..64 {

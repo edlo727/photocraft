@@ -181,20 +181,79 @@ pub(crate) fn without_layer(doc: &Document, id: LayerId) -> Arc<Document> {
     Arc::new(d)
 }
 
-/// A texture image of `surf` over `r`, downsampled so the longer side is at most `max_side`.
-pub(crate) fn surface_image(surf: &Surface, r: Rect, max_side: usize) -> ColorImage {
+/// How a dialog preview puts the document's pixels on screen, as the canvas does: the 32-bit
+/// preview's exposure and gamma, then the sRGB encode a scene-linear document needs. An integer
+/// document already holds display values, so there it is the identity and nothing is converted.
+///
+/// With View › OCIO Viewer on, the canvas runs the display / view through a shaper LUT that this
+/// does not reproduce: the preview is then close rather than exact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PreviewDisplay {
+    gain: f32,
+    inv_gamma: f32,
+    encode: bool,
+}
+
+impl PreviewDisplay {
+    /// What `doc` needs, from the same state the canvas reads.
+    pub(crate) fn for_doc(app: &PhotocraftApp, doc: &Document) -> Self {
+        let (gain, inv_gamma) = match app.session.color.hdr_preview(doc) {
+            Some(h) if h.exposure.is_finite() && h.gamma.is_finite() && h.gamma > 0.0 => (2f32.powf(h.exposure.clamp(-20.0, 20.0)), 1.0 / h.gamma.max(0.01)),
+            _ => (1.0, 1.0),
+        };
+        let linear = doc.depth == photocraft_color::SampleType::F32 && !photocraft_engine::ocio_viewer::display_referred(doc);
+        Self { gain, inv_gamma, encode: linear }
+    }
+
+    /// Leaves every value alone (an integer document with no 32-bit preview).
+    pub(crate) fn identity() -> Self {
+        Self { gain: 1.0, inv_gamma: 1.0, encode: false }
+    }
+
+    fn is_identity(self) -> bool {
+        self.gain == 1.0 && self.inv_gamma == 1.0 && !self.encode
+    }
+
+    /// One channel into display space. Negatives keep their sign through the gamma, as the canvas
+    /// shader does, and the encode holds them at zero.
+    fn channel(self, v: f32) -> f32 {
+        let v = v * self.gain;
+        let v = if self.inv_gamma == 1.0 { v } else { v.signum() * v.abs().powf(self.inv_gamma) };
+        if self.encode { photocraft_color::convert::linear_to_srgb(v.max(0.0)) } else { v }
+    }
+
+    /// One straight RGBA pixel; alpha is coverage and passes through.
+    pub(crate) fn apply(self, p: [f32; 4]) -> [f32; 4] {
+        if self.is_identity() { p } else { [self.channel(p[0]), self.channel(p[1]), self.channel(p[2]), p[3]] }
+    }
+
+    /// One straight RGBA pixel as 8-bit, premultiplied for egui.
+    pub(crate) fn premultiplied(self, p: [f32; 4]) -> Color32 {
+        let d = self.apply(p);
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        let a = d[3].clamp(0.0, 1.0);
+        Color32::from_rgba_premultiplied(q(d[0] * a), q(d[1] * a), q(d[2] * a), q(a))
+    }
+}
+
+/// A texture image of `surf` over `r`, downsampled so the longer side is at most `max_side` and
+/// shown through `display`.
+pub(crate) fn surface_image(surf: &Surface, r: Rect, max_side: usize, display: PreviewDisplay) -> ColorImage {
     let (w, h) = (r.width().max(1) as usize, r.height().max(1) as usize);
     let k = w.max(h).div_ceil(max_side).max(1);
     let (tw, th) = (w.div_ceil(k), h.div_ceil(k));
     let mut px = vec![Color32::TRANSPARENT; tw * th];
-    let mut row = vec![[0u8; 4]; w];
+    let mut row = vec![[0.0f32; 4]; w];
+    let opaque = !surf.format().alpha;
     for ty in 0..th {
         let y = r.y0 + (ty * k) as i32;
-        surf.read_rgba8_into(Rect::new(r.x0, y, r.x1, y + 1), &mut row);
+        surf.read_rgba_into(Rect::new(r.x0, y, r.x1, y + 1), &mut row);
         for tx in 0..tw {
-            let p = row[(tx * k).min(w - 1)];
-            let a = if surf.format().alpha { p[3] } else { 255 };
-            px[ty * tw + tx] = Color32::from_rgba_unmultiplied(p[0], p[1], p[2], a);
+            let mut p = row[(tx * k).min(w - 1)];
+            if opaque {
+                p[3] = 1.0;
+            }
+            px[ty * tw + tx] = display.premultiplied(p);
         }
     }
     ColorImage::new([tw, th], px)

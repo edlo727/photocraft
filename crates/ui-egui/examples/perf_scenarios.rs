@@ -1232,9 +1232,9 @@ fn liquify_preview_scenario(b: &mut Bench) {
         let t = Instant::now();
         let dirty = field.stroke_segment(&stroke, [1470.0, 1100.0, 1.0], [1530.0, 1100.0, 1.0]);
         let ok = if full_res {
-            ProxyImage::render_full_resolution(&source, field, view, dirty, out, scratch)
+            ProxyImage::render_full_resolution(&source, field, view, dirty, out, scratch, photocraft_algo::liquify::NO_ENCODE)
         } else {
-            proxy.render(field, proxy.proxy_rect(dirty), out);
+            proxy.render(field, proxy.proxy_rect(dirty), out, photocraft_algo::liquify::NO_ENCODE);
             true
         };
         if !ok {

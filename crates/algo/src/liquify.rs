@@ -674,6 +674,15 @@ fn cubic_taps(g: f64, len: usize) -> [(usize, f64); 4] {
 /// Resamples `src` through the field: inside `field.bounds` each pixel shows the source at
 /// `p + d(p)` (bicubic field, bicubic premultiplied source, edge pixels repeat past the field
 /// bounds); everything outside the bounds is kept. Same format as `src`.
+/// Maps a straight RGBA preview pixel into display space before it is quantised to eight bits:
+/// the viewer's exposure and gamma, and the transfer function of a scene-linear document, which
+/// a preview that skipped them would show crushed and contrasty. The UI builds one from the same
+/// state the canvas reads; [`NO_ENCODE`] leaves every value alone.
+pub type PreviewEncode<'a> = &'a (dyn Fn([f32; 4]) -> [f32; 4] + Sync);
+
+/// A [`PreviewEncode`] that changes nothing (an integer document with no 32-bit preview).
+pub const NO_ENCODE: PreviewEncode<'static> = &|p| p;
+
 pub fn apply_liquify(src: &Surface, field: &LiquifyField) -> Surface {
     let fmt = src.format();
     let n = fmt.channels();
@@ -865,9 +874,21 @@ impl ProxyImage {
         ProxyImage { bounds, scale, w, h, px }
     }
 
+    /// Puts every stored pixel through `f` as straight RGBA and keeps the result premultiplied,
+    /// once. A preview uses it to hold display values rather than the document's own, so
+    /// [`Self::render`] quantises something that is already meant for the screen.
+    pub fn map_pixels(&mut self, f: impl Fn([f32; 4]) -> [f32; 4] + Sync) {
+        for p in &mut self.px {
+            let a = p[3];
+            let straight = if a > 0.0 { [p[0] / a, p[1] / a, p[2] / a, a] } else { [0.0, 0.0, 0.0, a] };
+            let d = f(straight);
+            *p = [d[0] * a, d[1] * a, d[2] * a, a];
+        }
+    }
+
     /// Renders proxy pixels `r` (proxy coordinates) through the field into `out` (premultiplied
     /// RGBA8, `w × h`): bilinear field, bilinear source.
-    pub fn render(&self, field: &LiquifyField, r: [usize; 4], out: &mut [[u8; 4]]) {
+    pub fn render(&self, field: &LiquifyField, r: [usize; 4], out: &mut [[u8; 4]], encode: PreviewEncode<'_>) {
         let [x0, y0, x1, y1] = [r[0].min(self.w), r[1].min(self.h), r[2].min(self.w), r[3].min(self.h)];
         if x0 >= x1 || y0 >= y1 {
             return;
@@ -884,10 +905,8 @@ impl ProxyImage {
                 let (fu, fv) = ((u - iu) as f32, (v - iv) as f32);
                 let at = |x: f64, y: f64| self.px[(y.clamp(0.0, (self.h - 1) as f64) as usize) * self.w + x.clamp(0.0, (self.w - 1) as f64) as usize];
                 let (a, b, c, e) = (at(iu, iv), at(iu + 1.0, iv), at(iu, iv + 1.0), at(iu + 1.0, iv + 1.0));
-                *slot = std::array::from_fn(|k| {
-                    let v = (a[k] * (1.0 - fu) + b[k] * fu) * (1.0 - fv) + (c[k] * (1.0 - fu) + e[k] * fu) * fv;
-                    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-                });
+                let p: [f32; 4] = std::array::from_fn(|k| (a[k] * (1.0 - fu) + b[k] * fu) * (1.0 - fv) + (c[k] * (1.0 - fu) + e[k] * fu) * fv);
+                *slot = encode(p).map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
             }
         };
         let rows = &mut out[y0 * self.w..y1 * self.w];
@@ -912,6 +931,7 @@ impl ProxyImage {
         region: Rect,
         out: &mut [[u8; 4]],
         source_scratch: &mut Vec<[f32; 4]>,
+        encode: PreviewEncode<'_>,
     ) -> bool {
         let bounds = bounds.intersect(&field.bounds);
         let region = region.intersect(&bounds);
@@ -1015,7 +1035,7 @@ impl ProxyImage {
                     let p = [f64::from(x) + 0.5, f64::from(y) + 0.5];
                     let d = field.sample(p[0], p[1]);
                     let rgba = source_at(p[0] + d[0], p[1] + d[1]);
-                    *pixel = rgba.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+                    *pixel = encode(rgba).map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
                 }
             }
         };
