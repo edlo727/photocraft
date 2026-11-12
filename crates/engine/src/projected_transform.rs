@@ -517,7 +517,6 @@ pub(crate) fn place_new_layer(
             });
             out.write_region(r, &buf);
         }
-        let before = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
         let id = s.edit(label, |doc, active| {
             let mut l = Layer::raster(name.clone().unwrap_or_else(|| doc.next_layer_name("Layer")), target);
             *crate::pixels_mut(&mut l)? = out;
@@ -526,7 +525,7 @@ pub(crate) fn place_new_layer(
             doc.selection = None;
             Ok(id)
         })?;
-        crate::layer_multi_cmds::note_insert(s, &before);
+        // A single edit reports its own damage (the canvas redraws the whole command since #10053).
         Ok(id)
     }
 }

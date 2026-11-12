@@ -149,7 +149,8 @@ pub fn paint_gradient(
     paint_gradient_by(
         s,
         area,
-        |x, y| tool_gradient_t(shape, from, to, x as f32 + 0.5, y as f32 + 0.5),
+        // Sampled one pixel up and left of the pixel centre, where the reference application samples (#12018).
+        |x, y| tool_gradient_t(shape, from, to, x as f32 - 0.5, y as f32 - 0.5),
         stops,
         reverse,
         opacity,
@@ -292,6 +293,10 @@ pub fn bucket_fill_region_inks(
 }
 
 #[cfg(test)]
+#[path = "paint_gradient_sample_tests.rs"]
+mod paint_gradient_sample_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use photocraft_color::PixelFormat;
@@ -316,8 +321,8 @@ mod tests {
         paint_gradient(
             &mut s,
             a,
-            (0.5, 0.0),
-            (10.5, 0.0),
+            (-0.5, 0.0),
+            (9.5, 0.0),
             GradientShape::Linear,
             &[(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])],
             false,
