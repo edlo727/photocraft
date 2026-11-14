@@ -36,7 +36,7 @@ fn main() {
     println!("proxy {}×{} built in {:.1} ms", proxy.w, proxy.h, t.elapsed().as_secs_f64() * 1e3);
     let mut out = vec![[0u8; 4]; proxy.w * proxy.h];
     let t = Instant::now();
-    proxy.render(&LiquifyField::new(b, cell), [0, 0, proxy.w, proxy.h], &mut out);
+    proxy.render(&LiquifyField::new(b, cell), [0, 0, proxy.w, proxy.h], &mut out, photocraft_algo::liquify::NO_ENCODE);
     println!("full proxy render {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
     let t = Instant::now();
     let mut field = LiquifyField::new(b, cell);
@@ -52,7 +52,7 @@ fn main() {
         let t = Instant::now();
         let dirty = field.stroke_segment(&st, prev, p);
         let r = proxy.proxy_rect(dirty);
-        proxy.render(&field, r, &mut out);
+        proxy.render(&field, r, &mut out, photocraft_algo::liquify::NO_ENCODE);
         let ms = t.elapsed().as_secs_f64() * 1e3;
         worst = worst.max(ms);
         total += ms;
@@ -84,13 +84,13 @@ fn main() {
     println!("bloat dab alone: {:.2} ms", t.elapsed().as_secs_f64() * 1e3 / 20.0);
     let t = Instant::now();
     for _ in 0..20 {
-        proxy.render(&field, proxy.proxy_rect(d), &mut out);
+        proxy.render(&field, proxy.proxy_rect(d), &mut out, photocraft_algo::liquify::NO_ENCODE);
     }
     println!("dab-sized proxy update alone: {:.2} ms", t.elapsed().as_secs_f64() * 1e3 / 20.0);
     let t = Instant::now();
     for _ in 0..20 {
         let d = field.stroke_segment(&st, [3000.0, 1500.0, 1.0], [3000.0, 1500.0, 1.0]);
-        proxy.render(&field, proxy.proxy_rect(d), &mut out);
+        proxy.render(&field, proxy.proxy_rect(d), &mut out, photocraft_algo::liquify::NO_ENCODE);
     }
     println!("bloat dab (600 px) + proxy update: {:.2} ms", t.elapsed().as_secs_f64() * 1e3 / 20.0);
 

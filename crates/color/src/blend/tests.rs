@@ -305,6 +305,11 @@ fn separable_outputs_stay_in_unit_range() {
     }
 }
 
+/// Every separable mode but the two whose float behaviour differs by design.
+fn separable_others() -> impl Iterator<Item = BlendMode> {
+    BlendMode::LAYER_MODES.into_iter().filter(|m| m.is_separable() && !matches!(m, BlendMode::LinearDodge | BlendMode::Divide))
+}
+
 #[test]
 fn add_and_divide_clip_at_integer_depths_but_not_in_float() {
     // Integer depths: Photoshop clips Linear Dodge (Add) and Divide at 1.
@@ -330,17 +335,24 @@ fn add_and_divide_clip_at_integer_depths_but_not_in_float() {
     assert_eq!(blend_channel_hdr(BlendMode::Multiply, -f32::MAX, -2.0), f32::MAX);
     assert_eq!(blend_channel(BlendMode::Multiply, f32::MAX, 2.0), f32::MAX);
     assert!(blend_channel_hdr(BlendMode::LinearDodge, f32::INFINITY, 1.0).is_finite());
+}
+
+#[test]
+fn separable_modes_agree_between_the_depths_inside_zero_to_one() {
     // Every other separable mode agrees between the depths on 0..1 values, which is all an
     // integer document ever holds.
-    let others = || BlendMode::LAYER_MODES.into_iter().filter(|m| m.is_separable() && !matches!(m, BlendMode::LinearDodge | BlendMode::Divide));
-    for m in others() {
+    for m in separable_others() {
         for (cb, cs) in [(0.2, 0.3), (0.9, 0.05)] {
             assert_eq!(blend_rgb(m, [cb, cs, 0.5], [cs, cb, 0.25]), blend_rgb_hdr(m, [cb, cs, 0.5], [cs, cb, 0.25]), "{m:?} cb={cb} cs={cs}");
         }
     }
+}
+
+#[test]
+fn range_bound_modes_take_the_brighter_input_past_one() {
     // Past 0..1 the formulas that only hold there take the brighter input instead (`range_bound`),
     // so a 32-bit highlight survives Screen rather than inverting through it. The rest still agree.
-    for m in others() {
+    for m in separable_others() {
         for (cb, cs) in [(2.0, 0.5), (0.4, 1.5)] {
             if range_bound(m) {
                 assert_eq!(blend_channel_hdr(m, cb, cs), cb.max(cs), "{m:?} cb={cb} cs={cs}");
