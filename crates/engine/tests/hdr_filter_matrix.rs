@@ -57,7 +57,7 @@ fn pixels(s: &Session) -> Vec<[f32; 4]> {
         surface.read_rgba_into(Rect::from_xywh(0, 0, W as u32, H as u32), &mut out);
         return out;
     }
-    photocraft_compose::flatten(&st.doc).px
+    photocraft_compose::flatten(&st.doc).into_px()
 }
 
 struct Measure {
