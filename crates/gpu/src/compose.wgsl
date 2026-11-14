@@ -31,27 +31,28 @@ struct Op {
     q4: vec4<f32>,
 };
 
-const F_MASK: u32 = 1u;
-const F_MASK_TEX: u32 = 2u;
-const F_TEX: u32 = 4u;
-const F_GRADIENT: u32 = 8u;
-const F_KNOCKOUT: u32 = 16u;
-const F_NO_LAYER: u32 = 32u;
-const F_OUTLINE: u32 = 131072u;
-const F_VECTOR: u32 = 64u;
-const F_ATOP: u32 = 128u;
-const F_GATE: u32 = 256u;
-const F_REL: u32 = 512u;
-const F_STROKE_OUT: u32 = 1024u;
-const F_FIRST: u32 = 2048u;
-const F_CHANNELS: u32 = 4096u;
-const F_LAB: u32 = 65536u;
-const F_HDR: u32 = 262144u;
-const F_QUANT: u32 = 32768u;
-const F_ADD_DIFF: u32 = 16384u;
-const F_BLEND_IF: u32 = 524288u;
-const F_TEXT_GAMMA: u32 = 8192u;
-const F_LAYER_SHAPE: u32 = 1048576u;
+const F_MASK: u32 = 1u;          // layer has an enabled mask
+const F_MASK_TEX: u32 = 2u;      // mask pixels live in `mask_tex`
+const F_TEX: u32 = 4u;           // layer pixels live in `layer_tex`
+const F_GRADIENT: u32 = 8u;      // gradient fill (stops in `lut_tex`)
+const F_KNOCKOUT: u32 = 16u;     // effect paint: the layer knocks out the coverage (drop shadow)
+const F_NO_LAYER: u32 = 32u;    // effect merge: A already holds the layer (only the opacity mix)
+const F_OUTLINE: u32 = 131072u;      // outside strokes: filled shape outline (effects::outline_share)
+const F_VECTOR: u32 = 64u;       // effect paint: shape layer (outside stroke never inside)
+const F_ATOP: u32 = 128u;        // effect merge: clipped layer over an opaque base
+const F_GATE: u32 = 256u;        // effect paint: coverage only inside the layer's shape
+const F_REL: u32 = 512u;         // effect paint: coverage relative to the layer's alpha
+const F_STROKE_OUT: u32 = 1024u; // effect paint: outside stroke band
+const F_FIRST: u32 = 2048u;      // outside strokes: nothing accumulated yet
+const F_CHANNELS: u32 = 4096u;   // lerp: per-channel weights in p0 (channel restrictions)
+const F_LAB: u32 = 65536u;      // Lab document: Normal mixes in CIELAB
+const F_HDR: u32 = 262144u;     // 32-bit float document: HDR blends and Exposure retain values above 1
+const F_QUANT: u32 = 32768u;    // lerp: A rounded to p0.x steps (adjustment results, integer docs)
+const F_ADD_DIFF: u32 = 16384u;  // lerp: A + (B - C) premultiplied (clips on pass-through groups)
+const F_BLEND_IF: u32 = 524288u; // lerp: B back towards A by the Blend If ranges in p0..p3
+const F_REPLACE: u32 = 2097152u; // effect paint: Normal inside/center stroke replaces A by its coverage
+const F_TEXT_GAMMA: u32 = 8192u; // blend / atop / fx merge: type layer, mix coverage at gamma p4.w
+const F_LAYER_SHAPE: u32 = 1048576u; // fx merge: B is the shape; layer = its colour at fill p0.x inside it × its alpha
 
 @group(0) @binding(0) var<uniform> chunk: Chunk;
 @group(0) @binding(1) var<uniform> op: Op;
@@ -64,13 +65,9 @@ const F_LAYER_SHAPE: u32 = 1048576u;
 @group(1) @binding(6) var map_tex: texture_2d<f32>;
 @group(1) @binding(7) var pat_tex: texture_2d<f32>;
 
+// The full-chunk triangle's vertex stage lives in `vertex_shader` (kit.rs): one entry point per
+// pipeline build job, so no two threads share a compiled vertex shader.
 struct VOut { @builtin(position) pos: vec4<f32> };
-
-@vertex
-fn vs(@builtin(vertex_index) vi: u32) -> VOut {
-    let uv = vec2(f32((vi << 1u) & 2u), f32(vi & 2u));
-    return VOut(vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0));
-}
 
 fn local(pos: vec4<f32>) -> vec2<i32> { return vec2<i32>(floor(pos.xy)); }
 fn doc_px(p: vec2<i32>) -> vec2<i32> { return chunk.origin + p; }
@@ -135,7 +132,15 @@ fn soft_light_ps(cb: f32, cs: f32) -> f32 {
     return 2.0 * cb * (1.0 - cs) + d * (2.0 * cs - 1.0);
 }
 // Vivid Light as Hard Mix thresholds it (backdrop extremes within 1e-4 of 0 / 1 count as exact).
-fn vivid_light_hard_mix(cb: f32, cs: f32) -> f32 {
+fn vivid_light_ps(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) {
+        if (cs <= 0.0) { return 0.0; }
+        return 1.0 - min((1.0 - cb) / (2.0 * cs), 1.0);
+    }
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb / (2.0 * (1.0 - cs)), 1.0);
+}
+fn vivid_light_generic(cb: f32, cs: f32) -> f32 {
     let edge = 1e-4;
     if (cs <= 0.5) {
         if (cb >= 1.0 - edge) { return 1.0; }
@@ -154,66 +159,65 @@ fn range_bound(mode: i32) -> bool {
     return mode == 9 || mode == 10 || (mode >= 13 && mode <= 17) || mode == 21 || (mode >= 28 && mode <= 30);
 }
 
+// FXC (the DX12 compiler between naga's HLSL and the driver) stops following a switch this size
+// once every case returns: "error X3507: 'blend_channel': Not all control paths return a value",
+// and then no compositor pipeline builds — the whole session composites on the CPU. Each case
+// assigns instead; the one return at the end is what FXC's flow analysis can follow.
 fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
     if (mode >= NUKE_BASE) { return nuke_channel(mode, cb, cs); }
     // Outside 0..1 (a 32-bit highlight) those formulas go negative or clip, so the brighter input
     // stands, as in Nuke's screen. Integer documents never leave the range, so nothing changes there.
     if (range_bound(mode) && (cb < 0.0 || cb > 1.0 || cs < 0.0 || cs > 1.0)) { return max(cb, cs); }
+    // Linear Dodge / Divide clip at 1 at integer depths, at f32::MAX in 32-bit documents.
+    let hi = select(1.0, F32_MAX, (op.flags & F_HDR) != 0u);
+    var r = cs;                                                 // Normal, Dissolve, PassThrough
     switch mode {
-        case 3: { return min(cb, cs); }                         // Darken
-        case 4: { return cb * cs; }                             // Multiply
-        case 5: { return color_burn(cb, cs); }                  // Color Burn
-        case 6: { return max(cb + cs - 1.0, 0.0); }             // Linear Burn
-        case 8: { return max(cb, cs); }                         // Lighten
-        case 9: { return cb + cs - cb * cs; }                   // Screen
-        case 10: { return color_dodge(cb, cs); }                // Color Dodge
-        case 11: { return min(cb + cs, F32_MAX); }              // Linear Dodge (Add)
-        case 13: { return hard_light(cs, cb); }                 // Overlay
-        case 14: { return soft_light_ps(cb, cs); }              // Soft Light
-        case 15: { return hard_light(cb, cs); }                 // Hard Light
-        case 16: {                                              // Vivid Light
-            if (cs <= 0.0) { return 0.0; }
-            if (cs >= 1.0) { return 1.0; }
-            if (cs <= 0.5) { return color_burn(cb, 2.0 * cs); }
-            return color_dodge(cb, 2.0 * (cs - 0.5));
+        case 3: { r = min(cb, cs); }                            // Darken
+        case 4: { r = cb * cs; }                                // Multiply
+        case 5: { r = color_burn(cb, cs); }                     // ColorBurn
+        case 6: { r = max(cb + cs - 1.0, 0.0); }                // LinearBurn
+        case 8: { r = max(cb, cs); }                            // Lighten
+        case 9: { r = cb + cs - cb * cs; }                      // Screen
+        case 10: { r = color_dodge(cb, cs); }                   // ColorDodge
+        case 11: { r = min(cb + cs, hi); }                      // LinearDodge
+        case 13: { r = hard_light(cs, cb); }                    // Overlay
+        case 14: { r = soft_light_ps(cb, cs); }                 // SoftLight
+        case 15: { r = hard_light(cb, cs); }                    // HardLight
+        case 16: { r = vivid_light_ps(cb, cs); }                // VividLight (Photoshop)
+        case 17: { r = clamp(cb + 2.0 * cs - 1.0, 0.0, 1.0); }  // LinearLight
+        case 18: {                                              // PinLight
+            if (cs <= 0.5) { r = min(cb, 2.0 * cs); } else { r = max(cb, 2.0 * cs - 1.0); }
         }
-        case 17: { return clamp(cb + 2.0 * cs - 1.0, 0.0, 1.0); } // Linear Light
-        case 18: {                                              // Pin Light
-            if (cs <= 0.5) { return min(cb, 2.0 * cs); }
-            return max(cb, 2.0 * cs - 1.0);
+        case 19: {                                              // HardMix (Photoshop)
+            r = select(0.0, 1.0, vivid_light_generic(cb, cs) >= 0.5 - 1e-6);
         }
-        case 19: { return select(0.0, 1.0, vivid_light_hard_mix(cb, cs) >= 0.5 - 1e-6); } // Hard Mix
-        case 20: { return abs(cb - cs); }                       // Difference
-        case 21: { return cb + cs - 2.0 * cb * cs; }            // Exclusion
-        case 22: { return max(cb - cs, 0.0); }                  // Subtract
+        case 20: { r = abs(cb - cs); }                          // Difference
+        case 21: { r = cb + cs - 2.0 * cb * cs; }               // Exclusion
+        case 22: { r = max(cb - cs, 0.0); }                     // Subtract
         case 23: {                                              // Divide
-            if (cs <= 0.0) { return select(1.0, 0.0, cb <= 0.0); }
-            return min(cb / cs, F32_MAX);
+            if (cs <= 0.0) { r = select(1.0, 0.0, cb <= 0.0); } else { r = min(cb / cs, hi); }
         }
         case 28: {                                              // Reflect
-            if (cs >= 1.0) { return 1.0; }
-            return min(cb * cb / (1.0 - cs), 1.0);
+            if (cs >= 1.0) { r = 1.0; } else { r = min(cb * cb / (1.0 - cs), 1.0); }
         }
         case 29: {                                              // Glow
-            if (cb >= 1.0) { return 1.0; }
-            return min(cs * cs / (1.0 - cb), 1.0);
+            if (cb >= 1.0) { r = 1.0; } else { r = min(cs * cs / (1.0 - cb), 1.0); }
         }
-        case 30: { return 1.0 - abs(1.0 - cb - cs); }           // Negation
+        case 30: { r = 1.0 - abs(1.0 - cb - cs); }               // Negation
         case 31: {                                              // XOR (8-bit channel operation)
             let b = u32(floor(clamp(cb, 0.0, 1.0) * 255.0 + 0.5));
             let s = u32(floor(clamp(cs, 0.0, 1.0) * 255.0 + 0.5));
-            return f32(b ^ s) / 255.0;
+            r = f32(b ^ s) / 255.0;
         }
-        case 32: {                                              // Color Burn (Paint.NET)
-            if (cs <= 0.0) { return 0.0; }
-            return max(1.0 - (1.0 - cb) / cs, 0.0);
+        case 32: {                                              // Paint.NET Color Burn
+            if (cs <= 0.0) { r = 0.0; } else { r = max(1.0 - (1.0 - cb) / cs, 0.0); }
         }
-        case 33: {                                              // Color Dodge (Paint.NET)
-            if (cs >= 1.0) { return 1.0; }
-            return min(cb / (1.0 - cs), 1.0);
+        case 33: {                                              // Paint.NET Color Dodge
+            if (cs >= 1.0) { r = 1.0; } else { r = min(cb / (1.0 - cs), 1.0); }
         }
-        default: { return cs; }                                 // Normal, Dissolve, Pass Through
+        default: { r = cs; }
     }
+    return r;
 }
 
 // ---- Nuke Merge operations (A = source, B = backdrop; Nuke's 32-bit maths, nothing clamped) ----
@@ -1220,6 +1224,11 @@ fn outline_share(cov: f32, l: f32) -> f32 {
     return min(outside / rest, 1.0);
 }
 
+// effects::paint: composite `colour × coverage × opacity` into A. B is the layer (its alpha `a`
+// is the effect shape). Coverage `kind`: 0 the effect map, 1 full; then F_KNOCKOUT m × (1 − a k)
+// (k = `p4.w`),
+// F_GATE inside ? m : 0, F_REL inside ? min(m / a, 1) : 0, F_STROKE_OUT inside ? (vector ? 0 : 1)
+// : m. F_REPLACE: the paint replaces A by the coverage instead of blending over it.
 @fragment
 fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
     let p = local(in.pos);
@@ -1244,6 +1253,16 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
     let k = m * op.opacity;
     if (k <= 0.0) { return dst; }
     let c = fx_color(d);
+    if ((op.flags & F_REPLACE) != 0u) {
+        // effects.rs: a Normal inside stroke knocks the layer out by its coverage and adds the
+        // stroke (`layer × (1 − coverage) + stroke × opacity × coverage`, premultiplied), also on
+        // Lab documents (no CIELAB mix).
+        let sa = c.a * k;
+        if (sa <= 0.0) { return dst; }
+        let kept = dst.a * (1.0 - clamp(m, 0.0, 1.0));
+        let ao = kept + sa;
+        return vec4((dst.rgb * kept + c.rgb * sa) / ao, min(ao, 1.0));
+    }
     return fx_composite(d, dst, vec4(c.rgb, c.a * k));
 }
 

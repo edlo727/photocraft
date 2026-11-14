@@ -9,7 +9,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use photocraft_cms::{Builtin, Lut3d, Profile, math};
+use craft_cms::{Builtin, Lut3d, Profile, math};
 use photocraft_doc::{DocId, Document};
 use photocraft_ocio::Config;
 use serde::{Deserialize, Serialize};

@@ -36,7 +36,7 @@ fn fixture() -> Session {
     let mut s = Session::new();
     s.execute("file.new", json!({"width": W, "height": H, "depth": 32})).unwrap();
     s.edit("hdr fixture", |doc, active| {
-        doc.icc_profile = Some(photocraft_cms::Builtin::AcesCg.profile().to_bytes());
+        doc.icc_profile = Some(craft_cms::Builtin::AcesCg.profile().to_bytes());
         let surface = doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap();
         let format = surface.format();
         let bytes: Vec<f32> =

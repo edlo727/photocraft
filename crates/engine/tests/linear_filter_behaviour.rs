@@ -34,7 +34,7 @@ fn doc32() -> Session {
 /// Fills the active layer from `px`, in the surface's own model.
 fn write(s: &mut Session, px: impl Fn(i32, i32) -> [f32; 4]) {
     s.edit("fixture", |doc, active| {
-        doc.icc_profile = Some(photocraft_cms::Builtin::AcesCg.profile().to_bytes());
+        doc.icc_profile = Some(craft_cms::Builtin::AcesCg.profile().to_bytes());
         let surface = doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap();
         let format = surface.format();
         let bytes: Vec<f32> = (0..H).flat_map(|y| (0..W).map(move |x| (x, y))).flat_map(|(x, y)| photocraft_raster::from_rgba(&format, px(x, y))).collect();

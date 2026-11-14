@@ -191,7 +191,7 @@ impl Compositor {
                 self.sync_fx(device, queue, encoder, doc, f, (f.layer.id, None), f.region, &mut stats)?;
             }
         }
-        let fr = self.frame_res(device, queue, canvas, &plan, &live);
+        let fr = self.frame_res(device, queue, canvas, &plan, &live)?;
 
         // Page cells; every other frame in reverse, so a repeated full refresh of a document
         // larger than the budget starts with the pages still resident.
@@ -416,7 +416,7 @@ impl Compositor {
     }
 
     /// Per-frame resources of `plan`: the tile area of each pass's surfaces, its LUT and pattern.
-    fn frame_res(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, canvas: Rect, plan: &Plan<'_>, live: &[(LayerId, Rect)]) -> FrameRes {
+    fn frame_res(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, canvas: Rect, plan: &Plan<'_>, live: &[(LayerId, Rect)]) -> Result<FrameRes, Unsupported> {
         let grid = tile_grid(canvas);
         let area = |s: &Surface| s.tile_bounds().intersect(&grid);
         // A live stroke's layer also covers the tiles it paints on (an empty layer has none).
@@ -434,7 +434,7 @@ impl Compositor {
             })
             .collect();
         let luts = plan.passes.iter().map(|p| p.lut.as_ref().map(|rows| lut_texture(device, queue, rows))).collect();
-        let patterns = plan.passes.iter().map(|p| p.pattern.map(|pat| self.pattern_view(device, queue, pat))).collect();
-        FrameRes { areas, luts, patterns }
+        let patterns = plan.passes.iter().map(|p| p.pattern.map(|pat| self.pattern_view(device, queue, pat)).transpose()).collect::<Result<_, _>>()?;
+        Ok(FrameRes { areas, luts, patterns })
     }
 }
