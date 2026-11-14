@@ -239,7 +239,8 @@ pub fn viewer_lut(cfg: &Config, doc_profile: &Profile, v: &OcioViewer, size: usi
     Ok(Lut3d::from_fn(n, |v| {
         let p = px[at(v[0]) + at(v[1]) * n + at(v[2]) * n * n];
         [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0), p[2].clamp(0.0, 1.0)]
-    })?)
+    })
+    .map_err(|e| e.to_string())?)
 }
 
 /// The GPU canvas's viewer LUT for `doc` (RGBA8, [`VIEWER_LUT`]³) and a signature of what made
