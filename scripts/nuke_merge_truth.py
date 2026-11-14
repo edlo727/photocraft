@@ -53,8 +53,22 @@ def sample(node):
 
 
 def main():
-    out_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_OUT
+    # Only a .csv argument is an output path: in the GUI, argv holds the .nk Nuke opened,
+    # and writing there would overwrite the comp.
+    args = [a for a in sys.argv[1:] if a.lower().endswith(".csv")]
+    out_path = args[0] if args else DEFAULT_OUT
     a_src, b_src, merge = build()
+    try:
+        run(a_src, b_src, merge, out_path)
+    finally:
+        for node in (merge, a_src, b_src):
+            for up in node.dependencies():
+                if up.Class() == "Premult":
+                    nuke.delete(up)
+            nuke.delete(node)  # leave the open comp as it was
+
+
+def run(a_src, b_src, merge, out_path):
     rows = ["# nuke " + nuke.NUKE_VERSION_STRING,
             "op,screen_alpha,A,a,B,b,out_r,out_g,out_b,out_a"]
     for op in OPS:
