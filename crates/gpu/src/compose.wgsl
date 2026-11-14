@@ -315,17 +315,21 @@ fn nuke_channel(mode: i32, cb: f32, cs: f32) -> f32 {
 // The alpha-masked share where both inputs cover (blend.rs nuke_composite): `cs`/`cb` straight,
 // `ap`/`bp` premultiplied, `both` = ab.
 fn nuke_masked_share(mode: i32, cb: f32, cs: f32, bp: f32, ap: f32, both: f32) -> f32 {
-    switch mode {
-        case 53: { return both * (ap - bp); }                            // minus
-        case 60: { return both * (bp - ap); }                            // from
-        case 54: {                                                       // divide
-            if (bp > 0.0) { return ap / bp; }
-            return both * cs;
-        }
-        case 47: { return nuke_geometric(ap, bp); }                      // geometric
-        case 45: { return both * nuke_soft_light_p(cs, cb, cs * bp); }   // soft-light
-        default: { return both * nuke_channel(mode, cb, cs); }
+    // One return at the end: DX12's FXC rejects a switch whose cases all return.
+    var r = both * nuke_channel(mode, cb, cs);
+    if (mode == 53) {                                                    // minus
+        r = both * (ap - bp);
+    } else if (mode == 60) {                                             // from
+        r = both * (bp - ap);
+    } else if (mode == 54) {                                             // divide
+        r = both * cs;
+        if (bp > 0.0) { r = ap / bp; }
+    } else if (mode == 47) {                                             // geometric
+        r = nuke_geometric(ap, bp);
+    } else if (mode == 45) {                                             // soft-light
+        r = both * nuke_soft_light_p(cs, cb, cs * bp);
     }
+    return r;
 }
 
 // ---- non-separable helpers (W3C Compositing Level 1; photocraft_color::blend::lum) ----
