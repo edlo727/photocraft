@@ -1475,13 +1475,15 @@ impl Surface {
                 continue;
             }
             let tile = self.tile_mut(c);
+            let mut bytes = tile.bytes_mut();
             for i in 0..px_count {
                 let at = i * n;
-                let rgb = [0, 1, 2].map(|k| read_sample(&tile.data, format.sample, at + k));
+                let rgb = [0, 1, 2].map(|k| read_sample(&bytes, format.sample, at + k));
                 for (k, v) in f(rgb).into_iter().enumerate() {
-                    write_sample(&mut tile.data, format.sample, at + k, v);
+                    write_sample(&mut bytes, format.sample, at + k, v);
                 }
             }
+            drop(bytes);
             if let Some(mapped) = self.tiles.get(&c) {
                 done.insert(key, mapped.clone());
             }
