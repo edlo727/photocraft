@@ -759,7 +759,7 @@ fn adjusted_px(adj: &photocraft_doc::Adjustment, px: &[[f32; 4]]) -> Vec<[f32; 4
     use photocraft_compose::adjust::{Transfer, apply_depth};
     let mut buf = photocraft_compose::Buffer { rect: photocraft_geom::Rect::from_xywh(0, 0, px.len().max(1) as u32, 1), px: px.to_vec() };
     apply_depth(adj, &mut buf, Transfer::for_document(ColorMode::Rgb, SampleType::F32), Some(SampleType::F32));
-    buf.px
+    buf.into_px()
 }
 
 /// The body of a Nuke `ColorLookup` node reproducing a Curves adjustment as PhotoCraft applies
@@ -916,7 +916,7 @@ impl<'a> Collector<'a> {
         solo.vector_mask = None;
         solo.clipped = false;
         solo.visible = true;
-        photocraft_compose::render_layer_in(self.doc, &solo, self.bounds).px
+        photocraft_compose::render_layer_in(self.doc, &solo, self.bounds).into_px()
     }
 
     fn layer(&mut self, l: &DocLayer, parent_visible: bool, depth: usize) -> Option<ExportLayer> {
@@ -949,7 +949,7 @@ impl<'a> Collector<'a> {
                 let name = self.unique(&sanitize_layer_name(&raw));
                 let px = match &l.content {
                     LayerContent::Raster(surface) if !photocraft_compose::effects::has_effects(l) => {
-                        photocraft_compose::surface_to_buffer(surface, self.bounds).px
+                        photocraft_compose::surface_to_buffer(surface, self.bounds).into_px()
                     }
                     // Type, shapes, fills, smart objects, layer styles and merged groups: as drawn.
                     _ => self.render_alone(l),
@@ -1055,7 +1055,7 @@ pub fn export_multichannel_exr_with_options(
         // The canvas's own composite: every layer, mode, mask, clipping group, group and
         // adjustment exactly as shown, whether or not the script can rebuild it.
         step(0.6, "Compositing the beauty pass")?;
-        let flat = photocraft_compose::flatten(doc).px;
+        let flat = photocraft_compose::flatten(doc).into_px();
         if flat.len() != width * height {
             return Err("The document is too large to flatten for the beauty pass.".into());
         }

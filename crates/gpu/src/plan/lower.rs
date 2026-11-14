@@ -109,8 +109,10 @@ pub(super) fn row_key(adj: &Adjustment, depth: photocraft_color::SampleType) -> 
                 level(&mut h, c);
             }
         }
-        Adjustment::Curves { master, per_channel, space, black, pencil } => {
+        Adjustment::Curves { master, per_channel, space, black, pencil, lookup } => {
             (1u8, depth, *space as u8, *pencil).hash(&mut h);
+            // The ColorLookup settings change the composed rows, so they key the table too.
+            (lookup.range.to_bits(), lookup.hold_ends, lookup.master_first).hash(&mut h);
             for c in [master, &per_channel[0], &per_channel[1], &per_channel[2], black] {
                 curve(&mut h, c);
             }

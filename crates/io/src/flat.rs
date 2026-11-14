@@ -424,9 +424,6 @@ pub fn apply_file_encoding(doc: &Document, opts: &mut codecs::EncodeOptions) {
         opts.webp_quality = q.min(100);
     }
     opts.png_stereo = e.png_stereo.and_then(codecs::PngStereo::from_mode);
-    if e.exr_half == Some(true) {
-        opts.exr_half = true;
-    }
 }
 
 /// Photoshop opens a 32-bit Targa as an opaque Background plus an "Alpha 1" channel holding the
@@ -1831,6 +1828,12 @@ pub fn export_flat_with_renderer(
     }
     if format == Format::Tiff {
         warnings.extend(crate::tiff_layers::flat_transparency_and_channels(doc, &mut img, opts.tiff_transparency, opts.preserve_alpha)?);
+    }
+    // OpenEXR half float: a document opened from a half EXR saves back as one. craft-image-codecs
+    // writes whatever sample type the image carries, so the choice is made here rather than
+    // through an encode option, as it was when the EXR codec lived in this tree.
+    if format == Format::OpenExr && doc.file_encoding.exr_half == Some(true) && img.sample_type() == CSample::F32 {
+        img = map_bands(&img, img.layout(), CSample::F16, |v| v)?;
     }
     encode_image(&img, format, opts, warnings)
 }

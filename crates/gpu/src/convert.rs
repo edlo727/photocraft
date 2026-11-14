@@ -211,7 +211,7 @@ pub fn preconvert(surface: &Surface, rect: Rect, unchanged: Option<&Surface>) ->
         return 0;
     }
     let converted = fx::par_map(tiles, |t| {
-        let bytes = rgb_gray16_to_f16(&fmt, t.bytes()).or_else(|| rgb_gray32_to_f16(&fmt, t.bytes()));
+        let bytes = rgb_gray16_to_f16(&fmt, &t.bytes()).or_else(|| rgb_gray32_to_f16(&fmt, &t.bytes()));
         bytes.map(|b| (t, b))
     });
     let mut cache = ready();
