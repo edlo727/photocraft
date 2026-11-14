@@ -421,12 +421,12 @@ fn a_matte_layer_reaches_its_merge_unpremultiplied() {
     // included, is Unpremulted just before its Merge, or Nuke premultiplies it twice.
     let mut d = doc();
     let mut base = raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]);
-    base.blend_mode = BlendMode::NukeMatte;
+    base.blend = BlendMode::NukeMatte;
     let mut top = raster(&d, "Top", [0.2, 0.4, 0.6, 0.5]);
-    top.blend_mode = BlendMode::NukeMatte;
+    top.blend = BlendMode::NukeMatte;
     top.mask = Some(half_mask());
     let mut plain = raster(&d, "Plain", [0.2, 0.4, 0.6, 0.5]);
-    plain.blend_mode = BlendMode::NukeMultiply;
+    plain.blend = BlendMode::NukeMultiply;
     d.layers = vec![base, top, plain];
     let nk = script(&d, GroupExport::Branches);
     assert!(node(&nk, "Unpremult_Top").starts_with("push $NMask_Top\n"), "{nk}");
