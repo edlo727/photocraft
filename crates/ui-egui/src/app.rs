@@ -265,4 +265,4 @@ impl eframe::App for PhotocraftApp {
 }
 
 #[cfg(test)]
-mod clipboard_tests;
+mod clipboard_tests;
