@@ -931,6 +931,8 @@ pub fn apply_liquify(src: &Surface, field: &LiquifyField) -> Surface {
         let snap = |t: f64| if (t - t.round()).abs() < 1e-7 { t.round() } else { t };
         let mut outp = vec![0.0f32; w * h * n];
         let mut acc = [0.0f64; 8];
+        // The range of the source pixels feeding each output pixel, for the de-ring below.
+        let (mut lo, mut hi) = ([0.0f64; 8], [0.0f64; 8]);
         for y in 0..h {
             for x in 0..w {
                 let d = disp[y * w + x];
@@ -939,6 +941,8 @@ pub fn apply_liquify(src: &Surface, field: &LiquifyField) -> Surface {
                 let (ix, iy) = (u.floor() as i32, v.floor() as i32);
                 let (wx, wy) = (catmull_rom(u - f64::from(ix)), catmull_rom(v - f64::from(iy)));
                 acc[..n].fill(0.0);
+                lo[..n].fill(f64::INFINITY);
+                hi[..n].fill(f64::NEG_INFINITY);
                 for (j, wyj) in wy.iter().enumerate() {
                     for (i, wxi) in wx.iter().enumerate() {
                         let k = wxi * wyj;
@@ -949,22 +953,36 @@ pub fn apply_liquify(src: &Surface, field: &LiquifyField) -> Surface {
                         for (c, s) in acc.iter_mut().enumerate().take(n) {
                             *s += f64::from(px[o + c]) * k;
                         }
+                        let sa = if alpha { f64::from(px[o + n - 1]) } else { 1.0 };
+                        for c in 0..n {
+                            let straight = if alpha && c + 1 < n {
+                                if sa > 0.0 { f64::from(px[o + c]) / sa } else { 0.0 }
+                            } else {
+                                f64::from(px[o + c])
+                            };
+                            lo[c] = lo[c].min(straight);
+                            hi[c] = hi[c].max(straight);
+                        }
                     }
                 }
                 let o = (y * w + x) * n;
-                // Alpha is coverage and belongs in 0..1 whatever the depth; colour on a float
+                // Alpha is coverage and belongs in 0..1 whatever the depth. Colour on a float
                 // surface is scene-linear, where a warp moves the highlights rather than clipping
-                // them (`crate::warp` does the same).
+                // them (`crate::warp` does the same), so the only bound is the range of the
+                // source pixels that fed this one: a 4.0 highlight survives, while the cubic
+                // kernel's negative lobes cannot ring a hard edge into values the source never
+                // held. At integer depths 0..1 is that range anyway.
+                let bound = |v: f64, c: usize| if lo[c] <= hi[c] { v.clamp(lo[c], hi[c]) } else { v };
                 if alpha {
                     let al = acc[n - 1].clamp(0.0, 1.0);
                     outp[o + n - 1] = al as f32;
                     for c in 0..n - 1 {
                         let v = if al > 0.0 { acc[c] / al } else { 0.0 };
-                        outp[o + c] = if hdr { v } else { v.clamp(0.0, 1.0) } as f32;
+                        outp[o + c] = if hdr { bound(v, c) } else { v.clamp(0.0, 1.0) } as f32;
                     }
                 } else {
                     for c in 0..n {
-                        outp[o + c] = if hdr { acc[c] } else { acc[c].clamp(0.0, 1.0) } as f32;
+                        outp[o + c] = if hdr { bound(acc[c], c) } else { acc[c].clamp(0.0, 1.0) } as f32;
                     }
                 }
             }
