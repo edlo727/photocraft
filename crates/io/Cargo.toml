@@ -55,7 +55,6 @@ serde_json = { workspace = true }
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 # pdn.rs inflates Paint.NET's gzip pixel chunks.
 flate2 = { workspace = true }
-flate2 = { workspace = true }
 roxmltree = "0.21"
 # Reuse usvg's locked header reader to bound embedded SVG raster data before decoding.
 imagesize = "0.13"
