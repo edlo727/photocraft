@@ -871,34 +871,34 @@ fn nonseparable_hdr_wide(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3
 
 
 // ---- Nuke Merge operations (the `Nuke…` modes): Nuke's 32-bit maths, A = source, B = backdrop ----
+//
+// Every formula here was measured in Nuke 17 (`scripts/nuke_merge_truth.py`: Constant → Premult →
+// Merge2 over colours -0.25, 0.2, 0.8, 2 and alphas 0, 0.3, 1), not taken from the documentation,
+// which is wrong in places: screen, divide, exclusion and geometric switch on negative inputs, and
+// overlay, hard-light, soft-light, color-dodge and color-burn clamp theirs.
 
 #[inline]
-/// Nuke's screen: `A + B - AB` if A or B is at most 1, else `max(A, B)` (Foundry's table; Natron's
-/// reimplementation branches the same way). Either input at or below 1 is enough, and there is no
-/// lower bound, so negative ACEScg values take the formula.
+/// Nuke's screen: `A + B - AB` where both are within 0..1, else `max(A, B)`. Light above 1 and
+/// negative ACEScg values both take the max.
 pub fn nuke_screen(a: f32, b: f32) -> f32 {
-    if a <= 1.0 || b <= 1.0 { a + b - a * b } else { a.max(b) }
+    if (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b) { a + b - a * b } else { a.max(b) }
 }
 
 /// Nuke's multiply: `AB`, or `A` where both are negative, which stops two negatives making a
-/// positive (Foundry).
+/// positive.
 #[inline]
 pub fn nuke_multiply(a: f32, b: f32) -> f32 {
     if a < 0.0 && b < 0.0 { a } else { a * b }
 }
 
-/// Shared core of Nuke's `overlay` and `hard-light`: multiply below 0.5 of the deciding input
-/// `x`, screen above it, with `x` (not the other input) rescaled to 0..1 in the screen branch:
-/// `x < 0.5 → 2·x·y`, else `screen(2·x − 1, y)`. Both branches give `y` at `x = 0.5`, so the
-/// result is continuous. Nothing is clamped: 32-bit values above 1 (and below 0) pass through,
-/// and [`nuke_screen`]'s `max` fallback handles them as Nuke does.
+/// Shared core of Nuke's `overlay` and `hard-light`, `x` the deciding input: `2xy` where
+/// `x ≤ 0.5`, else `1 − 2(1−x)(1−y)`. Nuke clamps `x` to 0..1 and `y` to 0 and above, and the
+/// result to 1 and below: these two are the display-range operations of Merge.
 #[inline]
 pub fn nuke_light(x: f32, y: f32) -> f32 {
-    if x < 0.5 {
-        2.0 * x * y
-    } else {
-        nuke_screen(2.0 * x - 1.0, y)
-    }
+    let (x, y) = (x.clamp(0.0, 1.0), y.max(0.0));
+    let v = if x <= 0.5 { 2.0 * x * y } else { 1.0 - 2.0 * (1.0 - x) * (1.0 - y) };
+    v.min(1.0)
 }
 
 /// Nuke `overlay` (A = `a`, B = `b`): multiply if B < 0.5, screen if B > 0.5.
@@ -913,20 +913,62 @@ pub fn nuke_hard_light(a: f32, b: f32) -> f32 {
     nuke_light(a, b)
 }
 
+/// Nuke's soft-light core: `B(2A + B(1 − p))` where `p < 1`, else `2AB`, inputs clamped to 0 and
+/// above. Unmasked, Nuke runs it on the premultiplied values with `p = AB`; with alpha masking,
+/// on the straight colours with `p` = straight A times premultiplied B ([`nuke_composite`]).
 #[inline]
-/// Nuke's soft-light, as Foundry documents it: `B(2A + B(1 - AB))` where `AB < 1`, else `2AB`.
-/// `a` is the top input (A), `b` the background (B). Unclamped: the `AB < 1` switch is how Nuke
-/// handles light above 1, and clipping first would darken an HDR plate.
+fn nuke_soft_light_p(a: f32, b: f32, p: f32) -> f32 {
+    if p < 1.0 { b * (2.0 * a + b * (1.0 - p)) } else { 2.0 * a * b }
+}
+
+/// Nuke's soft-light on one pair of values (A = `a`, B = `b`), as an unmasked Merge applies it.
+#[inline]
 pub fn nuke_soft_light(a: f32, b: f32) -> f32 {
-    let ab = a * b;
-    if ab < 1.0 { b * (2.0 * a + b * (1.0 - ab)) } else { 2.0 * ab }
+    let (a, b) = (a.max(0.0), b.max(0.0));
+    nuke_soft_light_p(a, b, a * b)
 }
 
 #[inline]
-/// Nuke's divide: `A / B`, or 0 where both are negative (Foundry). Foundry doesn't say what B = 0
-/// gives; this returns 0 rather than infinity.
+/// Nuke's divide: `A / B` where B is positive, else `A` (B at or below 0 leaves A as it is).
 pub fn nuke_divide(a: f32, b: f32) -> f32 {
-    if (a < 0.0 && b < 0.0) || b.abs() <= 1e-7 { 0.0 } else { a / b }
+    if b > 0.0 { a / b } else { a }
+}
+
+/// Nuke's exclusion: `A + B − 2AB` where both are at least 0, else `A + B`.
+#[inline]
+pub fn nuke_exclusion(a: f32, b: f32) -> f32 {
+    if a < 0.0 || b < 0.0 { a + b } else { a + b - 2.0 * a * b }
+}
+
+/// Nuke's geometric: `2AB / (A + B)`, or 0 where either is negative (or both are 0).
+#[inline]
+pub fn nuke_geometric(a: f32, b: f32) -> f32 {
+    let sum = a + b;
+    if a < 0.0 || b < 0.0 || sum == 0.0 { 0.0 } else { 2.0 * a * b / sum }
+}
+
+/// Nuke's color-dodge: `B / (1 − A)`, inputs clamped to 0 and above and the result to 1 and below
+/// (1 where A ≥ 1).
+#[inline]
+pub fn nuke_color_dodge(a: f32, b: f32) -> f32 {
+    let (a, b) = (a.max(0.0), b.max(0.0));
+    if a >= 1.0 { 1.0 } else { (b / (1.0 - a)).min(1.0) }
+}
+
+/// Nuke's color-burn: `1 − (1 − B) / A`, B clamped to 0 and above and the result to 0 and above;
+/// 0 where A ≤ 0.
+#[inline]
+pub fn nuke_color_burn(a: f32, b: f32) -> f32 {
+    if a <= 0.0 { 0.0 } else { (1.0 - (1.0 - b.max(0.0)) / a).max(0.0) }
+}
+
+/// The operations Nuke runs on inputs clamped to 0 and above, the comp's colour included.
+#[inline]
+fn nuke_clamps_inputs(mode: BlendMode) -> bool {
+    matches!(
+        mode,
+        BlendMode::NukeOverlay | BlendMode::NukeHardLight | BlendMode::NukeSoftLight | BlendMode::NukeColorDodge | BlendMode::NukeColorBurn
+    )
 }
 
 /// `B(cb, cs)` of a Nuke colour operation (A = `cs`, B = `cb`); the compositing ones (in, out,
@@ -945,23 +987,15 @@ fn nuke_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
         BlendMode::NukeMin | BlendMode::NukeIn => cs.min(cb),
         BlendMode::NukeMax | BlendMode::NukeOut => cs.max(cb),
         BlendMode::NukeHypot => (cs * cs + cb * cb).sqrt(),
-        BlendMode::NukeGeometric => {
-            let sum = cs + cb;
-            if sum.abs() <= 1e-7 { 0.0 } else { (2.0 * cs * cb) / sum }
-        }
+        BlendMode::NukeGeometric => nuke_geometric(cs, cb),
         BlendMode::NukeDifference => (cs - cb).abs(),
-        BlendMode::NukeExclusion => cs + cb - 2.0 * cs * cb,
+        BlendMode::NukeExclusion => nuke_exclusion(cs, cb),
         BlendMode::NukeOverlay => nuke_overlay(cs, cb),
         BlendMode::NukeHardLight => nuke_hard_light(cs, cb),
         BlendMode::NukeSoftLight => nuke_soft_light(cs, cb),
         BlendMode::NukeAverage => 0.5 * (cs + cb),
-        BlendMode::NukeColorDodge => {
-            let denom = 1.0 - cs;
-            if denom.abs() <= 1e-6 { cb } else { cb / denom }
-        }
-        BlendMode::NukeColorBurn => {
-            if cs.abs() <= 1e-6 { 0.0 } else { 1.0 - (1.0 - cb) / cs }
-        }
+        BlendMode::NukeColorDodge => nuke_color_dodge(cs, cb),
+        BlendMode::NukeColorBurn => nuke_color_burn(cs, cb),
         _ => cs,
     }
 }
@@ -1174,21 +1208,39 @@ fn nuke_composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity
             }
         }
         // Every other operation runs as the export writes it, with Merge's alpha masking
-        // (`screen_alpha`): each input is unchanged where the other is empty, the alpha is
-        // a + b - ab, and where both cover, Foundry's formula on the colours. Applying the formula
-        // to the alpha instead, as a plain Merge does, gives difference, exclusion, minus and
-        // from an alpha of 0 over an opaque comp, which straight alpha stores as nothing at all.
+        // (`screen_alpha`): the alpha is a + b - ab, each input passes through where the other
+        // doesn't cover, `(1-b)A + (1-a)B` premultiplied, and the operation adds its share where
+        // both do. Nuke's share differs by operation (measured in Nuke 17): most take `ab·f` of
+        // the straight colours, minus and from `ab·f` of the premultiplied ones, divide and
+        // geometric `f` of the premultiplied ones, and the clamping ones clamp both colours first,
+        // in the pass-through terms too. Applying the formula to the alpha instead, as a plain
+        // Merge does, gives difference, minus and from an alpha of 0 over an opaque comp.
         other => {
-            let blended = blend_rgb_hdr(
-                other,
-                [backdrop[0], backdrop[1], backdrop[2]],
-                [source[0], source[1], source[2]],
-            );
+            let clamp = nuke_clamps_inputs(other);
+            let (cs, cb) = if clamp {
+                ([source[0].max(0.0), source[1].max(0.0), source[2].max(0.0)], [backdrop[0].max(0.0), backdrop[1].max(0.0), backdrop[2].max(0.0)])
+            } else {
+                ([source[0], source[1], source[2]], [backdrop[0], backdrop[1], backdrop[2]])
+            };
+            let (ap, bp) = ([cs[0] * sa, cs[1] * sa, cs[2] * sa], [cb[0] * ba, cb[1] * ba, cb[2] * ba]);
+            let both = sa * ba;
+            let share = |i: usize| -> f32 {
+                match other {
+                    BlendMode::NukeMinus => both * (ap[i] - bp[i]),
+                    BlendMode::NukeFrom => both * (bp[i] - ap[i]),
+                    BlendMode::NukeDivide => {
+                        if bp[i] > 0.0 { ap[i] / bp[i] } else { both * cs[i] }
+                    }
+                    BlendMode::NukeGeometric => nuke_geometric(ap[i], bp[i]),
+                    BlendMode::NukeSoftLight => both * nuke_soft_light_p(cs[i], cb[i], cs[i] * bp[i]),
+                    _ => both * nuke_channel(other, cb[i], cs[i]),
+                }
+            };
             let ao = sa + ba * (1.0 - sa);
             [
-                (1.0 - sa) * b[0] + (1.0 - ba) * a[0] + sa * ba * blended[0],
-                (1.0 - sa) * b[1] + (1.0 - ba) * a[1] + sa * ba * blended[1],
-                (1.0 - sa) * b[2] + (1.0 - ba) * a[2] + sa * ba * blended[2],
+                (1.0 - sa) * bp[0] + (1.0 - ba) * ap[0] + share(0),
+                (1.0 - sa) * bp[1] + (1.0 - ba) * ap[1] + share(1),
+                (1.0 - sa) * bp[2] + (1.0 - ba) * ap[2] + share(2),
                 ao,
             ]
         }

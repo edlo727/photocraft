@@ -414,3 +414,24 @@ fn clipped_layers_and_masked_pass_through_groups_mix_with_keymix() {
     assert!(node(&nk, "Merge_Folder").contains("Keymix"), "{nk}");
 }
 
+
+#[test]
+fn a_matte_layer_reaches_its_merge_unpremultiplied() {
+    // Nuke's matte is Aa + B(1-a) for a straight A (measured in Nuke 17): the layer's stream, mask
+    // included, is Unpremulted just before its Merge, or Nuke premultiplies it twice.
+    let mut d = doc();
+    let mut base = raster(&d, "Base", [0.5, 0.5, 0.5, 1.0]);
+    base.blend_mode = BlendMode::NukeMatte;
+    let mut top = raster(&d, "Top", [0.2, 0.4, 0.6, 0.5]);
+    top.blend_mode = BlendMode::NukeMatte;
+    top.mask = Some(half_mask());
+    let mut plain = raster(&d, "Plain", [0.2, 0.4, 0.6, 0.5]);
+    plain.blend_mode = BlendMode::NukeMultiply;
+    d.layers = vec![base, top, plain];
+    let nk = script(&d, GroupExport::Branches);
+    assert!(node(&nk, "Unpremult_Top").starts_with("push $NMask_Top\n"), "{nk}");
+    let merge = node(&nk, "Merge_Top");
+    assert!(merge.contains("operation matte") && merge.contains("push $NUnpremult_Top\n"), "{merge}");
+    // The base starts the comp premultiplied; other operations take the premultiplied stream.
+    assert!(!nk.contains("Unpremult_Base") && !nk.contains("Unpremult_Plain"), "{nk}");
+}

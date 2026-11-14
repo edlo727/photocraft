@@ -5,29 +5,31 @@ fn close(a: f32, b: f32) -> bool {
 }
 
 #[test]
-fn nuke_hard_light_matches_nuke_merge_math_and_keeps_float() {
+fn nuke_hard_light_matches_nuke_merge_math() {
     // A = source (top), B = backdrop. Multiply below A = 0.5, screen above, continuous at 0.5.
-    let hl = |a: f32, b: f32| blend_channel(BlendMode::NukeHardLight, b, a);
+    let hl = |a: f32, b: f32| blend_channel_hdr(BlendMode::NukeHardLight, b, a);
     assert!(close(hl(0.25, 0.4), 0.2));
     // A > 0.5 over a dark backdrop: 1 - 2(1-A)(1-B), not A (the old max() fallback bug).
     assert!(close(hl(0.6, 0.1), 0.28));
     assert!(close(hl(0.9, 0.2), 0.84));
-    for b in [0.0f32, 0.1, 0.4, 0.5, 0.9, 1.0, 3.0] {
+    for b in [0.0f32, 0.1, 0.4, 0.5, 0.9, 1.0] {
         assert!(close(hl(0.5, b), b), "neutral at A = 0.5 for B = {b}");
         assert!((hl(0.5 - 1e-4, b) - hl(0.5 + 1e-4, b)).abs() < 1e-3, "continuous at 0.5 for B = {b}");
     }
-    // 32-bit: nothing is clamped to 1. The screen branch is screen(2A - 1, B), and Nuke's screen
-    // takes A + B - AB whenever either input is at most 1; 1 - 2(1-A)(1-B) agrees. Only a
-    // max(A, B) fallback would give 2 and 5 here.
-    assert!(close(hl(0.75, 2.0), 1.5), "{}", hl(0.75, 2.0));
-    assert!(close(hl(3.0, 0.5), 3.0), "{}", hl(3.0, 0.5));
+    // Measured in Nuke 17: hard-light and overlay are display-range operations. The deciding
+    // input is clamped to 0..1, the other to 0 and above, and the result to 1 and below.
+    assert!(close(hl(2.0, 0.2), 1.0), "{}", hl(2.0, 0.2));
+    assert!(close(hl(0.2, 2.0), 0.8), "{}", hl(0.2, 2.0));
+    assert!(close(hl(2.0, 2.0), 1.0), "{}", hl(2.0, 2.0));
+    assert!(close(hl(0.8, -0.25), 0.6), "{}", hl(0.8, -0.25));
+    assert!(close(hl(-0.25, 0.8), 0.0), "{}", hl(-0.25, 0.8));
     // Overlay is hard light with A and B swapped (decided by B).
     assert!(close(blend_channel(BlendMode::NukeOverlay, 0.6, 0.1), hl(0.6, 0.1)));
 }
 
 #[test]
 fn nuke_soft_light_matches_nuke_merge_math_and_keeps_float() {
-    // Foundry's documented algorithm, A = source (top), B = backdrop:
+    // Nuke's soft-light (measured in Nuke 17), A = source (top), B = backdrop:
     // B(2A + B(1 - AB)) where AB < 1, else 2AB.
     let sl = |a: f32, b: f32| blend_channel(BlendMode::NukeSoftLight, b, a);
     // Unlike Photoshop's soft light it lightens at A = 0.5 too.
@@ -41,6 +43,9 @@ fn nuke_soft_light_matches_nuke_merge_math_and_keeps_float() {
     assert!(close(sl(4.0, 0.1), 0.806), "{}", sl(4.0, 0.1));
     // ...and a bright plate takes 2AB.
     assert!(close(sl(2.0, 1.0), 4.0));
+    // Negative inputs count as 0 (measured in Nuke 17): B² where A < 0, 0 where B < 0.
+    assert!(close(sl(-0.25, 0.6), 0.36));
+    assert!(close(sl(0.8, -0.25), 0.0));
 }
 
 #[test]
@@ -119,145 +124,61 @@ fn psd_keys_read_as_photoshop_modes_and_nuke_ones_write_their_nearest() {
     assert_eq!(BlendMode::Hue.nearest_nuke_op(), ("over", false));
 }
 
-/// Foundry's Merge table, literally (learn.foundry.com, "Merge Operations"): one channel of the
-/// premultiplied result, `ca`/`cb` the A and B colours, `a`/`b` their alphas. For the alpha
-/// channel itself pass the alphas as the colours. `None` where Foundry gives no formula
-/// (color-burn, color-dodge) or the value is undefined.
-fn foundry(op: BlendMode, ca: f32, cb: f32, a: f32, b: f32) -> Option<f32> {
-    use BlendMode::*;
-    let screen = |x: f32, y: f32| if x <= 1.0 || y <= 1.0 { x + y - x * y } else { x.max(y) };
-    let light = |x: f32, y: f32| if x < 0.5 { 2.0 * x * y } else { screen(2.0 * x - 1.0, y) };
-    Some(match op {
-        NukePlus => ca + cb,
-        NukeMinus => ca - cb,
-        NukeFrom => cb - ca,
-        NukeMultiply => if ca < 0.0 && cb < 0.0 { ca } else { ca * cb },
-        NukeDivide if cb.abs() < 1e-12 => return None,
-        NukeDivide => if ca < 0.0 && cb < 0.0 { 0.0 } else { ca / cb },
-        NukeScreen => screen(ca, cb),
-        NukeMin => ca.min(cb),
-        NukeMax => ca.max(cb),
-        NukeDifference => (ca - cb).abs(),
-        NukeExclusion => ca + cb - 2.0 * ca * cb,
-        NukeHypot => (ca * ca + cb * cb).sqrt(),
-        NukeGeometric if (ca + cb).abs() < 1e-12 => return None,
-        NukeGeometric => 2.0 * ca * cb / (ca + cb),
-        NukeAverage => (ca + cb) / 2.0,
-        NukeOverlay => light(cb, ca),
-        NukeHardLight => light(ca, cb),
-        NukeSoftLight => if ca * cb < 1.0 { cb * (2.0 * ca + cb * (1.0 - ca * cb)) } else { 2.0 * ca * cb },
-        NukeUnder => ca * (1.0 - b) + cb,
-        NukeIn => ca * b,
-        NukeOut => ca * (1.0 - b),
-        NukeAtop => ca * b + cb * (1.0 - a),
-        NukeXor => ca * (1.0 - b) + cb * (1.0 - a),
-        NukeMask => cb * a,
-        NukeStencil => cb * (1.0 - a),
-        NukeConjointOver if a > b => ca,
-        NukeConjointOver if b <= 0.0 => return None,
-        NukeConjointOver => ca + cb * (1.0 - a / b),
-        NukeDisjointOver if a + b < 1.0 => ca + cb,
-        NukeDisjointOver if b <= 0.0 => return None,
-        NukeDisjointOver => ca + cb * (1.0 - a) / b,
-        _ => return None,
-    })
-}
+/// Nuke 17's Merge2, measured: `nuke17_merge.csv` (see its header). Each row is one operation on
+/// one pair of colours and alphas, in the alpha-masking setting the .nk export writes for it.
+const NUKE17: &str = include_str!("nuke17_merge.csv");
 
-const FORMULA_OPS: [BlendMode; 25] = {
-    use BlendMode::*;
-    [
-        NukePlus, NukeMinus, NukeFrom, NukeMultiply, NukeDivide, NukeScreen, NukeMin, NukeMax, NukeDifference, NukeExclusion,
-        NukeHypot, NukeGeometric, NukeAverage, NukeOverlay, NukeHardLight, NukeSoftLight, NukeUnder, NukeIn, NukeOut, NukeAtop,
-        NukeXor, NukeMask, NukeStencil, NukeConjointOver, NukeDisjointOver,
-    ]
-};
-
-/// Merge operations that combine coverage themselves; the export never turns alpha masking on
-/// for them. Matte is left out of the partial-alpha check: see the note on its test below.
-const PORTER_DUFF: [BlendMode; 9] = {
-    use BlendMode::*;
-    [NukeUnder, NukeIn, NukeOut, NukeAtop, NukeXor, NukeMask, NukeStencil, NukeConjointOver, NukeDisjointOver]
-};
-
-/// What alpha the export makes Nuke compute for `op` over opaque pixels: a Porter-Duff op or one
-/// written without alpha masking runs its own formula on the alphas; one with alpha masking
-/// (`screen_alpha`, written wherever the canvas's alpha is a + b - ab) gives a + b - ab = 1.
-fn opaque_alpha(op: BlendMode) -> Option<f32> {
-    let masked = !PORTER_DUFF.contains(&op) && (composite(op, [0.4, 0.4, 0.4, 0.3], [0.6, 0.6, 0.6, 0.5], 1.0)[3] - 0.65).abs() < 1e-5;
-    if masked { Some(1.0) } else { foundry(op, 1.0, 1.0, 1.0, 1.0).map(|v| v.clamp(0.0, 1.0)) }
-}
-
-fn check_opaque(op: BlendMode, ca: f32, cb: f32) {
-    let got = composite_hdr(op, [cb, cb, cb, 1.0], [ca, ca, ca, 1.0], 1.0);
-    let Some(alpha) = opaque_alpha(op) else { return };
-    assert!((got[3] - alpha).abs() < 1e-5, "{op:?} A={ca} B={cb}: alpha {} for Nuke's {alpha}", got[3]);
-    let Some(want) = foundry(op, ca, cb, 1.0, 1.0) else { return };
-    if alpha > 0.0 {
-        let want = want / alpha;
-        assert!((got[0] - want).abs() <= 1e-4 * want.abs().max(1.0), "{op:?} A={ca} B={cb}: {} for Nuke's {want}", got[0]);
-    }
+fn nuke_op_mode(name: &str) -> Option<BlendMode> {
+    BlendMode::all_modes().find(|m| m.is_nuke() && m.nuke_op() == Some(name))
 }
 
 #[test]
-fn every_nuke_operation_matches_foundrys_formula_on_opaque_pixels() {
-    // Including light above 1 and the small negatives ACEScg keeps.
-    let values = [-0.25f32, 0.0, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 3.0];
-    for op in FORMULA_OPS {
-        for ca in values {
-            for cb in values {
-                check_opaque(op, ca, cb);
+fn every_nuke_operation_matches_nuke_17() {
+    let mut rows = 0;
+    let mut ops = std::collections::BTreeSet::new();
+    let mut bad = Vec::new();
+    for line in NUKE17.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
+        let f: Vec<&str> = line.split(',').collect();
+        assert_eq!(f.len(), 8, "{line}");
+        let mode = nuke_op_mode(f[0]).unwrap_or_else(|| panic!("no mode for {}", f[0]));
+        let v: Vec<f32> = f[2..].iter().map(|s| s.parse().unwrap()).collect();
+        let (ca, a, cb, b, out, out_a) = (v[0], v[1], v[2], v[3], v[4], v[5]);
+        let got = composite_hdr(mode, [cb, cb, cb, b], [ca, ca, ca, a], 1.0);
+        let alpha = out_a.clamp(0.0, 1.0);
+        rows += 1;
+        ops.insert(f[0]);
+        if (got[3] - alpha).abs() > 1e-4 {
+            bad.push(format!("{line}: alpha {}", got[3]));
+        } else if alpha > 1e-6 {
+            // Nuke's premultiplied colour, as the straight colour the canvas keeps.
+            let want = out / alpha;
+            if (got[0] - want).abs() > 1e-3 * want.abs().max(1.0) {
+                bad.push(format!("{line}: colour {} for {want}", got[0]));
             }
         }
+        // alpha 0 with colour left over (min of two negatives): straight alpha keeps nothing there.
     }
+    assert_eq!(ops.len(), 27, "{ops:?}");
+    assert!(rows > 2500, "{rows}");
+    assert!(bad.is_empty(), "{} of {rows} differ from Nuke 17:\n{}", bad.len(), bad[..bad.len().min(12)].join("\n"));
 }
 
 #[test]
 fn opaque_layers_never_go_transparent_under_the_subtracting_operations() {
-    // Their own formulas on the alphas give 0 for two opaque inputs (|1 - 1|, 1 + 1 - 2, 1 - 1),
-    // which a plain Merge leaves as colour with no alpha and straight alpha cannot hold at all.
-    // With alpha masking, as the export writes them, the result covers.
+    // Their own formulas on the alphas give 0 for two opaque inputs (|1 - 1|, 1 - 1), which a
+    // plain Merge leaves as colour with no alpha and straight alpha cannot hold at all. With
+    // alpha masking, as the export writes them, the result covers.
     for op in [BlendMode::NukeDifference, BlendMode::NukeExclusion, BlendMode::NukeMinus, BlendMode::NukeFrom] {
         let got = composite_hdr(op, [0.2, 0.2, 0.2, 1.0], [0.7, 0.7, 0.7, 1.0], 1.0);
         assert!((got[3] - 1.0).abs() < 1e-6, "{op:?} went transparent: {got:?}");
     }
 }
 
-fn check_porter_duff(op: BlendMode, a: f32, b: f32, ca: f32, cb: f32) {
-    let (pa, pb) = (ca * a, cb * b);
-    let (Some(c), Some(alpha)) = (foundry(op, pa, pb, a, b), foundry(op, a, b, a, b)) else { return };
-    let alpha = alpha.clamp(0.0, 1.0);
-    let got = composite_hdr(op, [cb, cb, cb, b], [ca, ca, ca, a], 1.0);
-    assert!((got[3] - alpha).abs() < 1e-4, "{op:?} a={a} b={b}: alpha {} for Nuke's {alpha}", got[3]);
-    if alpha > 1e-6 {
-        let want = c / alpha;
-        assert!((got[0] - want).abs() <= 1e-3 * want.abs().max(1.0), "{op:?} a={a} b={b} A={ca} B={cb}: {} for {want}", got[0]);
-    }
-}
-
-#[test]
-fn porter_duff_operations_match_foundry_at_every_coverage() {
-    // These are defined by alpha, so Foundry's table pins them at partial coverage too, the alpha
-    // channel included. An empty A is a case: `out` gives nothing there, not the backdrop.
-    let alphas = [0.0f32, 0.3, 0.7, 1.0];
-    let colours = [0.2f32, 0.8, 2.0];
-    for op in PORTER_DUFF {
-        for a in alphas {
-            for b in alphas {
-                for ca in colours {
-                    for cb in colours {
-                        check_porter_duff(op, a, b, ca, cb);
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[test]
 fn masked_operations_leave_each_input_alone_where_the_other_is_empty() {
-    // Merge's alpha masking: "the input images are unchanged where the other image has zero alpha,
-    // and the output alpha is set to a+b-a*b". Multiply used to black the source out where the
-    // backdrop was empty.
+    // Merge's alpha masking: each input is unchanged where the other has zero alpha, and the
+    // output alpha is a + b - ab. Multiply used to black the source out where the backdrop was
+    // empty.
     use BlendMode::*;
     for op in [NukeMultiply, NukeDivide, NukeMinus, NukeFrom, NukeDifference, NukeExclusion, NukeOverlay, NukeSoftLight, NukeAverage] {
         let over_empty = composite_hdr(op, [0.9, 0.9, 0.9, 0.0], [0.3, 0.6, 2.0, 0.7], 1.0);
@@ -271,23 +192,37 @@ fn masked_operations_leave_each_input_alone_where_the_other_is_empty() {
 }
 
 #[test]
-fn nuke_screen_multiply_and_divide_follow_foundrys_conditions() {
+fn nuke_screen_divide_exclusion_and_geometric_switch_on_their_inputs() {
     let ch = |op: BlendMode, a: f32, b: f32| blend_channel_hdr(op, b, a);
-    // Screen takes the formula when either input is at most 1, with no lower bound...
-    assert!(close(ch(BlendMode::NukeScreen, 2.0, 0.5), 1.5));
-    assert!(close(ch(BlendMode::NukeScreen, -0.25, -0.25), -0.5625));
-    // ...and max(A, B) only when both are above 1, so a hot highlight never goes negative.
+    // Screen takes the formula only where both inputs are within 0..1, else max(A, B): a hot
+    // highlight or a negative ACEScg value is never pushed further (measured in Nuke 17).
+    assert!(close(ch(BlendMode::NukeScreen, 0.5, 0.5), 0.75));
+    assert!(close(ch(BlendMode::NukeScreen, 2.0, 0.5), 2.0));
+    assert!(close(ch(BlendMode::NukeScreen, -0.25, 0.2), 0.2));
     assert!(close(ch(BlendMode::NukeScreen, 4.0, 3.0), 4.0));
     // Two negatives don't make a positive.
     assert!(close(ch(BlendMode::NukeMultiply, -0.25, -0.5), -0.25));
-    assert!(close(ch(BlendMode::NukeDivide, -0.25, -0.5), 0.0));
-    assert!(close(ch(BlendMode::NukeDivide, 0.5, -0.25), -2.0));
+    // Divide: A / B where B is positive, else A.
+    assert!(close(ch(BlendMode::NukeDivide, -0.25, 0.5), -0.5));
+    assert!(close(ch(BlendMode::NukeDivide, -0.25, -0.5), -0.25));
+    assert!(close(ch(BlendMode::NukeDivide, 0.5, -0.25), 0.5));
+    assert!(close(ch(BlendMode::NukeDivide, 0.5, 0.0), 0.5));
+    // Exclusion drops its 2AB term, and geometric gives 0, where either input is negative.
+    assert!(close(ch(BlendMode::NukeExclusion, -0.25, 0.8), 0.55));
+    assert!(close(ch(BlendMode::NukeExclusion, 0.5, 0.5), 0.5));
+    assert!(close(ch(BlendMode::NukeGeometric, -0.25, 0.8), 0.0));
+    assert!(close(ch(BlendMode::NukeGeometric, 0.5, 0.5), 0.5));
+    // Color dodge and burn clamp: dodge to 1 and below, burn to 0 and above.
+    assert!(close(ch(BlendMode::NukeColorDodge, 0.8, 0.6), 1.0));
+    assert!(close(ch(BlendMode::NukeColorDodge, -0.25, 0.6), 0.6));
+    assert!(close(ch(BlendMode::NukeColorBurn, 0.2, 0.6), 0.0));
+    assert!(close(ch(BlendMode::NukeColorBurn, 2.0, -0.25), 0.5));
 }
 
-/// Matte is Foundry's "Aa + B(1-a)", the over for an *unpremultiplied* A: PhotoCraft's layer
-/// colour is straight, so A·a is the premultiplied colour and the result is an over. What Nuke
-/// does to matte's alpha isn't in Foundry's table; Natron forces alpha masking (a + b - ab), the
-/// canvas's too. Pinned here so a change is deliberate.
+/// Matte is "Aa + B(1-a)" with alpha a + b(1 - a) (measured in Nuke 17), the over for an
+/// *unpremultiplied* A: PhotoCraft's layer colour is straight, so A·a is the premultiplied colour
+/// and the result is an over. The .nk export Unpremults a matte layer's stream so Nuke gets the
+/// straight colour too; fed premultiplied, Nuke would premultiply it twice.
 #[test]
 fn nuke_matte_is_an_over_of_the_straight_colour() {
     let got = composite_hdr(BlendMode::NukeMatte, [0.8, 0.8, 0.8, 0.5], [0.2, 0.2, 0.2, 0.3], 1.0);

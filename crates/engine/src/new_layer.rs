@@ -23,7 +23,8 @@ pub fn neutral_color(mode: BlendMode) -> Option<([f32; 3], &'static str)> {
         // Nuke Merge operations with a neutral colour.
         NukeMin | NukeMultiply | NukeColorBurn => Some(([1.0; 3], "white")),
         NukeMax | NukeScreen | NukeColorDodge | NukePlus | NukeDifference | NukeExclusion | NukeFrom => Some(([0.0; 3], "black")),
-        NukeOverlay | NukeSoftLight | NukeHardLight => Some(([0.5; 3], "50% gray")),
+        // Not soft-light: Nuke's lightens at 50% gray too (B(1 + B(1 - B/2)) at A = 0.5).
+        NukeOverlay | NukeHardLight => Some(([0.5; 3], "50% gray")),
         _ => None,
     }
 }

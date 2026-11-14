@@ -547,6 +547,28 @@ impl Script {
     /// A pixel layer's or an isolated group's premultiplied stream, masked and with its own
     /// clipped layers composited on, ready to merge: (stream, x of its merge).
     fn stream(&mut self, l: &ExportLayer, depth: i32, is_base: bool) -> Option<(String, i32)> {
+        let (a, x) = self.premult_stream(l, depth, is_base)?;
+        Some((self.straight_for_matte(l, a, depth, is_base, x), x))
+    }
+
+    /// Nuke's `matte` takes A unpremultiplied (`Aa + B(1-a)`): fed the premultiplied stream, as
+    /// every other operation is, it premultiplies A twice, darkening every soft edge (measured
+    /// in Nuke 17). An Unpremult after the layer's mask and clipped layers hands it the straight
+    /// colour, so it matches the canvas's matte. The base starts the comp as plain over and keeps
+    /// its premultiplied stream.
+    fn straight_for_matte(&mut self, l: &ExportLayer, a: String, depth: i32, is_base: bool, x: i32) -> String {
+        if is_base || nuke_merge_operation(l.blend_mode).0 != "matte" {
+            return a;
+        }
+        let name = &l.name;
+        let y = self.row_y(depth) - 50;
+        self.nk.push_str(&format!(
+            "push ${a}\nUnpremult {{\n name Unpremult_{name}\n xpos {x}\n ypos {y}\n}}\nset NUnpremult_{name} [stack 0]\n"
+        ));
+        format!("NUnpremult_{name}")
+    }
+
+    fn premult_stream(&mut self, l: &ExportLayer, depth: i32, is_base: bool) -> Option<(String, i32)> {
         let name = &l.name;
         if let Some(children) = &l.children {
             let start = self.col;
