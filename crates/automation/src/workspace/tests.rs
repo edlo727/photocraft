@@ -824,6 +824,17 @@ fn automation_rejects_ambient_path_commands_and_preferences() {
     assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": "integrations.controlPort", "value": 7878})).is_ok());
 }
 
+/// The OCIO viewer's LUT and the OCIO config are host files, so a headless caller cannot name
+/// them; the built-in configs and "none" stay available.
+#[test]
+fn ocio_paths_are_refused_but_builtin_configs_are_not() {
+    assert!(authorize_engine_command("view.ocioViewer", &serde_json::json!({"lut": "/outside/show.cube"})).is_err());
+    assert!(authorize_engine_command("view.ocioViewer", &serde_json::json!({"lut": "", "view": "ACES 1.0 - SDR Video"})).is_ok());
+    assert!(authorize_engine_command("edit.colorSettings", &serde_json::json!({"ocioConfig": "C:\\ocio\\config.ocio"})).is_err());
+    assert!(authorize_engine_command("edit.colorSettings", &serde_json::json!({"ocioConfig": "ocio://cg-config-v2.1.0_aces-v1.3_ocio-v2.3"})).is_ok());
+    assert!(authorize_engine_command("edit.colorSettings", &serde_json::json!({"ocioConfig": ""})).is_ok());
+}
+
 #[test]
 fn registry_filesystem_path_params_are_classified() {
     let probe = serde_json::json!({
@@ -837,6 +848,8 @@ fn registry_filesystem_path_params_are_classified() {
         "input": "/outside/photocraft-input",
         "output": "/outside/photocraft-output",
         "paths": ["/outside/photocraft-probe.psd"],
+        "lut": "/outside/photocraft-probe.cube",
+        "ocioConfig": "/outside/photocraft-probe.ocio",
     });
     let preference_probe = serde_json::json!({"path": ".scriptEvents", "value": {}});
     let unclassified: Vec<_> = photocraft_engine::command_specs()

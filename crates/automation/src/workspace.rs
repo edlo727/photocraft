@@ -708,14 +708,19 @@ fn params_contain_ambient_path(id: &str, params: &Value) -> bool {
         "edit.assignProfile" | "edit.convertToProfile" | "edit.profileInfo" | "view.proofSetup" | "view.gamutWarning" => &["profile"],
         // New Document's Color Profile (#321) can name an .icc file.
         "file.new" => &["profile"],
-        "edit.colorSettings" => &["workingRgb", "workingCmyk", "workingGray"],
+        "edit.colorSettings" => &["workingRgb", "workingCmyk", "workingGray", "ocioConfig"],
+        // The OCIO viewer's LUT is a host file (.cube, .3dl, .clf…).
+        "view.ocioViewer" => &["lut"],
         _ => &[],
     };
     keys.iter().any(|key| {
-        params
-            .get(*key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| if matches!(*key, "file" | "mapPath" | "path") { !value.is_empty() } else { looks_like_path(value) })
+        params.get(*key).and_then(Value::as_str).is_some_and(|value| match *key {
+            "file" | "mapPath" | "path" | "lut" => !value.is_empty(),
+            // An OCIO config can name LUT files of its own. A built-in one (ocio://…) reads
+            // nothing from disk; empty keeps whatever the session already resolved.
+            "ocioConfig" => !value.is_empty() && !value.starts_with("ocio://"),
+            _ => looks_like_path(value),
+        })
     })
 }
 
