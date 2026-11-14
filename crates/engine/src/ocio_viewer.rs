@@ -231,8 +231,15 @@ pub fn viewer_lut(cfg: &Config, doc_profile: &Profile, v: &OcioViewer, size: usi
         p.apply_rgba(&mut px);
     }
     proc.apply_rgba(&mut px);
-    let data = px.into_iter().map(|p| [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0), p[2].clamp(0.0, 1.0), 1.0]).collect();
-    Ok(Lut3d { size: n, data })
+    // craft-cms keeps the lattice private, and its builder is per-entry while the OCIO
+    // processor works on the whole buffer at once, so the entries are looked up by the
+    // lattice coordinate the builder passes in.
+    let last = (n - 1) as f32;
+    let at = |x: f32| (x * last).round().clamp(0.0, last) as usize;
+    Ok(Lut3d::from_fn(n, |v| {
+        let p = px[at(v[0]) + at(v[1]) * n + at(v[2]) * n * n];
+        [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0), p[2].clamp(0.0, 1.0)]
+    })?)
 }
 
 /// The GPU canvas's viewer LUT for `doc` (RGBA8, [`VIEWER_LUT`]³) and a signature of what made
@@ -499,8 +506,8 @@ mod tests {
         assert!(!v.display.is_empty() && !v.view.is_empty(), "{v:?}");
         let lut = viewer_lut(&cfg, Builtin::AcesCg.profile(), &v, 17).unwrap();
         // Along the neutral axis: never decreasing, black near 0, the top within display range.
-        let n = lut.size;
-        let grey: Vec<f32> = (0..n).map(|i| lut.data[i + i * n + i * n * n][0]).collect();
+        let n = 17;
+        let grey: Vec<f32> = (0..n).map(|i| lut.sample([i as f32 / (n - 1) as f32; 3])[0]).collect();
         assert!(grey.windows(2).all(|w| w[1] >= w[0] - 1e-4), "{grey:?}");
         assert!(grey[0] < 0.02 && grey[n - 1] <= 1.0, "{grey:?}");
         let mut s = Session::new();

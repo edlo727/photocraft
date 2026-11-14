@@ -192,10 +192,7 @@ mod tests {
     fn the_viewer_shaper_puts_scene_linear_light_on_the_lattice() {
         // An identity LUT over the shaper returns the shaper coordinate itself: 1.0 of light is
         // half way up a -12..+12 stop range.
-        let n = 2;
-        let at = |i: usize| f32::from(u8::try_from(i).unwrap_or(0));
-        let data = (0..n * n * n).map(|i| [at(i % n), at((i / n) % n), at(i / (n * n)), 1.0]).collect();
-        let lut = Lut3d { size: n, data };
+        let lut = Lut3d::from_fn(2, |v| v).expect("an identity lattice");
         let p = CanvasPreview { encode_srgb: true, lut: Some(lut), viewer: true, ..CanvasPreview::default() };
         let v = p.shown([1.0, 1.0, 1.0])[0];
         assert!((v - 0.5).abs() < 1e-3, "{v}");
