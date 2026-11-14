@@ -222,9 +222,16 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
 
 // ---- Nuke Merge operations (A = source, B = backdrop; Nuke's 32-bit maths, nothing clamped) ----
 
+// Nuke's screen: A+B-AB if A or B <= 1, else max(A,B) (matches blend.rs).
 fn nuke_screen(a: f32, b: f32) -> f32 {
-    if (a >= 0.0 && a <= 1.0 && b >= 0.0 && b <= 1.0) { return a + b - a * b; }
+    if (a <= 1.0 || b <= 1.0) { return a + b - a * b; }
     return max(a, b);
+}
+
+// Nuke's multiply: AB, or A where both are negative (matches blend.rs).
+fn nuke_multiply(a: f32, b: f32) -> f32 {
+    if (a < 0.0 && b < 0.0) { return a; }
+    return a * b;
 }
 
 // Nuke overlay / hard-light core (photocraft_color::blend::nuke_light): multiply below 0.5 of
@@ -243,15 +250,16 @@ fn nuke_soft_light(a: f32, b: f32) -> f32 {
     return 2.0 * ab;
 }
 
+// Nuke's divide: A/B, or 0 where both are negative or B is 0 (matches blend.rs).
 fn nuke_divide(a: f32, b: f32) -> f32 {
-    if (abs(b) <= 1e-7) { return 0.0; }
+    if ((a < 0.0 && b < 0.0) || abs(b) <= 1e-7) { return 0.0; }
     return a / b;
 }
 
 fn nuke_channel(mode: i32, cb: f32, cs: f32) -> f32 {
     switch mode {
         case 34, 38: { return min(cb, cs); }             // min / in
-        case 35: { return cb * cs; }                     // multiply
+        case 35: { return nuke_multiply(cs, cb); }       // multiply
         case 60: { return cb - cs; }                     // from
         case 37, 61: { return cb; }                      // under / atop (RGBA in nuke_composite)
         case 39, 43: { return max(cb, cs); }             // max / out
@@ -354,8 +362,8 @@ fn nuke_composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> 
     let sa = s_in.a;
     let a = vec4(s_in.rgb * sa, sa);
 
-    // in, mask and min change the backdrop even where the source is empty.
-    if (sa <= 0.0 && mode != 38 && mode != 49 && mode != 34) {
+    // in, mask, out, min, max and hypot change the backdrop even where the source is empty (blend.rs).
+    if (sa <= 0.0 && mode != 38 && mode != 49 && mode != 43 && mode != 34 && mode != 39 && mode != 48) {
         return b_in;
     }
 
@@ -370,15 +378,6 @@ fn nuke_composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> 
         case 42: { // plus
             m = vec4(a.rgb + b.rgb, min(sa + ba, 1.0));
         }
-        case 53: { // minus
-            m = vec4(a.rgb - b.rgb, clamp(sa - ba, 0.0, 1.0));
-        }
-        case 60: { // from
-            m = vec4(b.rgb - a.rgb, clamp(ba - sa, 0.0, 1.0));
-        }
-        case 35: { // multiply
-            m = vec4(a.rgb * b.rgb + b.rgb * (1.0 - sa), sa + ba * (1.0 - sa));
-        }
         case 40: { // screen
             m = vec4(nuke_screen(a.r, b.r), nuke_screen(a.g, b.g), nuke_screen(a.b, b.b), nuke_screen(sa, ba));
         }
@@ -387,15 +386,6 @@ fn nuke_composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> 
         }
         case 39: { // max
             m = vec4(max(a.rgb, b.rgb), max(sa, ba));
-        }
-        case 51: { // difference
-            m = vec4(abs(a.rgb - b.rgb), abs(sa - ba));
-        }
-        case 52: { // exclusion
-            m = vec4(a.rgb + b.rgb - 2.0 * a.rgb * b.rgb, sa + ba - 2.0 * sa * ba);
-        }
-        case 54: { // divide
-            m = vec4(nuke_divide(a.r, b.r), nuke_divide(a.g, b.g), nuke_divide(a.b, b.b), sa + ba * (1.0 - sa));
         }
         case 48: { // hypot
             m = vec4(sqrt(a.rgb * a.rgb + b.rgb * b.rgb), min(sqrt(sa * sa + ba * ba), 1.0));
@@ -414,22 +404,6 @@ fn nuke_composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> 
         }
         case 61: { // atop
             m = vec4(a.rgb * ba + b.rgb * (1.0 - sa), ba);
-        }
-        case 36: { // color-burn
-            m = vec4(
-                select(1.0 - (1.0 - b.r) / a.r, 0.0, a.r <= 1e-6),
-                select(1.0 - (1.0 - b.g) / a.g, 0.0, a.g <= 1e-6),
-                select(1.0 - (1.0 - b.b) / a.b, 0.0, a.b <= 1e-6),
-                sa + ba * (1.0 - sa)
-            );
-        }
-        case 41: { // color-dodge
-            m = vec4(
-                select(b.r / (1.0 - a.r), b.r, 1.0 - a.r <= 1e-6),
-                select(b.g / (1.0 - a.g), b.g, 1.0 - a.g <= 1e-6),
-                select(b.b / (1.0 - a.b), b.b, 1.0 - a.b <= 1e-6),
-                sa + ba * (1.0 - sa)
-            );
         }
         case 59: { // xor
             m = vec4(a.rgb * (1.0 - ba) + b.rgb * (1.0 - sa), clamp(sa * (1.0 - ba) + ba * (1.0 - sa), 0.0, 1.0));
@@ -450,7 +424,7 @@ fn nuke_composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> 
                 m = vec4(a.rgb + b.rgb * k, 1.0);
             }
         }
-        default: { // overlay, soft-light, hard-light, geometric, average: the general formula
+        default: { // the alpha-masked ops (see blend.rs nuke_composite): the general formula
             let blended = blend_rgb(mode, b_in.rgb, s_in.rgb);
             let ao = sa + ba * (1.0 - sa);
             m = vec4((1.0 - sa) * b.rgb + (1.0 - ba) * a.rgb + sa * ba * blended, ao);

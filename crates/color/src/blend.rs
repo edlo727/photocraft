@@ -873,12 +873,18 @@ fn nonseparable_hdr_wide(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3
 // ---- Nuke Merge operations (the `Nuke…` modes): Nuke's 32-bit maths, A = source, B = backdrop ----
 
 #[inline]
+/// Nuke's screen: `A + B - AB` if A or B is at most 1, else `max(A, B)` (Foundry's table; Natron's
+/// reimplementation branches the same way). Either input at or below 1 is enough, and there is no
+/// lower bound, so negative ACEScg values take the formula.
 pub fn nuke_screen(a: f32, b: f32) -> f32 {
-    if (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b) {
-        a + b - a * b
-    } else {
-        a.max(b)
-    }
+    if a <= 1.0 || b <= 1.0 { a + b - a * b } else { a.max(b) }
+}
+
+/// Nuke's multiply: `AB`, or `A` where both are negative, which stops two negatives making a
+/// positive (Foundry).
+#[inline]
+pub fn nuke_multiply(a: f32, b: f32) -> f32 {
+    if a < 0.0 && b < 0.0 { a } else { a * b }
 }
 
 /// Shared core of Nuke's `overlay` and `hard-light`: multiply below 0.5 of the deciding input
@@ -917,12 +923,10 @@ pub fn nuke_soft_light(a: f32, b: f32) -> f32 {
 }
 
 #[inline]
+/// Nuke's divide: `A / B`, or 0 where both are negative (Foundry). Foundry doesn't say what B = 0
+/// gives; this returns 0 rather than infinity.
 pub fn nuke_divide(a: f32, b: f32) -> f32 {
-    if b.abs() <= 1e-7 {
-        0.0
-    } else {
-        a / b
-    }
+    if (a < 0.0 && b < 0.0) || b.abs() <= 1e-7 { 0.0 } else { a / b }
 }
 
 /// `B(cb, cs)` of a Nuke colour operation (A = `cs`, B = `cb`); the compositing ones (in, out,
@@ -933,7 +937,7 @@ fn nuke_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
     match mode {
         BlendMode::NukeUnder | BlendMode::NukeAtop => cb,
         BlendMode::NukePlus => cs + cb,
-        BlendMode::NukeMultiply => cs * cb,
+        BlendMode::NukeMultiply => nuke_multiply(cs, cb),
         BlendMode::NukeScreen => nuke_screen(cs, cb),
         BlendMode::NukeMinus => cs - cb,
         BlendMode::NukeFrom => cb - cs,
@@ -1072,10 +1076,13 @@ fn nuke_composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity
     let sa = source[3];
     let a = [source[0] * sa, source[1] * sa, source[2] * sa, sa];
 
+    // An empty source leaves the backdrop as it was for most operations. Not for these: in, mask
+    // and out give nothing there (Ab, Ba, A(1-b) with A or a zero), and min, max and hypot treat
+    // the empty A as a value, which differs from B where B is negative.
     if sa <= 0.0
         && !matches!(
             mode,
-            BlendMode::NukeIn | BlendMode::NukeMask | BlendMode::NukeMin
+            BlendMode::NukeIn | BlendMode::NukeMask | BlendMode::NukeOut | BlendMode::NukeMin | BlendMode::NukeMax | BlendMode::NukeHypot
         )
     {
         return backdrop;
@@ -1100,24 +1107,6 @@ fn nuke_composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity
             a[2] + b[2],
             (sa + ba).min(1.0),
         ],
-        BlendMode::NukeMinus => [ // minus
-            a[0] - b[0],
-            a[1] - b[1],
-            a[2] - b[2],
-            (sa - ba).clamp(0.0, 1.0),
-        ],
-        BlendMode::NukeFrom => [ // from
-            b[0] - a[0],
-            b[1] - a[1],
-            b[2] - a[2],
-            (ba - sa).clamp(0.0, 1.0),
-        ],
-        BlendMode::NukeMultiply => [ // multiply
-            a[0] * b[0] + b[0] * (1.0 - sa),
-            a[1] * b[1] + b[1] * (1.0 - sa),
-            a[2] * b[2] + b[2] * (1.0 - sa),
-            sa + ba * (1.0 - sa),
-        ],
         BlendMode::NukeScreen => [ // screen
             nuke_screen(a[0], b[0]),
             nuke_screen(a[1], b[1]),
@@ -1135,24 +1124,6 @@ fn nuke_composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity
             a[1].max(b[1]),
             a[2].max(b[2]),
             sa.max(ba),
-        ],
-        BlendMode::NukeDifference => [ // difference
-            (a[0] - b[0]).abs(),
-            (a[1] - b[1]).abs(),
-            (a[2] - b[2]).abs(),
-            (sa - ba).abs(),
-        ],
-        BlendMode::NukeExclusion => [ // exclusion
-            a[0] + b[0] - 2.0 * a[0] * b[0],
-            a[1] + b[1] - 2.0 * a[1] * b[1],
-            a[2] + b[2] - 2.0 * a[2] * b[2],
-            sa + ba - 2.0 * sa * ba,
-        ],
-        BlendMode::NukeDivide => [ // divide
-            nuke_divide(a[0], b[0]),
-            nuke_divide(a[1], b[1]),
-            nuke_divide(a[2], b[2]),
-            sa + ba * (1.0 - sa),
         ],
         BlendMode::NukeHypot => [ // hypot
             (a[0] * a[0] + b[0] * b[0]).sqrt(),
@@ -1180,18 +1151,6 @@ fn nuke_composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity
             a[2] * ba + b[2] * (1.0 - sa),
             ba,
         ],
-        BlendMode::NukeColorBurn => [ // color-burn
-            if a[0] <= 1e-6 { 0.0 } else { 1.0 - (1.0 - b[0]) / a[0] },
-            if a[1] <= 1e-6 { 0.0 } else { 1.0 - (1.0 - b[1]) / a[1] },
-            if a[2] <= 1e-6 { 0.0 } else { 1.0 - (1.0 - b[2]) / a[2] },
-            sa + ba * (1.0 - sa),
-        ],
-        BlendMode::NukeColorDodge => [ // color-dodge
-            if 1.0 - a[0] <= 1e-6 { b[0] } else { b[0] / (1.0 - a[0]) },
-            if 1.0 - a[1] <= 1e-6 { b[1] } else { b[1] / (1.0 - a[1]) },
-            if 1.0 - a[2] <= 1e-6 { b[2] } else { b[2] / (1.0 - a[2]) },
-            sa + ba * (1.0 - sa),
-        ],
         BlendMode::NukeXor => [ // xor
             a[0] * (1.0 - ba) + b[0] * (1.0 - sa),
             a[1] * (1.0 - ba) + b[1] * (1.0 - sa),
@@ -1214,6 +1173,11 @@ fn nuke_composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity
                 [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k, 1.0]
             }
         }
+        // Every other operation runs as the export writes it, with Merge's alpha masking
+        // (`screen_alpha`): each input is unchanged where the other is empty, the alpha is
+        // a + b - ab, and where both cover, Foundry's formula on the colours. Applying the formula
+        // to the alpha instead, as a plain Merge does, gives difference, exclusion, minus and
+        // from an alpha of 0 over an opaque comp, which straight alpha stores as nothing at all.
         other => {
             let blended = blend_rgb_hdr(
                 other,
