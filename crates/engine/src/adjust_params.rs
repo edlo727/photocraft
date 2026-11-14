@@ -307,6 +307,8 @@ fn ocio_colorspace(r: &Reader, base: Option<&Adjustment>) -> Result<Adjustment> 
 /// A Grade knob as params: one number when the channels agree, else `[r, g, b]`.
 fn grade_knob(v: &[f32; 3]) -> Value {
     if v[0] == v[1] && v[1] == v[2] { json!(v[0]) } else { json!(v) }
+}
+
 /// Serialize editable tone records without the persistence serializer's display rounding.
 /// Opening a recorded Action must not quantize accepted Levels values or point coordinates
 /// before the user edits them. Pencil maps are already quantized by the checked parser.

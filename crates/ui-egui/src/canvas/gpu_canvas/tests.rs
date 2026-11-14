@@ -483,6 +483,7 @@ fn large_brush_buffers_fit_the_card() {
     assert_eq!(card_tier(Some(8 << 30)), (2, 4096));
     assert_eq!(card_tier(None), (2, 4096), "unknown or shared memory: the small tier");
     assert!(worst(Some(8 << 30)) <= 128 << 20 && worst(Some(16 << 30)) <= 460 << 20);
+}
 #[test]
 fn failed_gpu_attempt_is_recorded_separately_and_counted_in_frame_time() {
     let mut perf = Perf::default();

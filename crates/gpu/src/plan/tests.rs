@@ -399,6 +399,7 @@ fn a_live_stroke_plans_its_empty_layer_where_it_paints() {
         live.passes.iter().filter(|p| p.tex.as_ref().is_some_and(|t| t.layer == id)).all(|p| p.clip.is_none_or(|c| c.contains_rect(&at))),
         "over the stroke's rect"
     );
+}
 /// A chunk-sized texture per live slot: nesting isolated groups keeps every ancestor's slot
 /// live, so past a depth the plan is refused and the CPU composites instead.
 #[test]

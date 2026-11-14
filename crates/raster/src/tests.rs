@@ -1061,6 +1061,8 @@ fn region_copies_from_a_snapshot_match_plain_region_writes() {
         par.write_regions_par(&refs);
         let all = Rect::new(-400, -100, 2700, 500);
         assert_eq!(par.read_region(all), serial.read_region(all), "{fmt:?}");
+    }
+}
 #[test]
 fn fallible_interleaved_writes_match_encoded_pixels_and_reject_bad_lengths() {
     for sample in [SampleType::U8, SampleType::U16, SampleType::F32] {

@@ -661,7 +661,7 @@ fn selection_specific_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: 
                 if r.changed() {
                     let drag = if r.dragged() { ui.data(|d| d.get_temp::<u64>(drag_key)) } else { None };
                     crate::gradient_ui::opacity_changed(app, drag);
-
+                }
             }
             widgets::checkbox(ui, &mut app.ui.tool_options.gradient_reverse, tl!("Reverse"));
             widgets::checkbox(ui, &mut app.ui.tool_options.gradient_dither, tl!("Dither"));

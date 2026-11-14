@@ -607,6 +607,7 @@ fn write_points(v: &mut Value, key: &str, pts: &[[f32; 2]], view: CurveView, loo
         pts.iter().map(|q| [q[0].round(), q[1].round()]).collect()
     };
     v[key] = json!(out);
+}
 /// The channel position an Alt/Option+digit selects: 2 is the first channel (the composite),
 /// 3 the next, and so on (#7325). Reads the physical key, which Option changes on macOS.
 fn channel_for_key(event: &egui::Event) -> Option<usize> {
