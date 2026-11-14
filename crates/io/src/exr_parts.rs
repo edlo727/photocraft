@@ -266,7 +266,7 @@ pub fn import(name: &str, bytes: &[u8], sel: &Selection) -> Result<ImportResult,
         return Err(IoError::Unsupported("nothing imported".into()));
     }
     if f16_seen {
-        warnings.push("16-bit half-float samples open as 32-bit float (no loss); saving as EXR writes 16-bit half again".to_string());
+        warnings.push("16-bit float samples are stored as 32-bit float".to_string());
     }
     let mode = if gray_only { ColorMode::Grayscale } else { ColorMode::Rgb };
     let mut doc = Document::new(name, Size::new(max.0, max.1), mode, DocSample::F32);

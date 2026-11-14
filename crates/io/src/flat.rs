@@ -813,7 +813,7 @@ fn document_format(layout: ChannelLayout, sample: CSample) -> DocumentFormat {
     let (depth, sample, warning) = match sample {
         CSample::U8 => (SampleType::U8, CSample::U8, None),
         CSample::U16 => (SampleType::U16, CSample::U16, None),
-        CSample::F16 => (SampleType::F32, CSample::F32, Some("16-bit half-float samples open as 32-bit float (no loss); saving as EXR writes 16-bit half again".to_string())),
+        CSample::F16 => (SampleType::F32, CSample::F32, Some("16-bit float samples are stored as 32-bit float".to_string())),
         CSample::F32 => (SampleType::F32, CSample::F32, None),
     };
     DocumentFormat { mode, depth, layout, sample, warning }
