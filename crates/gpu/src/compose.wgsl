@@ -204,9 +204,7 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
     let hi = select(1.0, F32_MAX, hdr);
     var r = cs;                                                 // Normal, Dissolve, PassThrough
     let in_range = cb >= 0.0 && cb <= 1.0 && cs >= 0.0 && cs <= 1.0;
-    if (mode >= NUKE_BASE) {
-        r = nuke_channel(mode, cb, cs);
-    } else if (hdr && range_bound(mode) && !in_range) {
+    if (hdr && range_bound(mode) && !in_range) {
         r = max(cb, cs);
     } else {
     switch mode {
@@ -410,6 +408,13 @@ fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
 }
 
 fn blend_rgb(mode: i32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
+    // Nuke operations once, in a loop, rather than inlined per channel: every inlined copy of
+    // their switch grows each kernel that blends, which DX12's FXC compiles slowly.
+    if (mode >= NUKE_BASE) {
+        var o = vec3(0.0);
+        for (var i = 0; i < 3; i++) { o[i] = nuke_channel(mode, cb[i], cs[i]); }
+        return o;
+    }
     // blend_rgb_within: 32-bit documents keep values above 1 (f32::MAX).
     let top = select(1.0, F32_MAX, (op.flags & F_HDR) != 0u);
     switch mode {
@@ -524,11 +529,8 @@ fn nuke_composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> 
             let ap = cs * sa;
             let bp = cb * ba;
             let both = sa * ba;
-            let share = vec3(
-                nuke_masked_share(mode, cb.r, cs.r, bp.r, ap.r, both),
-                nuke_masked_share(mode, cb.g, cs.g, bp.g, ap.g, both),
-                nuke_masked_share(mode, cb.b, cs.b, bp.b, ap.b, both),
-            );
+            var share = vec3(0.0);
+            for (var i = 0; i < 3; i++) { share[i] = nuke_masked_share(mode, cb[i], cs[i], bp[i], ap[i], both); }
             let ao = sa + ba * (1.0 - sa);
             m = vec4((1.0 - sa) * bp + (1.0 - ba) * ap + share, ao);
         }
@@ -581,7 +583,8 @@ fn composite_fill(mode: i32, b: vec4<f32>, s: vec4<f32>, opacity: f32, fill: f32
     if (mode == M_NORMAL && !gamma_on && (op.flags & F_LAB) == 0u) { return composite_normal_fill(b, s, opacity, fill); }
     let f = clamp(fill, 0.0, 1.0);
     // Nuke operations take Fill as opacity (psblend::composite_fill: not one of the special eight).
-    if (mode >= NUKE_BASE) { return composite_g(mode, b, s, opacity * f, gamma_on); }
+    // With text gamma they take the general path below, as psblend::composite_gamma does.
+    if (mode >= NUKE_BASE && !gamma_on) { return nuke_composite(mode, b, s, opacity * f); }
     let special = f < 1.0 && fill_is_special(mode);
     let ab = b.a;
     var over = s.a * opacity;

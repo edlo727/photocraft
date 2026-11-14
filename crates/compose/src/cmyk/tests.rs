@@ -330,7 +330,10 @@ fn assert_matches_reference(d: &Document) {
     for y in rect.y0..rect.y1 {
         for x in rect.x0..rect.x1 {
             let i = ((y - rect.y0) * rect.width() as i32 + (x - rect.x0)) as usize;
-            let (g, want) = (got.px[i], ref_stack(&d.layers, x, y, [0.0; 5]));
+            // The reference composites outside a render, so it takes the document's depth as a
+            // render does (this fork's default is 32-bit, which doesn't clip the integer depths).
+            let want = crate::psblend::with_hdr(d.depth == photocraft_color::SampleType::F32, || ref_stack(&d.layers, x, y, [0.0; 5]));
+            let g = got.px[i];
             assert!(g.iter().all(|v| v.is_finite()), "({x},{y}) {g:?}");
             // Ink only means something where there is coverage.
             let close = |a: f32, b: f32| (a - b).abs() <= 1e-5;
