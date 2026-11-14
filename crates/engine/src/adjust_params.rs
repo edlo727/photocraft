@@ -327,13 +327,18 @@ pub fn to_dialog_params(adj: &Adjustment) -> Value {
             }
             params
         }
-        Adjustment::Curves { master, per_channel, space, black, pencil: false } => {
+        Adjustment::Curves { master, per_channel, space, black, pencil: false, lookup } => {
             let record = |c: &[CurvePoint]| json!(c.iter().map(|p| [p.input * 255.0, p.output * 255.0]).collect::<Vec<_>>());
             let mut params = json!({"points":record(if *space == ToneSpace::Lab { &per_channel[0] } else { master })});
             let identity = identity_curve();
             let ink = if black.len() >= 2 { black } else { &identity };
             for (key, channel) in channel_keys(*space).iter().zip(per_channel.iter().chain(std::iter::once(ink))) {
                 params[*key] = record(channel);
+            }
+            if !lookup.is_default() {
+                params["range"] = json!(lookup.span());
+                params["holdEnds"] = json!(lookup.hold_ends);
+                params["masterFirst"] = json!(lookup.master_first);
             }
             params
         }

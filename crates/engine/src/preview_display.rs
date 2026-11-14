@@ -149,8 +149,9 @@ fn build(c: &ColorState, doc: &Document, ocio_config: &str) -> CanvasPreview {
     } else if let Some(t) = cm.as_ref().and_then(|d| d.transform.clone())
         && t.inputs() == 3
         && (t.outputs() == 3 || t.outputs() == 1)
+        && let Ok(lut) = Lut3d::from_transform(&t, DISPLAY_LUT)
     {
-        p.lut = Some(Lut3d::from_transform(&t, DISPLAY_LUT));
+        p.lut = Some(lut);
     }
     p
 }
