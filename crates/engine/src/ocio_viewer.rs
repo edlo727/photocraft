@@ -482,10 +482,10 @@ mod tests {
                 continue;
             }
             let want = 1.055 * lin.powf(1.0 / 2.4) - 0.055;
-            let at = i + i * n + i * n * n;
-            let got = f64::from(kept.data[at][0]);
+            let at = [i as f32 / (n - 1) as f32; 3];
+            let got = f64::from(kept.sample(at)[0]);
             assert!((got - want).abs() < 0.03, "lin {lin}: shown {got}, image {want}");
-            darker |= f64::from(graded.data[at][0]) < want - 0.03;
+            darker |= f64::from(graded.sample(at)[0]) < want - 0.03;
         }
         assert!(darker, "the automatic input grades the image through the ACES tone curve");
         let mut s = Session::new();
