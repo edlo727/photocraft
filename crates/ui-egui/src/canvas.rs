@@ -465,6 +465,7 @@ fn paint_canvas(
             display: sync_display_lut(app, doc, key, output),
             output: output.unwrap_or(0),
             hdr: hdr_preview(app, doc),
+            channel: app.session.color.viewer_channel(doc.id).code(),
             offset: [0.0, 0.0],
         };
         paint_gpu_view(painter, rect, params, &pattern);

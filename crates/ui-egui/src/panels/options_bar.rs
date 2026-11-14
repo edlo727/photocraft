@@ -651,17 +651,7 @@ fn selection_specific_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: 
                     starts_blend_group(*m) || *m == BlendMode::NukeMin
                 });
                 opt_label(ui, tl!("Opacity"));
-                let r = widgets::value_field(ui, &mut app.ui.tool_options.fill_opacity, 1.0..=100.0, "%", 62.0);
-                // Live while scrubbed, one undo step per scrub (#5012).
-                let drag_key = r.id.with("gradient-opacity-drag");
-                if r.drag_started() {
-                    let n = ui.ctx().cumulative_pass_nr();
-                    ui.data_mut(|d| d.insert_temp(drag_key, n));
-                }
-                if r.changed() {
-                    let drag = if r.dragged() { ui.data(|d| d.get_temp::<u64>(drag_key)) } else { None };
-                    crate::gradient_ui::opacity_changed(app, drag);
-                }
+                widgets::value_field(ui, &mut app.ui.tool_options.fill_opacity, 1.0..=100.0, "%", 62.0);
             }
             widgets::checkbox(ui, &mut app.ui.tool_options.gradient_reverse, tl!("Reverse"));
             widgets::checkbox(ui, &mut app.ui.tool_options.gradient_dither, tl!("Dither"));

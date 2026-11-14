@@ -244,7 +244,6 @@ impl PhotocraftApp {
         layers_panel_ui::restore_options(&mut app);
         histogram_panel::restore_options(&mut app);
         kys_import::offer_import(&mut app);
-        notices::wayland_file_drop_guidance(&mut app);
         // File › Scripts › Script Events Manager: "Start Application".
         photocraft_engine::automate_cmds::fire_event(&mut app.session, "startApplication");
         app

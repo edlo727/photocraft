@@ -486,7 +486,7 @@ struct DamageCx {
     /// This frame's revision and raw display key.
     now: (u64, u64),
     display_key: u64,
-    last_damage: Option<DRect>,
+    last_damage: (u64, Option<DRect>),
     /// The region a blend preview may have to refresh, and the viewport itself.
     blend_visible: DRect,
     visible: DRect,
