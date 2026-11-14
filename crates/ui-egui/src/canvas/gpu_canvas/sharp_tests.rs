@@ -39,6 +39,7 @@ fn view(doc: u64, doc_size: [u32; 2], zoom: f32) -> ViewParams {
         display: 0,
         output: 0,
         hdr: None,
+        channel: 0,
         offset: [0.0, 0.0],
     }
 }

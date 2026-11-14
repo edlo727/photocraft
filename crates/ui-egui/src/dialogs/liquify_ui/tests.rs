@@ -367,7 +367,7 @@ fn undo_rerenders_the_proxy_before_the_next_texture_upload() {
     assert_ne!(d.out, before, "undo must update the pixels shown by the existing texture");
 
     let mut expected = vec![[0u8; 4]; d.proxy.w * d.proxy.h];
-    d.proxy.render(&d.field, [0, 0, d.proxy.w, d.proxy.h], &mut expected);
+    d.proxy.render(&d.field, [0, 0, d.proxy.w, d.proxy.h], &mut expected, photocraft_algo::liquify::NO_ENCODE);
     assert_eq!(d.out, expected, "dirty upload source must match the rebuilt field");
 }
 
@@ -732,7 +732,7 @@ fn pinch_and_wheel_zoom_the_preview_about_the_pointer() {
 fn replayed_out(d: &LiquifyDialog) -> Vec<[u8; 4]> {
     let field = LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes);
     let mut out = vec![[0u8; 4]; d.proxy.w * d.proxy.h];
-    d.proxy.render(&field, [0, 0, d.proxy.w, d.proxy.h], &mut out);
+    d.proxy.render(&field, [0, 0, d.proxy.w, d.proxy.h], &mut out, photocraft_algo::liquify::NO_ENCODE);
     out
 }
 
@@ -1090,7 +1090,7 @@ fn preview_off_shows_the_original_and_p_toggles_it() {
     open(&mut app, &ctx).unwrap();
     let render = |d: &LiquifyDialog, field: &LiquifyField| {
         let mut out = vec![[0u8; 4]; d.proxy.w * d.proxy.h];
-        d.proxy.render(field, [0, 0, d.proxy.w, d.proxy.h], &mut out);
+        d.proxy.render(field, [0, 0, d.proxy.w, d.proxy.h], &mut out, photocraft_algo::liquify::NO_ENCODE);
         out
     };
     let d = app.distort.liquify.as_ref().unwrap();
@@ -1240,7 +1240,7 @@ fn a_targeted_channels_preview_shows_liquify_only_inside_the_selection() {
     d.dirty = Some([0, 0, d.proxy.w, d.proxy.h]);
     d.render_dirty();
     let mut original = vec![[0u8; 4]; d.proxy.w * d.proxy.h];
-    d.proxy.render(&LiquifyField::new(d.canvas, d.cell), [0, 0, d.proxy.w, d.proxy.h], &mut original);
+    d.proxy.render(&LiquifyField::new(d.canvas, d.cell), [0, 0, d.proxy.w, d.proxy.h], &mut original, photocraft_algo::liquify::NO_ENCODE);
     let doc_x = |i: usize| d.proxy.bounds.x0 as f64 + ((i % d.proxy.w) as f64 + 0.5) * d.proxy.scale;
     let (mut outside, mut inside_changed) = (0, 0);
     for (i, (a, b)) in d.out.iter().zip(&original).enumerate() {
@@ -1299,7 +1299,7 @@ fn the_preview_shows_liquify_only_inside_the_selection() {
     assert!(d.field.max_displacement() > 3.0);
     // The proxy: unselected pixels as the untouched image renders them, selected ones warped.
     let mut original = vec![[0u8; 4]; d.proxy.w * d.proxy.h];
-    d.proxy.render(&LiquifyField::new(d.canvas, d.cell), [0, 0, d.proxy.w, d.proxy.h], &mut original);
+    d.proxy.render(&LiquifyField::new(d.canvas, d.cell), [0, 0, d.proxy.w, d.proxy.h], &mut original, photocraft_algo::liquify::NO_ENCODE);
     let doc_x = |i: usize| d.proxy.bounds.x0 as f64 + ((i % d.proxy.w) as f64 + 0.5) * d.proxy.scale;
     let (mut outside, mut inside_changed) = (0, 0);
     for (i, (a, b)) in d.out.iter().zip(&original).enumerate() {
@@ -1369,10 +1369,10 @@ fn the_preview_on_a_smart_object_follows_its_filter_mask() {
     let d = app.distort.liquify.as_mut().unwrap();
     let placed = ProxyImage::new(&placed, d.canvas, PROXY_SIDE);
     let mut original = vec![[0u8; 4]; d.proxy.w * d.proxy.h];
-    placed.render(&LiquifyField::new(d.canvas, d.cell), [0, 0, d.proxy.w, d.proxy.h], &mut original);
+    placed.render(&LiquifyField::new(d.canvas, d.cell), [0, 0, d.proxy.w, d.proxy.h], &mut original, photocraft_algo::liquify::NO_ENCODE);
     // Inside the mask it edits the blurred pixels: the blur alone must not count as the Liquify.
     let mut input = vec![[0u8; 4]; d.proxy.w * d.proxy.h];
-    d.proxy.render(&LiquifyField::new(d.canvas, d.cell), [0, 0, d.proxy.w, d.proxy.h], &mut input);
+    d.proxy.render(&LiquifyField::new(d.canvas, d.cell), [0, 0, d.proxy.w, d.proxy.h], &mut input, photocraft_algo::liquify::NO_ENCODE);
     let doc_x = |i: usize| d.proxy.bounds.x0 as f64 + ((i % d.proxy.w) as f64 + 0.5) * d.proxy.scale;
     let (mut masked, mut shown_changed) = (0, 0);
     for (i, (a, (b, c))) in d.out.iter().zip(original.iter().zip(&input)).enumerate() {
