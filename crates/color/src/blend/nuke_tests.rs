@@ -24,6 +24,24 @@ fn nuke_hard_light_matches_nuke_merge_math_and_keeps_float() {
 }
 
 #[test]
+fn nuke_soft_light_matches_nuke_merge_math_and_keeps_float() {
+    // Foundry's documented algorithm, A = source (top), B = backdrop:
+    // B(2A + B(1 - AB)) where AB < 1, else 2AB.
+    let sl = |a: f32, b: f32| blend_channel(BlendMode::NukeSoftLight, b, a);
+    // Unlike Photoshop's soft light it lightens at A = 0.5 too.
+    assert!(close(sl(0.5, 0.5), 0.6875), "{}", sl(0.5, 0.5));
+    // The B(1 - AB) term, not B(1 - 2A): an earlier version had 0.896 here.
+    assert!(close(sl(0.8, 0.8), 1.5104), "{}", sl(0.8, 0.8));
+    assert!(close(sl(0.0, 0.6), 0.36));
+    // Continuous where it switches to 2AB.
+    assert!(close(sl(1.0, 1.0), 2.0));
+    // Above 1 nothing is clipped first: a hot A over a dark B stays in the AB < 1 branch...
+    assert!(close(sl(4.0, 0.1), 0.806), "{}", sl(4.0, 0.1));
+    // ...and a bright plate takes 2AB.
+    assert!(close(sl(2.0, 1.0), 4.0));
+}
+
+#[test]
 fn photoshop_modes_keep_highlights_in_32_bit() {
     // Screen of a 50.0 sun over itself is the sun, not 100 - 2500.
     for mode in [BlendMode::Screen, BlendMode::Overlay, BlendMode::HardLight, BlendMode::SoftLight, BlendMode::ColorDodge, BlendMode::Exclusion] {

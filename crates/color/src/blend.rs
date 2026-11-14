@@ -908,14 +908,12 @@ pub fn nuke_hard_light(a: f32, b: f32) -> f32 {
 }
 
 #[inline]
+/// Nuke's soft-light, as Foundry documents it: `B(2A + B(1 - AB))` where `AB < 1`, else `2AB`.
+/// `a` is the top input (A), `b` the background (B). Unclamped: the `AB < 1` switch is how Nuke
+/// handles light above 1, and clipping first would darken an HDR plate.
 pub fn nuke_soft_light(a: f32, b: f32) -> f32 {
-    let a_c = a.clamp(0.0, 1.0);
-    let b_c = b.clamp(0.0, 1.0);
-    if a_c * b_c < 1.0 {
-        b_c * (2.0 * a_c + (b_c * (1.0 - a_c * 2.0)))
-    } else {
-        2.0 * b_c * a_c
-    }
+    let ab = a * b;
+    if ab < 1.0 { b * (2.0 * a + b * (1.0 - ab)) } else { 2.0 * ab }
 }
 
 #[inline]

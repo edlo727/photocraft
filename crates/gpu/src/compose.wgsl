@@ -236,11 +236,11 @@ fn nuke_light(x: f32, y: f32) -> f32 {
 fn nuke_overlay(a: f32, b: f32) -> f32 { return nuke_light(b, a); }    // A over B, decided by B
 fn nuke_hard_light(a: f32, b: f32) -> f32 { return nuke_light(a, b); } // decided by A
 
+// Nuke's soft-light: B(2A + B(1 - AB)) where AB < 1, else 2AB. Unclamped (matches blend.rs).
 fn nuke_soft_light(a: f32, b: f32) -> f32 {
-    let ac = clamp(a, 0.0, 1.0);
-    let bc = clamp(b, 0.0, 1.0);
-    if (ac * bc < 1.0) { return bc * (2.0 * ac + (bc * (1.0 - ac * 2.0))); }
-    return 2.0 * bc * ac;
+    let ab = a * b;
+    if (ab < 1.0) { return b * (2.0 * a + b * (1.0 - ab)); }
+    return 2.0 * ab;
 }
 
 fn nuke_divide(a: f32, b: f32) -> f32 {
