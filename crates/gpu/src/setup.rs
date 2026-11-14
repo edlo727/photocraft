@@ -177,7 +177,21 @@ impl Compositor {
                 })
                 .collect::<Vec<_>>()
         };
-        let built: Vec<_> = if sequential { jobs.into_iter().map(build_one).collect() } else { fx::par_map(jobs, build_one) };
+        // GL serialises every call through one context lock that wgpu-hal gives up on after a
+        // second, panicking in whichever build thread waited ("Could not lock adapter context"):
+        // with the compositor's shader that happens while other threads compile. A panicking
+        // parallel build is retried one pipeline at a time, which never waits on the lock.
+        let built: Vec<_> = if sequential {
+            jobs.into_iter().map(build_one).collect()
+        } else {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fx::par_map(jobs.clone(), &build_one))) {
+                Ok(built) => built,
+                Err(_) => {
+                    log::warn!("GPU compositor: parallel pipeline build failed; building one pipeline at a time");
+                    jobs.into_iter().map(&build_one).collect()
+                }
+            }
+        };
         let built = built.into_iter().flatten();
         let (mut pipelines, mut maps) = (HashMap::new(), Vec::new());
         let (mut error, mut map_error) = (None, None);

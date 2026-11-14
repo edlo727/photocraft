@@ -129,6 +129,7 @@ pub const SHADER: &str = include_str!("compose.wgsl");
 
 /// One thread's share of the compositor's pipelines: the vertex entry point (in
 /// [`vertex_shader`]) and the (kernel, target format) pairs it builds.
+#[derive(Clone)]
 pub(crate) struct BuildJob {
     pub(crate) vertex: String,
     pub(crate) keys: Vec<(Kernel, wgpu::TextureFormat)>,
