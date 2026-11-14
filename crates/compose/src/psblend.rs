@@ -197,6 +197,19 @@ pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity:
     // Normal goes through the same arithmetic, in the same order, as the buffer loop's fast path
     // (`normal_rgb`), so a pixel comes out bit-identical whichever of the two composites it.
     if mode == BlendMode::Normal {
+        // Lab documents mix Normal in CIELAB, as Photoshop does (and the GPU's `composite`).
+        if LAB_MIX.with(std::cell::Cell::get) {
+            let ab = backdrop[3];
+            let as_ = source[3] * opacity;
+            let ao = as_ + ab * (1.0 - as_);
+            if as_ > 0.0 && ab > 0.0 && ao > 0.0 {
+                let lb = photocraft_color::convert::srgb_to_lab([backdrop[0], backdrop[1], backdrop[2]]);
+                let ls = photocraft_color::convert::srgb_to_lab([source[0], source[1], source[2]]);
+                let (kb, k) = (ab * (1.0 - as_) / ao, as_ / ao);
+                let r = photocraft_color::convert::lab_to_srgb(std::array::from_fn(|i| lb[i] * kb + ls[i] * k));
+                return [r[0], r[1], r[2], ao];
+            }
+        }
         return composite_normal_rgb(backdrop, source, opacity);
     }
     if hdr() { generic::composite_hdr(mode, backdrop, source, opacity) } else { generic::composite_with_blend(mode, backdrop, source, opacity, blend_rgb) }

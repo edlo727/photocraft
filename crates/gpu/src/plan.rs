@@ -61,6 +61,13 @@ pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
 /// [`plan`], with layers a Large Brush Mode stroke paints into on the GPU covering where it
 /// paints (`live`: layer and document rect) as well as their own pixels.
 pub fn plan_live<'a>(doc: &'a Document, live: &[(LayerId, Rect)]) -> Result<Plan<'a>, Unsupported> {
+    // Planning asks the CPU compositor's rules (text gamma, among others), which depend on the
+    // document's depth: set it as rendering does, or a type layer's gamma follows whatever the
+    // thread last composited.
+    photocraft_compose::psblend::with_hdr(doc.depth == photocraft_color::SampleType::F32, || plan_in_blend_space(doc, live))
+}
+
+fn plan_in_blend_space<'a>(doc: &'a Document, live: &[(LayerId, Rect)]) -> Result<Plan<'a>, Unsupported> {
     if doc.mode == photocraft_color::ColorMode::Multichannel {
         return Err(Unsupported("Multichannel inks (printed on the CPU)".into()));
     }
