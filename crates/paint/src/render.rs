@@ -1013,10 +1013,18 @@ impl StrokeRenderer {
         if dabs.len() < 2 {
             return false;
         }
-        let rects: Vec<Rect> = dabs.iter().map(|d| self.ctx.dab_rect(d, false)).collect();
+        let mut rects: Vec<Rect> = dabs.iter().map(|d| self.ctx.dab_rect(d, false)).collect();
         let area = rects.iter().fold(0usize, |a, r| a.saturating_add(r.width().max(0) as usize * r.height().max(0) as usize));
         if !parallel(area) {
             return false;
+        }
+        // The dab-by-dab loop's admission, in stroke order: a dab that can't reach the clip (the
+        // canvas) or no longer fits the area budget is neither rasterised nor counted in the
+        // bounds, which are the stroke's damage.
+        for r in &mut rects {
+            if !admit(self.clip, &mut self.area_left, &mut self.refused, *r) {
+                *r = Rect::EMPTY;
+            }
         }
         let nc = self.cov.nc;
         let colors: Vec<Option<([f32; 8], usize)>> = dabs

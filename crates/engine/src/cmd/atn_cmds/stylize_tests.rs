@@ -225,7 +225,9 @@ fn trace_levels_clamp_on_import_and_play_at_the_boundary() {
             let expected = desc("null").with("Lvl ", D::Integer(clamped)).with("Edg ", enm("CntE", edge));
             assert_eq!(saved[0].descriptor.as_ref().unwrap().to_bytes(), expected.to_bytes());
             assert!(saved[0].with_dialog);
-            for depth in [8, 16, 32] {
+            // Not 32-bit: Trace Contour works on 0..1 values and is refused on a linear plate
+            // (filters::has_filterable_layer_in_range); see the check at the end.
+            for depth in [8, 16] {
                 let mut direct = Session::new();
                 prepare_pattern(&mut imported, depth, "rgb");
                 prepare_pattern(&mut direct, depth, "rgb");
@@ -242,6 +244,11 @@ fn trace_levels_clamp_on_import_and_play_at_the_boundary() {
     for level in [json!(-1), json!(256), json!(255.5), json!(2147483648.0)] {
         assert!(export_item("filter.stylize.traceContour", &json!({"level":level}), "Group D").is_none(), "{level}");
     }
+    // A 32-bit document refuses it, played or direct, rather than clipping the highlights.
+    let mut imported = load_items(vec![code_item("TrcC", desc("null").with("Lvl ", D::Integer(128)).with("Edg ", enm("CntE", "Lwr ")))]);
+    prepare_pattern(&mut imported, 32, "rgb");
+    let played = imported.execute("actions.play", json!({"action":"A"})).unwrap();
+    assert!(played["failed"]["error"].as_str().is_some_and(|e| e.contains("32-bit float")), "{played}");
 }
 
 /// Every enumerator is explicit, and unknown values or enum types retain the original flagged step.
@@ -369,7 +376,9 @@ fn imported_group_d_playback_matches_direct_commands_across_modes_and_depths() {
         .chain(["FndE", "Slrz", "Fct ", "Frgm"].map(|code| code_item(code, desc("null"))))
         .collect();
     for single_state in [true, false] {
-        for (depth, mode) in [(8, "rgb"), (16, "rgb"), (32, "rgb"), (8, "gray"), (8, "cmyk"), (16, "lab")] {
+        // Not 32-bit: Group D's filters work on 0..1 values and a linear plate refuses them
+        // (filters::has_filterable_layer_in_range; trace_levels_clamp_on_import_and_play_at_the_boundary).
+        for (depth, mode) in [(8, "rgb"), (16, "rgb"), (8, "gray"), (8, "cmyk"), (16, "lab")] {
             let mut imported = load_items(items.clone());
             imported.execute("actions.setHistory", json!({"singleState": single_state})).unwrap();
             imported.actions.list[0].disabled.insert(10);

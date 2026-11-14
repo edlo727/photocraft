@@ -237,6 +237,9 @@ pub(super) fn check_value(path: &str, v: &Value) -> std::result::Result<(), Stri
     if matches!(path, "performance.renderingMode" | "performance.memoryUsagePercent") && v.is_null() {
         return Ok(()); // Legacy policy, resolved from useGpu and gpuBackend.
     }
+    if path == "performance.performanceMode" && v.is_null() {
+        return Ok(()); // Not chosen: follows Rendering Mode (`Performance::effective_performance_mode`).
+    }
     if let Some(c) = choices(path) {
         let s = v.as_str().ok_or_else(|| format!("`{path}` must be one of {}", c.join("|")))?;
         if !c.contains(&s) {
