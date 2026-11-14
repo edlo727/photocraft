@@ -264,65 +264,54 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
 }
 
 // ---- Nuke Merge operations (A = source, B = backdrop; Nuke's 32-bit maths, measured in Nuke 17) ----
-// Mirrors photocraft_color::blend; see its comments for what each formula is.
+// Mirrors photocraft_color::blend; see its comments for what each formula is. Written on whole
+// colours with `select`, never per channel or in loops: HLSL inlines every call, and DX12's FXC
+// gives up ("compilation aborted unexpectedly") on fs_blend once these are copied per channel or
+// indexed dynamically.
 
 fn nuke_screen(a: f32, b: f32) -> f32 {
     if (a >= 0.0 && a <= 1.0 && b >= 0.0 && b <= 1.0) { return a + b - a * b; }
     return max(a, b);
 }
 
-fn nuke_multiply(a: f32, b: f32) -> f32 {
-    if (a < 0.0 && b < 0.0) { return a; }
-    return a * b;
-}
+fn in01(v: vec3<f32>) -> vec3<bool> { return (v >= vec3(0.0)) & (v <= vec3(1.0)); }
+fn neg(v: vec3<f32>) -> vec3<bool> { return v < vec3(0.0); }
+
+fn nk_screen(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> { return select(max(a, b), a + b - a * b, in01(a) & in01(b)); }
+fn nk_multiply(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> { return select(a * b, a, neg(a) & neg(b)); }
 
 // overlay / hard-light core: deciding input x clamped to 0..1, y to 0 and above, result to 1 and below.
-fn nuke_light(x_in: f32, y_in: f32) -> f32 {
-    let x = clamp(x_in, 0.0, 1.0);
-    let y = max(y_in, 0.0);
-    var v = 1.0 - 2.0 * (1.0 - x) * (1.0 - y);
-    if (x <= 0.5) { v = 2.0 * x * y; }
-    return min(v, 1.0);
-}
-fn nuke_overlay(a: f32, b: f32) -> f32 { return nuke_light(b, a); }    // A over B, decided by B
-fn nuke_hard_light(a: f32, b: f32) -> f32 { return nuke_light(a, b); } // decided by A
-
-fn nuke_soft_light_p(a: f32, b: f32, p: f32) -> f32 {
-    if (p < 1.0) { return b * (2.0 * a + b * (1.0 - p)); }
-    return 2.0 * a * b;
-}
-fn nuke_soft_light(a_in: f32, b_in: f32) -> f32 {
-    let a = max(a_in, 0.0);
-    let b = max(b_in, 0.0);
-    return nuke_soft_light_p(a, b, a * b);
+fn nk_light(x_in: vec3<f32>, y_in: vec3<f32>) -> vec3<f32> {
+    let x = clamp(x_in, vec3(0.0), vec3(1.0));
+    let y = max(y_in, vec3(0.0));
+    return min(select(1.0 - 2.0 * (1.0 - x) * (1.0 - y), 2.0 * x * y, x <= vec3(0.5)), vec3(1.0));
 }
 
-fn nuke_divide(a: f32, b: f32) -> f32 {
-    if (b > 0.0) { return a / b; }
-    return a;
+fn nk_soft_light_p(a: vec3<f32>, b: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+    return select(2.0 * a * b, b * (2.0 * a + b * (1.0 - p)), p < vec3(1.0));
 }
 
-fn nuke_exclusion(a: f32, b: f32) -> f32 {
-    if (a < 0.0 || b < 0.0) { return a + b; }
-    return a + b - 2.0 * a * b;
+fn nk_divide(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let pos = b > vec3(0.0);
+    return select(a, a / select(vec3(1.0), b, pos), pos);
 }
 
-fn nuke_geometric(a: f32, b: f32) -> f32 {
+fn nk_geometric(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
     let sum = a + b;
-    if (a < 0.0 || b < 0.0 || sum == 0.0) { return 0.0; }
-    return 2.0 * a * b / sum;
+    let zero = neg(a) | neg(b) | (sum == vec3(0.0));
+    return select(2.0 * a * b / select(sum, vec3(1.0), zero), vec3(0.0), zero);
 }
 
-fn nuke_color_dodge(a_in: f32, b_in: f32) -> f32 {
-    let a = max(a_in, 0.0);
-    let b = max(b_in, 0.0);
-    if (a >= 1.0) { return 1.0; }
-    return min(b / (1.0 - a), 1.0);
+fn nk_color_dodge(a_in: vec3<f32>, b_in: vec3<f32>) -> vec3<f32> {
+    let a = max(a_in, vec3(0.0));
+    let b = max(b_in, vec3(0.0));
+    let one = a >= vec3(1.0);
+    return select(min(b / select(1.0 - a, vec3(1.0), one), vec3(1.0)), vec3(1.0), one);
 }
 
-fn nuke_color_burn(a: f32, b: f32) -> f32 {
-    if (a <= 0.0) { return 0.0; }
-    return max(1.0 - (1.0 - max(b, 0.0)) / a, 0.0);
+fn nk_color_burn(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let zero = a <= vec3(0.0);
+    return select(max(1.0 - (1.0 - max(b, vec3(0.0))) / select(a, vec3(1.0), zero), vec3(0.0)), vec3(0.0), zero);
 }
 
 // overlay, hard-light, soft-light, color-dodge, color-burn: Nuke clamps both colours to 0 and above.
@@ -330,30 +319,34 @@ fn nuke_clamps_inputs(mode: i32) -> bool {
     return mode == 44 || mode == 46 || mode == 45 || mode == 41 || mode == 36;
 }
 
-fn nuke_channel(mode: i32, cb: f32, cs: f32) -> f32 {
-    // Each case assigns and the one return is at the end: DX12's FXC rejects a switch whose
-    // cases all return (see blend_channel).
+// photocraft_color::blend::nuke_channel on a whole colour (A = cs, B = cb).
+fn nuke_rgb(mode: i32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
+    // Each case assigns and the one return is at the end (see blend_channel).
     var r = cs;
     switch mode {
-        case 34, 38: { r = min(cb, cs); }             // min / in
-        case 35: { r = nuke_multiply(cs, cb); }       // multiply
-        case 60: { r = cb - cs; }                     // from
-        case 37, 61: { r = cb; }                      // under / atop (RGBA in nuke_composite)
-        case 39, 43: { r = max(cb, cs); }             // max / out
-        case 40: { r = nuke_screen(cs, cb); }         // screen
-        case 41: { r = nuke_color_dodge(cs, cb); }    // color-dodge
-        case 36: { r = nuke_color_burn(cs, cb); }     // color-burn
-        case 42: { r = cs + cb; }                     // plus
-        case 44: { r = nuke_overlay(cs, cb); }        // overlay
-        case 45: { r = nuke_soft_light(cs, cb); }     // soft-light
-        case 46: { r = nuke_hard_light(cs, cb); }     // hard-light
-        case 47: { r = nuke_geometric(cs, cb); }      // geometric
-        case 48: { r = sqrt(cs * cs + cb * cb); }     // hypot
-        case 51: { r = abs(cs - cb); }                // difference
-        case 52: { r = nuke_exclusion(cs, cb); }      // exclusion
-        case 53: { r = cs - cb; }                     // minus
-        case 54: { r = nuke_divide(cs, cb); }         // divide
-        case 56: { r = 0.5 * (cs + cb); }             // average
+        case 34, 38: { r = min(cb, cs); }                                        // min / in
+        case 35: { r = nk_multiply(cs, cb); }                                     // multiply
+        case 60: { r = cb - cs; }                                                 // from
+        case 37, 61: { r = cb; }                                                  // under / atop
+        case 39, 43: { r = max(cb, cs); }                                         // max / out
+        case 40: { r = nk_screen(cs, cb); }                                       // screen
+        case 41: { r = nk_color_dodge(cs, cb); }                                  // color-dodge
+        case 36: { r = nk_color_burn(cs, cb); }                                   // color-burn
+        case 42: { r = cs + cb; }                                                 // plus
+        case 44: { r = nk_light(cb, cs); }                                        // overlay (decided by B)
+        case 45: {                                                                // soft-light
+            let a = max(cs, vec3(0.0));
+            let b = max(cb, vec3(0.0));
+            r = nk_soft_light_p(a, b, a * b);
+        }
+        case 46: { r = nk_light(cs, cb); }                                        // hard-light (decided by A)
+        case 47: { r = nk_geometric(cs, cb); }                                    // geometric
+        case 48: { r = sqrt(cs * cs + cb * cb); }                                 // hypot
+        case 51: { r = abs(cs - cb); }                                            // difference
+        case 52: { r = select(cs + cb - 2.0 * cs * cb, cs + cb, neg(cs) | neg(cb)); } // exclusion
+        case 53: { r = cs - cb; }                                                 // minus
+        case 54: { r = nk_divide(cs, cb); }                                       // divide
+        case 56: { r = 0.5 * (cs + cb); }                                         // average
         default: { r = cs; }
     }
     return r;
@@ -361,20 +354,18 @@ fn nuke_channel(mode: i32, cb: f32, cs: f32) -> f32 {
 
 // The alpha-masked share where both inputs cover (blend.rs nuke_composite): `cs`/`cb` straight,
 // `ap`/`bp` premultiplied, `both` = ab.
-fn nuke_masked_share(mode: i32, cb: f32, cs: f32, bp: f32, ap: f32, both: f32) -> f32 {
-    // One return at the end: DX12's FXC rejects a switch whose cases all return.
-    var r = both * nuke_channel(mode, cb, cs);
-    if (mode == 53) {                                                    // minus
+fn nuke_masked_share(mode: i32, cb: vec3<f32>, cs: vec3<f32>, bp: vec3<f32>, ap: vec3<f32>, both: f32) -> vec3<f32> {
+    var r = both * nuke_rgb(mode, cb, cs);
+    if (mode == 53) {                                                         // minus
         r = both * (ap - bp);
-    } else if (mode == 60) {                                             // from
+    } else if (mode == 60) {                                                  // from
         r = both * (bp - ap);
-    } else if (mode == 54) {                                             // divide
-        r = both * cs;
-        if (bp > 0.0) { r = ap / bp; }
-    } else if (mode == 47) {                                             // geometric
-        r = nuke_geometric(ap, bp);
-    } else if (mode == 45) {                                             // soft-light
-        r = both * nuke_soft_light_p(cs, cb, cs * bp);
+    } else if (mode == 54) {                                                  // divide
+        r = select(both * cs, ap / select(vec3(1.0), bp, bp > vec3(0.0)), bp > vec3(0.0));
+    } else if (mode == 47) {                                                  // geometric
+        r = nk_geometric(ap, bp);
+    } else if (mode == 45) {                                                  // soft-light
+        r = both * nk_soft_light_p(cs, cb, cs * bp);
     }
     return r;
 }
@@ -408,13 +399,8 @@ fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
 }
 
 fn blend_rgb(mode: i32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
-    // Nuke operations once, in a loop, rather than inlined per channel: every inlined copy of
-    // their switch grows each kernel that blends, which DX12's FXC compiles slowly.
-    if (mode >= NUKE_BASE) {
-        var o = vec3(0.0);
-        for (var i = 0; i < 3; i++) { o[i] = nuke_channel(mode, cb[i], cs[i]); }
-        return o;
-    }
+    // Nuke operations on the whole colour (see nuke_rgb).
+    if (mode >= NUKE_BASE) { return nuke_rgb(mode, cb, cs); }
     // blend_rgb_within: 32-bit documents keep values above 1 (f32::MAX).
     let top = select(1.0, F32_MAX, (op.flags & F_HDR) != 0u);
     switch mode {
@@ -529,8 +515,7 @@ fn nuke_composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> 
             let ap = cs * sa;
             let bp = cb * ba;
             let both = sa * ba;
-            var share = vec3(0.0);
-            for (var i = 0; i < 3; i++) { share[i] = nuke_masked_share(mode, cb[i], cs[i], bp[i], ap[i], both); }
+            let share = nuke_masked_share(mode, cb, cs, bp, ap, both);
             let ao = sa + ba * (1.0 - sa);
             m = vec4((1.0 - sa) * bp + (1.0 - ba) * ap + share, ao);
         }
