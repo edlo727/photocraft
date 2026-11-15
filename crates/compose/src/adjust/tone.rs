@@ -426,27 +426,9 @@ pub fn spline_samples(points: &[CurvePoint], n_out: usize, range: f32, clamp: bo
         return (0..n_out).map(at).collect();
     }
     let n = pts.len();
-    // Second derivatives of the natural spline (tridiagonal solve).
-    let mut m2 = vec![0.0f64; n];
     let x: Vec<f64> = pts.iter().map(|p| f64::from(p.0)).collect();
     let y: Vec<f64> = pts.iter().map(|p| f64::from(p.1)).collect();
-    if n > 2 {
-        let mut c = vec![0.0f64; n];
-        let mut d = vec![0.0f64; n];
-        for i in 1..n - 1 {
-            let (h0, h1) = (x[i] - x[i - 1], x[i + 1] - x[i]);
-            let a = h0 / 6.0;
-            let b = (h0 + h1) / 3.0;
-            let cc = h1 / 6.0;
-            let r = (y[i + 1] - y[i]) / h1 - (y[i] - y[i - 1]) / h0;
-            let denom = b - a * c[i - 1];
-            c[i] = cc / denom;
-            d[i] = (r - a * d[i - 1]) / denom;
-        }
-        for i in (1..n - 1).rev() {
-            m2[i] = d[i] - c[i] * m2[i + 1];
-        }
-    }
+    let m2 = natural_second_derivatives(&x, &y);
     // The natural spline's slopes at its first and last points (its second derivative is 0 there).
     let h_first = x[1] - x[0];
     let slope_first = (y[1] - y[0]) / h_first - h_first * m2[1] / 6.0;
@@ -470,6 +452,61 @@ pub fn spline_samples(points: &[CurvePoint], n_out: usize, range: f32, clamp: bo
             let a = (x1 - t) / h;
             let b = (t - x0) / h;
             finish(a * y0 + b * y1 + ((a * a * a - a) * m2[i] + (b * b * b - b) * m2[i + 1]) * h * h / 6.0)
+        })
+        .collect()
+}
+
+/// The natural spline's second derivative at each knot (0 at both ends): a tridiagonal solve.
+/// `x` is strictly increasing and as long as `y`, with at least two knots.
+fn natural_second_derivatives(x: &[f64], y: &[f64]) -> Vec<f64> {
+    let n = x.len().min(y.len());
+    let mut m2 = vec![0.0f64; n];
+    if n > 2 {
+        let mut c = vec![0.0f64; n];
+        let mut d = vec![0.0f64; n];
+        for i in 1..n - 1 {
+            let (h0, h1) = (x[i] - x[i - 1], x[i + 1] - x[i]);
+            let a = h0 / 6.0;
+            let b = (h0 + h1) / 3.0;
+            let cc = h1 / 6.0;
+            let r = (y[i + 1] - y[i]) / h1 - (y[i] - y[i - 1]) / h0;
+            let denom = b - a * c[i - 1];
+            c[i] = cc / denom;
+            d[i] = (r - a * d[i - 1]) / denom;
+        }
+        for i in (1..n - 1).rev() {
+            m2[i] = d[i] - c[i] * m2[i + 1];
+        }
+    }
+    m2
+}
+
+/// The knots of the natural spline [`spline_samples`] draws through `points`, each with the
+/// spline's slope there: `(input, output, slope)`, sorted, finite and without duplicates. Each
+/// span between knots is a cubic, so a cubic Hermite curve through these knots with these slopes
+/// (a Nuke curve with `s` slopes, measured in Nuke 17) is the same spline. Empty when fewer than
+/// two usable points remain (the identity).
+pub fn spline_knots(points: &[CurvePoint]) -> Vec<(f64, f64, f64)> {
+    let mut pts: Vec<(f32, f32)> = points.iter().filter(|p| p.input.is_finite() && p.output.is_finite()).map(|p| (p.input, p.output)).collect();
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    pts.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+    if pts.len() < 2 {
+        return Vec::new();
+    }
+    let x: Vec<f64> = pts.iter().map(|p| f64::from(p.0)).collect();
+    let y: Vec<f64> = pts.iter().map(|p| f64::from(p.1)).collect();
+    let m2 = natural_second_derivatives(&x, &y);
+    let n = x.len();
+    (0..n)
+        .map(|i| {
+            let slope = if i + 1 < n {
+                let h = x[i + 1] - x[i];
+                (y[i + 1] - y[i]) / h - h * (2.0 * m2[i] + m2[i + 1]) / 6.0
+            } else {
+                let h = x[i] - x[i - 1];
+                (y[i] - y[i - 1]) / h + h * (m2[i - 1] + 2.0 * m2[i]) / 6.0
+            };
+            (x[i], y[i], slope)
         })
         .collect()
 }

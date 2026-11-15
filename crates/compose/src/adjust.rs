@@ -33,7 +33,7 @@ pub(crate) use tone::apply_tone;
 pub use tone::{
     LookupTables, TONE_SLOPE_SPAN, contour_curve_lut, curve_lut, curve_lut_mode, curve_map_lut, curve_samples, float_tone_extrapolates, float_tone_identity,
     levels, levels_float, levels_gamma, levels_q, lookup_sample, lookup_tables, modern_brightness, modern_contrast, modern_lut, posterize, posterize_in,
-    spline_samples, tone_luts, tone_luts_depth, tone_luts_q,
+    spline_knots, spline_samples, tone_luts, tone_luts_depth, tone_luts_q,
 };
 use tone::{lut, map_rgb};
 

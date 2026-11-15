@@ -435,3 +435,83 @@ fn a_matte_layer_reaches_its_merge_unpremultiplied() {
     // The base starts the comp premultiplied; other operations take the premultiplied stream.
     assert!(!nk.contains("Unpremult_Base") && !nk.contains("Unpremult_Plain"), "{nk}");
 }
+
+fn curves(points: &[(f32, f32)], lookup: photocraft_doc::adjust::CurveLookup, on_master: bool) -> Adjustment {
+    use photocraft_doc::adjust::{CurvePoint, ToneSpace};
+    let pts: Vec<CurvePoint> = points.iter().map(|&(input, output)| CurvePoint { input, output }).collect();
+    let line = vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 1.0 }];
+    let (master, channel) = if on_master { (pts, line) } else { (line, pts) };
+    Adjustment::Curves { master, per_channel: [channel.clone(), channel.clone(), channel], space: ToneSpace::Rgb, black: Vec::new(), pencil: false, lookup }
+}
+
+/// The curve named `name` (`master`, `red`, ...) in a ColorLookup body, as its keys.
+fn lut_keys<'a>(body: &'a str, name: &str) -> &'a str {
+    let at = body.find(&format!("{name} {{curve")).unwrap_or_else(|| panic!("no {name} curve in {body}"));
+    let rest = &body[at + name.len() + 1..];
+    &rest[..=rest.find('}').unwrap()]
+}
+
+/// A Nuke curve of `x<in> <out> s<slope>` keys at `v`, as Nuke draws it (measured in Nuke 17): a
+/// cubic Hermite between keys, continued along the end slopes outside them.
+fn hermite_at(keys: &str, v: f64) -> f64 {
+    let toks: Vec<&str> = keys.trim_matches(|c| c == '{' || c == '}').split_whitespace().skip(1).collect();
+    let knots: Vec<(f64, f64, f64)> = toks
+        .chunks(3)
+        .map(|k| (k[0].trim_start_matches('x').parse().unwrap(), k[1].parse().unwrap(), k[2].trim_start_matches('s').parse().unwrap()))
+        .collect();
+    let (first, last) = (knots[0], knots[knots.len() - 1]);
+    if v <= first.0 {
+        return first.1 + (v - first.0) * first.2;
+    }
+    if v >= last.0 {
+        return last.1 + (v - last.0) * last.2;
+    }
+    let w = knots.windows(2).find(|w| v <= w[1].0).unwrap();
+    let ((x0, y0, s0), (x1, y1, s1)) = (w[0], w[1]);
+    let h = x1 - x0;
+    let t = (v - x0) / h;
+    let (t2, t3) = (t * t, t * t * t);
+    (2.0 * t3 - 3.0 * t2 + 1.0) * y0 + (t3 - 2.0 * t2 + t) * h * s0 + (-2.0 * t3 + 3.0 * t2) * y1 + (t3 - t2) * h * s1
+}
+
+#[test]
+fn a_nuke_style_curve_exports_its_own_points_and_draws_the_canvas_curve() {
+    use photocraft_doc::adjust::CurveLookup;
+    // An HDR curve (range 4) and an overshooting one, on the channels or on the master.
+    for (points, range, on_master) in [
+        (vec![(0.0, 0.0), (1.0, 1.4), (4.0, 3.2)], 4.0, false),
+        (vec![(0.0, 0.0), (0.2, 0.6), (0.4, 0.3), (1.0, 1.0)], 1.0, true),
+    ] {
+        // (Range 1 with continued ends is Photoshop's own lookup; the channel order marks this one
+        // as the ColorLookup style, and changes nothing with straight channel curves.)
+        let adj = curves(&points, CurveLookup { range, hold_ends: false, master_first: on_master }, on_master);
+        let body = nk_lookup_knobs(&adj);
+        assert!(body.contains(&format!(" range {range}\n")) && body.contains(" use_precomputed false\n"), "{body}");
+        let keys = lut_keys(&body, if on_master { "master" } else { "red" });
+        assert_eq!(keys.matches('x').count(), points.len(), "one key per point: {keys}");
+        let other = lut_keys(&body, if on_master { "red" } else { "master" });
+        assert_eq!(other, NK_IDENTITY_CURVE);
+        let xs: Vec<f32> = (0..=60).map(|k| -1.0 + k as f32 / 60.0 * (range * 1.5 + 1.0)).collect();
+        let px: Vec<[f32; 4]> = xs.iter().map(|&x| [x, x, x, 1.0]).collect();
+        for (x, want) in xs.iter().zip(adjusted_px(&adj, &px)) {
+            let got = hermite_at(keys, f64::from(*x));
+            assert!((got - f64::from(want[0])).abs() < 1e-3, "{points:?} at {x}: Nuke draws {got}, the canvas {}", want[0]);
+        }
+    }
+}
+
+#[test]
+fn curves_nuke_cannot_draw_from_their_points_are_baked() {
+    use photocraft_doc::adjust::CurveLookup;
+    let s_curve = [(0.0, 0.0), (0.25, 0.15), (0.75, 0.85), (1.0, 1.0)];
+    for adj in [
+        // Photoshop's Curves (clamped, flat past the end points), and held ends.
+        curves(&s_curve, CurveLookup::default(), false),
+        curves(&s_curve, CurveLookup { range: 1.0, hold_ends: true, master_first: false }, false),
+    ] {
+        let body = nk_lookup_knobs(&adj);
+        let red = lut_keys(&body, "red");
+        assert!(red.starts_with("{curve L ") && red.matches('x').count() == 515, "{red}");
+        assert!(!body.contains(" range "), "{body}");
+    }
+}

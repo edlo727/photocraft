@@ -785,17 +785,68 @@ fn adjusted_px(adj: &photocraft_doc::Adjustment, px: &[[f32; 4]]) -> Vec<[f32; 4
 }
 
 /// The body of a Nuke `ColorLookup` node reproducing a Curves adjustment as PhotoCraft applies
-/// it in 32-bit: each channel's response (master and channel curves composed in the layer's
-/// order) sampled at 129 points over the curves' range with linear keys, plus a key far below
-/// and far above so its ends (held or continued along their slopes) carry over whatever
-/// extrapolation Nuke uses. The master and alpha curves are identity.
+/// it in 32-bit. A Nuke-style curve ([`nk_lookup_points`]) keeps its own points, editable in Nuke;
+/// anything else is baked ([`nk_lookup_baked`]).
 fn nk_lookup_knobs(adj: &photocraft_doc::Adjustment) -> String {
+    nk_lookup_points(adj).unwrap_or_else(|| nk_lookup_baked(adj))
+}
+
+/// Nuke's identity lookup curve.
+const NK_IDENTITY_CURVE: &str = "{curve L x-100000 -100000 x100000 100000}";
+
+/// One curve as Nuke keys at its own points, each with the natural spline's slope there: Nuke
+/// draws a cubic Hermite through them, which is the spline exactly, and continues past the ends
+/// along those slopes, as PhotoCraft's ColorLookup-style curves do (measured in Nuke 17,
+/// `scripts/nuke_curves_truth.py`: no difference inside, under 3e-4 outside). Nuke's automatic
+/// tangents through the same points miss by up to 0.2.
+fn nk_curve_points(points: &[photocraft_doc::adjust::CurvePoint]) -> String {
+    let knots = photocraft_compose::adjust::spline_knots(points);
+    if knots.is_empty() {
+        return NK_IDENTITY_CURVE.to_string();
+    }
+    let keys: Vec<String> = knots.iter().map(|&(x, y, s)| format!("x{} {} s{}", x as f32, y as f32, s as f32)).collect();
+    format!("{{curve {}}}", keys.join(" "))
+}
+
+/// A Curves layer as its own points ([`nk_curve_points`]) where Nuke can draw it exactly: RGB
+/// point curves in the ColorLookup style (not Photoshop's clamped Curves), with ends that continue
+/// (Nuke continues a curve along its end slope; a held end isn't drawn the same), and either the
+/// master or the channel curves left straight, so no composition of two curves is needed. The
+/// node's range is the curve's and its precomputed table is off, as measured.
+fn nk_lookup_points(adj: &photocraft_doc::Adjustment) -> Option<String> {
+    use photocraft_doc::adjust::is_identity_curve;
+    let photocraft_doc::Adjustment::Curves { master, per_channel, space: photocraft_doc::adjust::ToneSpace::Rgb, pencil: false, lookup, .. } = adj else {
+        return None;
+    };
+    if lookup.is_default() || lookup.hold_ends {
+        return None;
+    }
+    let (m, [r, g, b]) = if is_identity_curve(master) {
+        (NK_IDENTITY_CURVE.to_string(), [nk_curve_points(&per_channel[0]), nk_curve_points(&per_channel[1]), nk_curve_points(&per_channel[2])])
+    } else if per_channel.iter().all(|c| is_identity_curve(c)) {
+        (nk_curve_points(master), [NK_IDENTITY_CURVE.to_string(), NK_IDENTITY_CURVE.to_string(), NK_IDENTITY_CURVE.to_string()])
+    } else {
+        return None;
+    };
+    Some(format!(
+        " channels rgb\n lut {{master {m}\n  red {r}\n  green {g}\n  blue {b}\n  alpha {NK_IDENTITY_CURVE}}}\n range {}\n use_precomputed false\n unpremult rgba.alpha\n",
+        lookup.span()
+    ))
+}
+
+/// Keys baked from PhotoCraft's own result: each channel's response (master and channel curves
+/// composed in the layer's order) sampled at 513 points over the curves' range with linear keys,
+/// plus a key far below and far above so its ends (held or continued along their slopes) carry
+/// over. Within 1e-4 of the canvas in Nuke 17 (129 keys were within 1e-3). Photoshop's clamped
+/// Curves, held ends, pencil-drawn curves and a master over channel curves take this route.
+fn nk_lookup_baked(adj: &photocraft_doc::Adjustment) -> String {
     let range = match adj {
         photocraft_doc::Adjustment::Curves { lookup, pencil: false, .. } => lookup.span(),
         _ => 1.0,
     };
+    const KEYS: usize = 512;
     let mut xs = vec![-100.0 * range];
-    xs.extend((0..=128).map(|k| k as f32 / 128.0 * range));
+    xs.extend((0..=KEYS).map(|k| k as f32 / KEYS as f32 * range));
     xs.push(100.0 * range);
     let px: Vec<[f32; 4]> = xs.iter().map(|&x| [x, x, x, 1.0]).collect();
     let ys = adjusted_px(adj, &px);
@@ -803,8 +854,12 @@ fn nk_lookup_knobs(adj: &photocraft_doc::Adjustment) -> String {
         let keys: Vec<String> = xs.iter().zip(&ys).map(|(x, y)| format!("x{x} {}", y[c])).collect();
         format!("{{curve L {}}}", keys.join(" "))
     };
-    let identity = "{curve L x-100000 -100000 x100000 100000}";
-    format!(" channels rgb\n lut {{master {identity}\n  red {}\n  green {}\n  blue {}\n  alpha {identity}}}\n unpremult rgba.alpha\n", curve(0), curve(1), curve(2))
+    format!(
+        " channels rgb\n lut {{master {NK_IDENTITY_CURVE}\n  red {}\n  green {}\n  blue {}\n  alpha {NK_IDENTITY_CURVE}}}\n unpremult rgba.alpha\n",
+        curve(0),
+        curve(1),
+        curve(2)
+    )
 }
 
 fn is_exported_adjustment(adj: &photocraft_doc::Adjustment) -> bool {
