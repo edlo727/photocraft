@@ -168,6 +168,9 @@ struct Slot {
     /// Painted into this layer by the compositor (`photocraft_gpu::Compositor::set_live_paint`),
     /// in its place in the stack, with transparency locked or not; `None`: laid over the canvas.
     layer: Option<(photocraft_doc::LayerId, bool)>,
+    /// The brush's blend mode, and whether the document is 32-bit float: how a stroke painted
+    /// into its layer blends with the layer's pixels (`photocraft_gpu::LiveSlot`).
+    blend: (photocraft_color::BlendMode, bool),
     /// Everything its dabs reach so far (document pixels).
     bounds: photocraft_geom::Rect,
     /// Unique per stroke.
@@ -309,6 +312,8 @@ impl StrokeGpu {
                     color: s.color,
                     opacity: s.opacity,
                     lock,
+                    mode: s.blend.0,
+                    float: s.blend.1,
                     hide: s.hide,
                     bounds: s.bounds,
                 })
@@ -557,7 +562,9 @@ impl GpuCanvas {
     /// caller lands a queued stroke first) or the GPU can't.
     /// `layer`: paint the stroke into that layer in its place in the stack (with its transparency
     /// locked or not), `color` in the document's values and `opacity` the brush's own; `None`:
-    /// lay it over the canvas, `opacity` including the layer's.
+    /// lay it over the canvas, `opacity` including the layer's. `blend`: the brush's blend mode
+    /// and whether the document is 32-bit float; only a stroke painted into its layer can show a
+    /// mode other than Normal.
     #[allow(clippy::too_many_arguments)]
     pub fn stroke_begin(
         &self,
@@ -568,6 +575,7 @@ impl GpuCanvas {
         opacity: f32,
         linear: bool,
         layer: Option<(photocraft_doc::LayerId, bool)>,
+        blend: (photocraft_color::BlendMode, bool),
     ) -> Option<usize> {
         if self.fault().is_some() || doc_size[0] == 0 || doc_size[1] == 0 {
             return None;
@@ -612,6 +620,7 @@ impl GpuCanvas {
                 visible: false,
                 hide: [0.0; 4],
                 layer: None,
+                blend: (photocraft_color::BlendMode::Normal, false),
                 bounds: photocraft_geom::Rect::EMPTY,
                 id: 0,
             });
@@ -623,7 +632,7 @@ impl GpuCanvas {
         let id = g.next_id;
         let s = g.slots[free].as_mut()?;
         (s.doc, s.color, s.opacity, s.linear, s.visible, s.hide) = (doc, color, opacity, linear, true, [0.0; 4]);
-        (s.layer, s.bounds, s.id) = (layer, photocraft_geom::Rect::EMPTY, id);
+        (s.layer, s.blend, s.bounds, s.id) = (layer, blend, photocraft_geom::Rect::EMPTY, id);
         clear(device, queue, &s.view);
         g.order.retain(|&i| i != free);
         g.order.push(free);

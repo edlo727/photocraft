@@ -1509,10 +1509,12 @@ impl StrokeRenderer {
                         } else {
                             let d = to_rgba(&fmt, px);
                             let sr = to_rgba(&fmt, &src[..n]);
+                            // By the surface's depth: a 32-bit float layer keeps values above 1 (a
+                            // Linear Dodge brush adds light past 1 instead of clipping there).
                             let o = if lock_transparency {
-                                photocraft_color::blend::composite_atop(b.mode, d, sr, k)
+                                photocraft_color::blend::composite_atop_for(fmt.sample, b.mode, d, sr, k)
                             } else {
-                                photocraft_color::blend::composite(b.mode, d, sr, k)
+                                photocraft_color::blend::composite_for(fmt.sample, b.mode, d, sr, k)
                             };
                             let mut enc = [0.0f32; 8];
                             from_rgba_into(&fmt, o, &mut enc);

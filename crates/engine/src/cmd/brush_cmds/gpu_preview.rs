@@ -4,12 +4,14 @@
 //! frame then costs the dabs alone, whatever the brush size or document depth, instead of
 //! rasterising, compositing and uploading every touched 32-bit tile.
 //!
-//! Only strokes the overlay can show faithfully take this path: a round computed tip in Normal
-//! mode on a visible RGB layer's pixels, with no selection, symmetry, colour-channel restriction,
-//! dual brush, texture, wet edges, noise, colour dynamics or erasing. Anything else keeps the
-//! normal live stroke, and [`DabPreview::begin`] says why.
+//! Only strokes the overlay can show faithfully take this path: a round computed tip on a visible
+//! RGB layer's pixels, with no selection, symmetry, colour-channel restriction, dual brush,
+//! texture, wet edges, noise, colour dynamics or erasing. A brush in one of Photoshop's blend
+//! modes ([`mode_previewable`]) takes it where the stroke is painted into its layer on the GPU
+//! (the overlay over the canvas can only show Normal paint). Anything else keeps the normal live
+//! stroke, and [`DabPreview::begin`] says why.
 
-use photocraft_color::{BlendMode, ColorMode};
+use photocraft_color::{BlendMode, ColorMode, SampleType};
 use photocraft_paint::{BrushSettings, Dab, StrokePoint, StrokeRenderer};
 use serde_json::Value;
 
@@ -55,11 +57,18 @@ pub fn not_previewable(b: &BrushSettings) -> Option<&'static str> {
         "the brush uses Color Dynamics"
     } else if b.erase || b.behind {
         "erasing or Behind mode"
-    } else if b.mode != BlendMode::Normal {
-        "the brush mode isn't Normal"
+    } else if !mode_previewable(b.mode) {
+        "the brush mode is Dissolve, XOR, a Paint.NET mode or a Nuke operation"
     } else {
         return None;
     })
+}
+
+/// The brush modes the GPU blends as `paint.stroke` writes them (`photocraft_gpu`'s live paint
+/// pass): Normal and Photoshop's blend modes but Dissolve.
+pub fn mode_previewable(mode: BlendMode) -> bool {
+    !mode.is_nuke()
+        && !matches!(mode, BlendMode::PassThrough | BlendMode::Dissolve | BlendMode::Xor | BlendMode::PaintNetColorBurn | BlendMode::PaintNetColorDodge)
 }
 
 /// Whether the overlay can show strokes of `b` faithfully.
@@ -84,9 +93,13 @@ pub struct DabPreview {
     pub layer: photocraft_doc::LayerId,
     pub lock: bool,
     pub brush_opacity: f32,
-    /// The stroke can be laid over the whole canvas faithfully (the layer blends Normal):
-    /// where it can't be painted into its layer, that is how it shows.
+    /// The stroke can be laid over the whole canvas faithfully (the layer blends Normal, and so
+    /// does the brush): where it can't be painted into its layer, that is how it shows.
     pub on_top: bool,
+    /// The brush's blend mode, and whether the document is 32-bit float (the blend keeps values
+    /// above 1): how the stroke blends with its layer's pixels when painted into it.
+    pub mode: BlendMode,
+    pub float: bool,
     /// The stroke can be painted into its layer on the GPU (the layer has no layer effects:
     /// those are built from the layer's own pixels on the CPU).
     pub in_layer: bool,
@@ -135,10 +148,16 @@ impl DabPreview {
         if !l.visible {
             return Ok(Err("the layer is hidden"));
         }
-        let on_top = l.blend == BlendMode::Normal;
+        // Paint in a blend mode needs the layer's pixels under it: only painting into the layer
+        // shows it.
+        let on_top = l.blend == BlendMode::Normal && brush.mode == BlendMode::Normal;
         let in_layer = !photocraft_compose::effects::has_effects(l);
         if !on_top && !in_layer {
-            return Ok(Err("the layer has layer effects and its blend mode isn't Normal"));
+            return Ok(Err(if brush.mode == BlendMode::Normal {
+                "the layer has layer effects and its blend mode isn't Normal"
+            } else {
+                "the layer has layer effects and the brush mode isn't Normal"
+            }));
         }
         let Some(surf) = l.surface() else { return Ok(Err("not a pixel layer")) };
         let fmt = surf.format();
@@ -162,6 +181,8 @@ impl DabPreview {
             lock: doc.effective_locks(id).transparency,
             brush_opacity: brush.opacity.clamp(0.0, 1.0),
             on_top,
+            mode: brush.mode,
+            float: fmt.sample == SampleType::F32,
             in_layer,
             doc: doc.id,
             revision: st.revision,
@@ -233,5 +254,24 @@ mod tests {
         assert_eq!(DabPreview::begin_or_why(&s, &p).unwrap().err(), Some("a selection is active"));
         s.execute("select.deselect", json!({})).unwrap();
         assert!(DabPreview::begin(&s, &p).unwrap().is_some());
+    }
+
+    /// Photoshop's blend modes preview (painted into the layer, never laid over the canvas);
+    /// Dissolve, XOR, Paint.NET's modes and the Nuke operations keep the normal path.
+    #[test]
+    fn brush_blend_modes_preview_in_the_layer_only() {
+        for mode in [BlendMode::Multiply, BlendMode::Screen, BlendMode::LinearDodge, BlendMode::HardLight, BlendMode::Color, BlendMode::Luminosity] {
+            assert!(mode_previewable(mode), "{mode:?}");
+        }
+        for mode in [BlendMode::Dissolve, BlendMode::Xor, BlendMode::PaintNetColorDodge, BlendMode::NukePlus, BlendMode::PassThrough] {
+            assert!(!mode_previewable(mode), "{mode:?}");
+        }
+        let s = session();
+        let p = json!({"points": [[8.0, 8.0, 1.0], [40.0, 30.0, 1.0]], "zoom": 1.0, "target": "pixels", "seed": 7, "mode": "hardLight"});
+        let prev = DabPreview::begin(&s, &p).unwrap().expect("a Hard Light brush previews");
+        assert_eq!(prev.mode, BlendMode::HardLight);
+        assert!(prev.in_layer && !prev.on_top && !prev.float, "blended with the layer's pixels, in an 8-bit document");
+        let p = json!({"points": [[8.0, 8.0, 1.0], [40.0, 30.0, 1.0]], "zoom": 1.0, "target": "pixels", "seed": 7, "mode": "dissolve"});
+        assert_eq!(DabPreview::begin_or_why(&s, &p).unwrap().err(), Some("the brush mode is Dissolve, XOR, a Paint.NET mode or a Nuke operation"));
     }
 }

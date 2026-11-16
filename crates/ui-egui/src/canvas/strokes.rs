@@ -632,18 +632,21 @@ fn try_gpu_stroke(app: &PhotocraftApp) -> Result<GpuStroke, String> {
     // canvas where the compositor doesn't draw the document or the layer has layer effects.
     // The overlay is the cheaper of the two (it draws at screen resolution, nothing
     // recomposites), and exact for a Normal layer with nothing over it and no mask: there it
-    // stays. Anything over the layer, a mask or another blend mode needs the stroke in place.
+    // stays. Anything over the layer, a mask or another blend mode (the layer's or the brush's)
+    // needs the stroke in place.
     let needs_place = !preview.on_top
         || st.doc.layer(preview.layer).is_some_and(|l| l.mask.as_ref().is_some_and(|m| m.enabled) || l.clipped)
         || covered_above(&st.doc, preview.layer, st.doc.bounds());
     let in_layer = needs_place && preview.in_layer && app.render_path.current(doc.0).is_none();
     if !in_layer && !preview.on_top {
-        return Err("the layer's blend mode isn't Normal and the stroke can't be painted into it".into());
+        let what = if preview.mode == photocraft_color::BlendMode::Normal { "the layer's blend mode" } else { "the brush mode" };
+        return Err(format!("{what} isn't Normal and the stroke can't be painted into its layer on the GPU"));
     }
     let slot = if in_layer {
-        gpu.stroke_begin(doc.0, size, app.current_zoom(), preview.color, preview.brush_opacity, preview.linear, Some((preview.layer, preview.lock)))
+        let blend = (preview.mode, preview.float);
+        gpu.stroke_begin(doc.0, size, app.current_zoom(), preview.color, preview.brush_opacity, preview.linear, Some((preview.layer, preview.lock)), blend)
     } else {
-        gpu.stroke_begin(doc.0, size, app.current_zoom(), preview.color, preview.opacity, preview.linear, None)
+        gpu.stroke_begin(doc.0, size, app.current_zoom(), preview.color, preview.opacity, preview.linear, None, (photocraft_color::BlendMode::Normal, false))
     }
     .ok_or("the GPU couldn't start the overlay")?;
     let pts = drag_points(app, d, 0);

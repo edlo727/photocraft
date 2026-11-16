@@ -8,9 +8,11 @@
 //! write lands; the copy is rebuilt from the layer's own texels wherever those or the coverage
 //! change, so it never drifts from them.
 //!
-//! The paint is laid as the CPU's Normal paint over straight layer values: `a = coverage ×
-//! opacity`, colour and alpha "over" the layer pixel, or the colour alone where the layer's
-//! transparency is locked. Layer values are the document's own (linear for a linear document),
+//! The paint is laid as the CPU's paint over straight layer values: `a = coverage × opacity`,
+//! colour and alpha "over" the layer pixel, or the colour alone where the layer's transparency is
+//! locked. A brush in a blend mode ([`LiveSlot::mode`]) blends its colour with the layer pixel
+//! first, by `photocraft_color::blend`'s formulas (`composite_for` / `composite_atop_for`, what
+//! `paint.stroke` writes). Layer values are the document's own (linear for a linear document),
 //! like the paint colour, so no encoding is involved.
 
 use photocraft_doc::{DocId, LayerId};
@@ -38,6 +40,11 @@ pub struct LiveSlot {
     pub opacity: f32,
     /// The layer's transparency is locked: the paint changes colour only.
     pub lock: bool,
+    /// The brush's blend mode: Normal, or one of Photoshop's the paint pass blends
+    /// ([`live_mode`]; any other paints as Normal).
+    pub mode: photocraft_color::BlendMode,
+    /// The document is 32-bit float: the blend keeps values above 1 (`composite_hdr`).
+    pub float: bool,
     /// Document rect (x0, y0, x1, y1) the layer's own pixels already hold this stroke in (its
     /// write landed there): no paint is laid there.
     pub hide: [f32; 4],
@@ -72,11 +79,20 @@ pub(crate) struct LiveKit {
 }
 
 /// Uniform: origin of the page (x, y), slot count; then per slot colour + opacity, scale,
-/// coverage width and height, lock; hide rect.
-const UNIFORM_BYTES: u64 = 16 + LIVE_SLOTS as u64 * 48;
+/// coverage width and height, lock; hide rect; blend mode ([`live_mode`]) and float document.
+const UNIFORM_BYTES: u64 = 16 + LIVE_SLOTS as u64 * 64;
+
+/// The shader's index of brush mode `mode` (`plan::mode_index`'s, 3..=30: Photoshop's modes), or
+/// `None` where the pass paints Normal: Normal itself, and the modes it has no formula for
+/// (Dissolve, XOR, Paint.NET's and the Nuke operations; the app keeps those strokes on the
+/// normal live path).
+pub(crate) fn live_mode(mode: photocraft_color::BlendMode) -> Option<i32> {
+    let m = super::plan::mode_index(mode);
+    (3..=30).contains(&m).then_some(m)
+}
 
 const LIVE_WGSL: &str = r#"
-struct Slot { c: vec4<f32>, s: vec4<f32>, h: vec4<f32> };
+struct Slot { c: vec4<f32>, s: vec4<f32>, h: vec4<f32>, m: vec4<f32> };
 struct U { o: vec4<f32>, slots: array<Slot, 4> };
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var cov0: texture_2d<f32>;
@@ -117,6 +133,150 @@ fn coverage(k: i32, d: vec2<f32>) -> f32 {
     }
 }
 
+// ---- brush blend modes: photocraft_color::blend's formulas (channel, blend_rgb_within), which
+// `paint.stroke` writes with; `hdr` is a 32-bit float document (composite_hdr). Mode numbers are
+// plan::mode_index's. As in compose.wgsl, each switch case assigns and the function returns once
+// (FXC, the DX12 compiler, can't follow a large switch whose cases all return).
+
+const F32_MAX: f32 = 0x1.fffffep+127f;
+const EDGE: f32 = 1e-4;
+
+fn lp_color_burn(cb: f32, cs: f32) -> f32 {
+    if (cb >= 1.0) { return 1.0; }
+    if (cs <= 0.0) { return 0.0; }
+    return 1.0 - min((1.0 - cb) / cs, 1.0);
+}
+fn lp_color_dodge(cb: f32, cs: f32) -> f32 {
+    if (cb <= 0.0) { return 0.0; }
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb / (1.0 - cs), 1.0);
+}
+fn lp_hard_light(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return cb * 2.0 * cs; }
+    let s = 2.0 * cs - 1.0;
+    return cb + s - cb * s;
+}
+fn lp_soft_light(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) { return 2.0 * cb * cs + cb * cb * (1.0 - 2.0 * cs); }
+    let b = max(cb, 0.0);
+    var d = sqrt(b);
+    if (b <= 0.25) { d = ((16.0 * b - 12.0) * b + 4.0) * b; }
+    return 2.0 * cb * (1.0 - cs) + d * (2.0 * cs - 1.0);
+}
+fn lp_vivid_light(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.0) { return 0.0; }
+    if (cs >= 1.0) { return 1.0; }
+    if (cs <= 0.5) { return lp_color_burn(cb, 2.0 * cs); }
+    return lp_color_dodge(cb, 2.0 * (cs - 0.5));
+}
+// blend::vivid_light_hard_mix: Hard Mix's Vivid Light, exact at the backdrop's extremes.
+fn lp_vivid_hard_mix(cb: f32, cs: f32) -> f32 {
+    if (cs <= 0.5) {
+        if (cb >= 1.0 - EDGE) { return 1.0; }
+        if (cs <= 0.0) { return 0.0; }
+        return 1.0 - min((1.0 - cb) / (2.0 * cs), 1.0);
+    }
+    if (cb <= EDGE) { return 0.0; }
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb / (2.0 * (1.0 - cs)), 1.0);
+}
+fn lp_reflect(cb: f32, cs: f32) -> f32 {
+    if (cs >= 1.0) { return 1.0; }
+    return min(cb * cb / (1.0 - cs), 1.0);
+}
+// blend::range_bound: the modes whose formula only means something on 0..1 (Screen, Color Dodge,
+// Overlay, Soft Light, Hard Light, Vivid Light, Linear Light, Exclusion, Reflect, Glow, Negation).
+fn lp_range_bound(mode: i32) -> bool {
+    return mode == 9 || mode == 10 || (mode >= 13 && mode <= 17) || mode == 21 || (mode >= 28 && mode <= 30);
+}
+
+fn lp_channel(mode: i32, cb: f32, cs: f32, hdr: bool) -> f32 {
+    // Linear Dodge / Divide clip at 1 at integer depths, at f32::MAX in 32-bit documents.
+    let hi = select(1.0, F32_MAX, hdr);
+    var r = cs;
+    let in_range = cb >= 0.0 && cb <= 1.0 && cs >= 0.0 && cs <= 1.0;
+    if (hdr && lp_range_bound(mode) && !in_range) {
+        // 32-bit: outside 0..1 the brighter input stands.
+        r = max(cb, cs);
+    } else {
+        switch mode {
+            case 3: { r = min(cb, cs); }                            // Darken
+            case 4: { r = clamp(cb * cs, -F32_MAX, F32_MAX); }      // Multiply
+            case 5: { r = lp_color_burn(cb, cs); }                  // ColorBurn
+            case 6: { r = max(cb + cs - 1.0, 0.0); }                // LinearBurn
+            case 8: { r = max(cb, cs); }                            // Lighten
+            case 9: { r = cb + cs - cb * cs; }                      // Screen
+            case 10: { r = lp_color_dodge(cb, cs); }                // ColorDodge
+            case 11: { r = min(cb + cs, hi); }                      // LinearDodge
+            case 13: { r = lp_hard_light(cs, cb); }                 // Overlay
+            case 14: { r = lp_soft_light(cb, cs); }                 // SoftLight
+            case 15: { r = lp_hard_light(cb, cs); }                 // HardLight
+            case 16: { r = lp_vivid_light(cb, cs); }                // VividLight
+            case 17: { r = clamp(cb + 2.0 * cs - 1.0, 0.0, 1.0); }  // LinearLight
+            case 18: {                                              // PinLight
+                if (cs <= 0.5) { r = min(cb, 2.0 * cs); } else { r = max(cb, 2.0 * cs - 1.0); }
+            }
+            case 19: { r = select(0.0, 1.0, lp_vivid_hard_mix(cb, cs) >= 0.5 - 1e-6); } // HardMix
+            case 20: { r = abs(cb - cs); }                          // Difference
+            case 21: { r = cb + cs - 2.0 * cb * cs; }               // Exclusion
+            case 22: { r = max(cb - cs, 0.0); }                     // Subtract
+            case 23: {                                              // Divide
+                if (cs <= 0.0) { r = select(1.0, 0.0, cb <= 0.0); } else { r = min(cb / cs, hi); }
+            }
+            case 28: { r = lp_reflect(cb, cs); }                    // Reflect
+            case 29: { r = lp_reflect(cs, cb); }                    // Glow
+            case 30: { r = 1.0 - abs(1.0 - cb - cs); }              // Negation
+            default: { r = cs; }
+        }
+    }
+    return r;
+}
+
+fn lp_lum(c: vec3<f32>) -> f32 { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+// blend::clip_color: towards grey until within 0..top; a luminosity outside it gives its grey.
+fn lp_clip_color(c: vec3<f32>, top: f32) -> vec3<f32> {
+    let l = lp_lum(c);
+    let n = min(min(c.r, c.g), c.b);
+    let x = max(max(c.r, c.g), c.b);
+    var out = c;
+    if (n < 0.0) {
+        let d = l - n;
+        if (l > 0.0 && d > 0.0) { out = l + (out - l) * l / d; } else { out = vec3(l); }
+    }
+    if (x > top) {
+        let d = x - l;
+        if (l < top && d > 0.0) { out = l + (out - l) * (top - l) / d; } else { out = vec3(l); }
+    }
+    return out;
+}
+fn lp_set_lum(c: vec3<f32>, l: f32, top: f32) -> vec3<f32> { return lp_clip_color(c + (l - lp_lum(c)), top); }
+fn lp_sat(c: vec3<f32>) -> f32 { return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b); }
+fn lp_set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
+    let mx = max(max(c.r, c.g), c.b);
+    let mn = min(min(c.r, c.g), c.b);
+    var out = vec3(0.0);
+    if (mx > mn) { out = (c - mn) * s / (mx - mn); }
+    return out;
+}
+
+// B(cb, cs) of brush mode `mode` (blend::blend_rgb_hdr / blend_rgb).
+fn lp_blend(mode: i32, cb: vec3<f32>, cs: vec3<f32>, hdr: bool) -> vec3<f32> {
+    let top = select(1.0, F32_MAX, hdr);
+    var r = cs;
+    switch mode {
+        case 24: { r = lp_set_lum(lp_set_sat(cs, lp_sat(cb)), lp_lum(cb), top); } // Hue
+        case 25: { r = lp_set_lum(lp_set_sat(cb, lp_sat(cs)), lp_lum(cb), top); } // Saturation
+        case 26: { r = lp_set_lum(cs, lp_lum(cb), top); }                         // Color
+        case 27: { r = lp_set_lum(cb, lp_lum(cs), top); }                         // Luminosity
+        case 7: { r = select(cb, cs, lp_lum(cs) < lp_lum(cb)); }                  // DarkerColor
+        case 12: { r = select(cb, cs, lp_lum(cs) > lp_lum(cb)); }                 // LighterColor
+        default: {
+            r = vec3(lp_channel(mode, cb.r, cs.r, hdr), lp_channel(mode, cb.g, cs.g, hdr), lp_channel(mode, cb.b, cs.b, hdr));
+        }
+    }
+    return r;
+}
+
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let t = vec2<i32>(pos.xy);
@@ -134,7 +294,19 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             continue;
         }
         let paint = u.slots[k].c.rgb;
-        if (u.slots[k].s.w > 0.5) {
+        let mode = i32(u.slots[k].m.x);
+        let lock = u.slots[k].s.w > 0.5;
+        if (mode > 2) {
+            // A brush in a blend mode: blend::composite_with_blend, or composite_atop_with_blend
+            // where the layer's transparency is locked.
+            let bl = lp_blend(mode, col.rgb, paint, u.slots[k].m.y > 0.5);
+            if (lock) {
+                col = vec4(mix(col.rgb, bl, a), col.a);
+            } else {
+                let out_a = a + col.a * (1.0 - a);
+                col = vec4(((1.0 - a) * col.a * col.rgb + (1.0 - col.a) * a * paint + a * col.a * bl) / max(out_a, 1e-6), out_a);
+            }
+        } else if (lock) {
             col = vec4(mix(col.rgb, paint, a), col.a);
         } else {
             let out_a = a + col.a * (1.0 - a);
@@ -230,8 +402,9 @@ fn uniform(origin: [i32; 2], slots: &[&LiveSlot]) -> Vec<u8> {
                 f.extend([ok(s.color[0]), ok(s.color[1]), ok(s.color[2]), ok(s.opacity).clamp(0.0, 1.0)]);
                 f.extend([ok(s.scale), s.coverage_size[0] as f32, s.coverage_size[1] as f32, if s.lock { 1.0 } else { 0.0 }]);
                 f.extend(s.hide);
+                f.extend([live_mode(s.mode).unwrap_or(1) as f32, if s.float { 1.0 } else { 0.0 }, 0.0, 0.0]);
             }
-            None => f.extend([0.0; 12]),
+            None => f.extend([0.0; 16]),
         }
     }
     f.iter().flat_map(|v| v.to_le_bytes()).collect()
@@ -389,6 +562,19 @@ mod tests {
         wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::empty())
             .validate(&module)
             .unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    /// The pass blends Photoshop's modes; the rest paint as Normal (the app doesn't send them).
+    #[test]
+    fn photoshop_brush_modes_have_a_shader_index() {
+        use photocraft_color::BlendMode;
+        assert_eq!(live_mode(BlendMode::Normal), None);
+        assert_eq!(live_mode(BlendMode::Dissolve), None);
+        assert_eq!(live_mode(BlendMode::HardLight), Some(15));
+        assert_eq!(live_mode(BlendMode::LinearDodge), Some(11));
+        assert_eq!(live_mode(BlendMode::Luminosity), Some(27));
+        assert_eq!(live_mode(BlendMode::Xor), None);
+        assert_eq!(live_mode(BlendMode::NukePlus), None);
     }
 
     #[test]
