@@ -7,7 +7,7 @@
 //! Only strokes the overlay can show faithfully take this path: a round computed tip on a visible
 //! RGB layer's pixels, with no selection, symmetry, colour-channel restriction, dual brush,
 //! texture, wet edges, noise, colour dynamics or erasing. A brush in one of Photoshop's blend
-//! modes ([`mode_previewable`]) takes it where the stroke is painted into its layer on the GPU
+//! modes or a Nuke Merge operation ([`mode_previewable`]) takes it where the stroke is painted into its layer on the GPU
 //! (the overlay over the canvas can only show Normal paint). Anything else keeps the normal live
 //! stroke, and [`DabPreview::begin`] says why.
 
@@ -58,17 +58,16 @@ pub fn not_previewable(b: &BrushSettings) -> Option<&'static str> {
     } else if b.erase || b.behind {
         "erasing or Behind mode"
     } else if !mode_previewable(b.mode) {
-        "the brush mode is Dissolve, XOR, a Paint.NET mode or a Nuke operation"
+        "the brush mode is Dissolve, XOR or a Paint.NET mode"
     } else {
         return None;
     })
 }
 
 /// The brush modes the GPU blends as `paint.stroke` writes them (`photocraft_gpu`'s live paint
-/// pass): Normal and Photoshop's blend modes but Dissolve.
+/// pass): Normal, Photoshop's blend modes but Dissolve, and the Nuke Merge operations.
 pub fn mode_previewable(mode: BlendMode) -> bool {
-    !mode.is_nuke()
-        && !matches!(mode, BlendMode::PassThrough | BlendMode::Dissolve | BlendMode::Xor | BlendMode::PaintNetColorBurn | BlendMode::PaintNetColorDodge)
+    !matches!(mode, BlendMode::PassThrough | BlendMode::Dissolve | BlendMode::Xor | BlendMode::PaintNetColorBurn | BlendMode::PaintNetColorDodge)
 }
 
 /// Whether the overlay can show strokes of `b` faithfully.
@@ -256,14 +255,15 @@ mod tests {
         assert!(DabPreview::begin(&s, &p).unwrap().is_some());
     }
 
-    /// Photoshop's blend modes preview (painted into the layer, never laid over the canvas);
-    /// Dissolve, XOR, Paint.NET's modes and the Nuke operations keep the normal path.
+    /// Photoshop's blend modes and the Nuke operations preview (painted into the layer, never
+    /// laid over the canvas); Dissolve, XOR and Paint.NET's modes keep the normal path.
     #[test]
     fn brush_blend_modes_preview_in_the_layer_only() {
-        for mode in [BlendMode::Multiply, BlendMode::Screen, BlendMode::LinearDodge, BlendMode::HardLight, BlendMode::Color, BlendMode::Luminosity] {
+        let shown = [BlendMode::Multiply, BlendMode::LinearDodge, BlendMode::HardLight, BlendMode::Luminosity, BlendMode::NukeMultiply, BlendMode::NukePlus];
+        for mode in shown {
             assert!(mode_previewable(mode), "{mode:?}");
         }
-        for mode in [BlendMode::Dissolve, BlendMode::Xor, BlendMode::PaintNetColorDodge, BlendMode::NukePlus, BlendMode::PassThrough] {
+        for mode in [BlendMode::Dissolve, BlendMode::Xor, BlendMode::PaintNetColorDodge, BlendMode::PassThrough] {
             assert!(!mode_previewable(mode), "{mode:?}");
         }
         let s = session();
@@ -272,6 +272,6 @@ mod tests {
         assert_eq!(prev.mode, BlendMode::HardLight);
         assert!(prev.in_layer && !prev.on_top && !prev.float, "blended with the layer's pixels, in an 8-bit document");
         let p = json!({"points": [[8.0, 8.0, 1.0], [40.0, 30.0, 1.0]], "zoom": 1.0, "target": "pixels", "seed": 7, "mode": "dissolve"});
-        assert_eq!(DabPreview::begin_or_why(&s, &p).unwrap().err(), Some("the brush mode is Dissolve, XOR, a Paint.NET mode or a Nuke operation"));
+        assert_eq!(DabPreview::begin_or_why(&s, &p).unwrap().err(), Some("the brush mode is Dissolve, XOR or a Paint.NET mode"));
     }
 }

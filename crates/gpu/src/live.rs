@@ -12,7 +12,7 @@
 //! colour and alpha "over" the layer pixel, or the colour alone where the layer's transparency is
 //! locked. A brush in a blend mode ([`LiveSlot::mode`]) blends its colour with the layer pixel
 //! first, by `photocraft_color::blend`'s formulas (`composite_for` / `composite_atop_for`, what
-//! `paint.stroke` writes). Layer values are the document's own (linear for a linear document),
+//! `paint.stroke` writes), the Nuke Merge operations included. Layer values are the document's own (linear for a linear document),
 //! like the paint colour, so no encoding is involved.
 
 use photocraft_doc::{DocId, LayerId};
@@ -40,8 +40,8 @@ pub struct LiveSlot {
     pub opacity: f32,
     /// The layer's transparency is locked: the paint changes colour only.
     pub lock: bool,
-    /// The brush's blend mode: Normal, or one of Photoshop's the paint pass blends
-    /// ([`live_mode`]; any other paints as Normal).
+    /// The brush's blend mode: Normal, or one of Photoshop's or a Nuke Merge operation the paint
+    /// pass blends ([`live_mode`]; any other paints as Normal).
     pub mode: photocraft_color::BlendMode,
     /// The document is 32-bit float: the blend keeps values above 1 (`composite_hdr`).
     pub float: bool,
@@ -82,13 +82,216 @@ pub(crate) struct LiveKit {
 /// coverage width and height, lock; hide rect; blend mode ([`live_mode`]) and float document.
 const UNIFORM_BYTES: u64 = 16 + LIVE_SLOTS as u64 * 64;
 
-/// The shader's index of brush mode `mode` (`plan::mode_index`'s, 3..=30: Photoshop's modes), or
-/// `None` where the pass paints Normal: Normal itself, and the modes it has no formula for
-/// (Dissolve, XOR, Paint.NET's and the Nuke operations; the app keeps those strokes on the
-/// normal live path).
+/// The shader's index of brush mode `mode` (`plan::mode_index`'s: 3..=30 Photoshop's modes,
+/// 34..=61 the Nuke Merge operations), or `None` where the pass paints Normal: Normal itself, and
+/// the modes it has no formula for (Dissolve, XOR and Paint.NET's; the app keeps those strokes on
+/// the normal live path).
 pub(crate) fn live_mode(mode: photocraft_color::BlendMode) -> Option<i32> {
     let m = super::plan::mode_index(mode);
-    (3..=30).contains(&m).then_some(m)
+    ((3..=30).contains(&m) || (34..=61).contains(&m)).then_some(m)
+}
+
+/// The Nuke Merge operations of the paint pass: compose.wgsl's own functions, copied (the
+/// compositor's shader can't be compiled into this pass whole: it has its own bindings).
+/// `the_nuke_functions_are_the_compositors` keeps the copies identical.
+const NUKE_HELPERS_WGSL: &str = r#"fn nuke_screen(a: f32, b: f32) -> f32 {
+    if (a >= 0.0 && a <= 1.0 && b >= 0.0 && b <= 1.0) { return a + b - a * b; }
+    return max(a, b);
+}
+
+fn in01(v: vec3<f32>) -> vec3<bool> { return (v >= vec3(0.0)) & (v <= vec3(1.0)); }
+fn neg(v: vec3<f32>) -> vec3<bool> { return v < vec3(0.0); }
+
+fn nk_screen(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> { return select(max(a, b), a + b - a * b, in01(a) & in01(b)); }
+fn nk_multiply(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> { return select(a * b, a, neg(a) & neg(b)); }
+
+// overlay / hard-light core: deciding input x clamped to 0..1, y to 0 and above, result to 1 and below.
+fn nk_light(x_in: vec3<f32>, y_in: vec3<f32>) -> vec3<f32> {
+    let x = clamp(x_in, vec3(0.0), vec3(1.0));
+    let y = max(y_in, vec3(0.0));
+    return min(select(1.0 - 2.0 * (1.0 - x) * (1.0 - y), 2.0 * x * y, x <= vec3(0.5)), vec3(1.0));
+}
+
+fn nk_soft_light_p(a: vec3<f32>, b: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+    return select(2.0 * a * b, b * (2.0 * a + b * (1.0 - p)), p < vec3(1.0));
+}
+
+fn nk_divide(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let pos = b > vec3(0.0);
+    return select(a, a / select(vec3(1.0), b, pos), pos);
+}
+
+fn nk_geometric(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let sum = a + b;
+    let zero = neg(a) | neg(b) | (sum == vec3(0.0));
+    return select(2.0 * a * b / select(sum, vec3(1.0), zero), vec3(0.0), zero);
+}
+
+fn nk_color_dodge(a_in: vec3<f32>, b_in: vec3<f32>) -> vec3<f32> {
+    let a = max(a_in, vec3(0.0));
+    let b = max(b_in, vec3(0.0));
+    let one = a >= vec3(1.0);
+    return select(min(b / select(1.0 - a, vec3(1.0), one), vec3(1.0)), vec3(1.0), one);
+}
+
+fn nk_color_burn(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let zero = a <= vec3(0.0);
+    return select(max(1.0 - (1.0 - max(b, vec3(0.0))) / select(a, vec3(1.0), zero), vec3(0.0)), vec3(0.0), zero);
+}
+
+// overlay, hard-light, soft-light, color-dodge, color-burn: Nuke clamps both colours to 0 and above.
+fn nuke_clamps_inputs(mode: i32) -> bool {
+    return mode == 44 || mode == 46 || mode == 45 || mode == 41 || mode == 36;
+}
+
+// photocraft_color::blend::nuke_channel on a whole colour (A = cs, B = cb).
+fn nuke_rgb(mode: i32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
+    // Each case assigns and the one return is at the end (see blend_channel).
+    var r = cs;
+    switch mode {
+        case 34, 38: { r = min(cb, cs); }                                        // min / in
+        case 35: { r = nk_multiply(cs, cb); }                                     // multiply
+        case 60: { r = cb - cs; }                                                 // from
+        case 37, 61: { r = cb; }                                                  // under / atop
+        case 39, 43: { r = max(cb, cs); }                                         // max / out
+        case 40: { r = nk_screen(cs, cb); }                                       // screen
+        case 41: { r = nk_color_dodge(cs, cb); }                                  // color-dodge
+        case 36: { r = nk_color_burn(cs, cb); }                                   // color-burn
+        case 42: { r = cs + cb; }                                                 // plus
+        case 44: { r = nk_light(cb, cs); }                                        // overlay (decided by B)
+        case 45: {                                                                // soft-light
+            let a = max(cs, vec3(0.0));
+            let b = max(cb, vec3(0.0));
+            r = nk_soft_light_p(a, b, a * b);
+        }
+        case 46: { r = nk_light(cs, cb); }                                        // hard-light (decided by A)
+        case 47: { r = nk_geometric(cs, cb); }                                    // geometric
+        case 48: { r = sqrt(cs * cs + cb * cb); }                                 // hypot
+        case 51: { r = abs(cs - cb); }                                            // difference
+        case 52: { r = select(cs + cb - 2.0 * cs * cb, cs + cb, neg(cs) | neg(cb)); } // exclusion
+        case 53: { r = cs - cb; }                                                 // minus
+        case 54: { r = nk_divide(cs, cb); }                                       // divide
+        case 56: { r = 0.5 * (cs + cb); }                                         // average
+        default: { r = cs; }
+    }
+    return r;
+}
+
+// The alpha-masked share where both inputs cover (blend.rs nuke_composite): `cs`/`cb` straight,
+// `ap`/`bp` premultiplied, `both` = ab.
+fn nuke_masked_share(mode: i32, cb: vec3<f32>, cs: vec3<f32>, bp: vec3<f32>, ap: vec3<f32>, both: f32) -> vec3<f32> {
+    var r = both * nuke_rgb(mode, cb, cs);
+    if (mode == 53) {                                                         // minus
+        r = both * (ap - bp);
+    } else if (mode == 60) {                                                  // from
+        r = both * (bp - ap);
+    } else if (mode == 54) {                                                  // divide
+        r = select(both * cs, ap / select(vec3(1.0), bp, bp > vec3(0.0)), bp > vec3(0.0));
+    } else if (mode == 47) {                                                  // geometric
+        r = nk_geometric(ap, bp);
+    } else if (mode == 45) {                                                  // soft-light
+        r = both * nk_soft_light_p(cs, cb, cs * bp);
+    }
+    return r;
+}
+"#;
+const NUKE_COMPOSITE_WGSL: &str = r#"fn nuke_composite(mode: i32, b_in: vec4<f32>, s_in: vec4<f32>, opacity: f32) -> vec4<f32> {
+    let mix = clamp(opacity, 0.0, 1.0);
+    if (mix <= 0.0) { return b_in; }
+
+    let ba = b_in.a;
+    let b = vec4(b_in.rgb * ba, ba);
+    let sa = s_in.a;
+    let a = vec4(s_in.rgb * sa, sa);
+
+    // in, mask, out, min, max and hypot change the backdrop even where the source is empty (blend.rs).
+    if (sa <= 0.0 && mode != 38 && mode != 49 && mode != 43 && mode != 34 && mode != 39 && mode != 48) {
+        return b_in;
+    }
+
+    var m = vec4(0.0);
+    switch mode {
+        case 55: { // matte
+            m = vec4(a.rgb + b.rgb * (1.0 - sa), sa + ba * (1.0 - sa));
+        }
+        case 37: { // under
+            m = vec4(a.rgb * (1.0 - ba) + b.rgb, sa * (1.0 - ba) + ba);
+        }
+        case 42: { // plus
+            m = vec4(a.rgb + b.rgb, min(sa + ba, 1.0));
+        }
+        case 40: { // screen
+            m = vec4(nuke_screen(a.r, b.r), nuke_screen(a.g, b.g), nuke_screen(a.b, b.b), nuke_screen(sa, ba));
+        }
+        case 34: { // min
+            m = vec4(min(a.rgb, b.rgb), min(sa, ba));
+        }
+        case 39: { // max
+            m = vec4(max(a.rgb, b.rgb), max(sa, ba));
+        }
+        case 48: { // hypot
+            m = vec4(sqrt(a.rgb * a.rgb + b.rgb * b.rgb), min(sqrt(sa * sa + ba * ba), 1.0));
+        }
+        case 38: { // in
+            m = vec4(a.rgb * ba, sa * ba);
+        }
+        case 43: { // out
+            m = vec4(a.rgb * (1.0 - ba), sa * (1.0 - ba));
+        }
+        case 49: { // mask
+            m = vec4(b.rgb * sa, ba * sa);
+        }
+        case 50: { // stencil
+            m = vec4(b.rgb * (1.0 - sa), ba * (1.0 - sa));
+        }
+        case 61: { // atop
+            m = vec4(a.rgb * ba + b.rgb * (1.0 - sa), ba);
+        }
+        case 59: { // xor
+            m = vec4(a.rgb * (1.0 - ba) + b.rgb * (1.0 - sa), clamp(sa * (1.0 - ba) + ba * (1.0 - sa), 0.0, 1.0));
+        }
+        case 57: { // conjoint-over
+            if (sa > ba || ba <= 1e-7) {
+                m = vec4(a.rgb, sa);
+            } else {
+                let k = 1.0 - sa / ba;
+                m = vec4(a.rgb + b.rgb * k, sa + ba * k);
+            }
+        }
+        case 58: { // disjoint-over
+            if (sa + ba < 1.0 || ba <= 1e-7) {
+                m = vec4(a.rgb + b.rgb, min(sa + ba, 1.0));
+            } else {
+                let k = (1.0 - sa) / ba;
+                m = vec4(a.rgb + b.rgb * k, 1.0);
+            }
+        }
+        default: { // the alpha-masked ops (see blend.rs nuke_composite)
+            var cs = s_in.rgb;
+            var cb = b_in.rgb;
+            if (nuke_clamps_inputs(mode)) {
+                cs = max(cs, vec3(0.0));
+                cb = max(cb, vec3(0.0));
+            }
+            let ap = cs * sa;
+            let bp = cb * ba;
+            let both = sa * ba;
+            let share = nuke_masked_share(mode, cb, cs, bp, ap, both);
+            let ao = sa + ba * (1.0 - sa);
+            m = vec4((1.0 - sa) * bp + (1.0 - ba) * ap + share, ao);
+        }
+    }
+
+    let out_pm = vec4(b.rgb + (m.rgb - b.rgb) * mix, clamp(b.a + (m.a - b.a) * mix, 0.0, 1.0));
+
+    if (out_pm.a <= 1e-7) { return vec4(0.0); }
+    return vec4(out_pm.rgb / out_pm.a, out_pm.a);
+}
+"#;
+
+/// The paint pass's whole shader: [`LIVE_WGSL`] and the Nuke operations.
+fn live_wgsl() -> String {
+    format!("{LIVE_WGSL}\n{NUKE_HELPERS_WGSL}\n{NUKE_COMPOSITE_WGSL}")
 }
 
 const LIVE_WGSL: &str = r#"
@@ -296,7 +499,15 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let paint = u.slots[k].c.rgb;
         let mode = i32(u.slots[k].m.x);
         let lock = u.slots[k].s.w > 0.5;
-        if (mode > 2) {
+        if (mode >= 34) {
+            // A Nuke Merge operation: blend::nuke_composite, or the operation alone where the
+            // layer's transparency is locked (composite_atop_with_blend).
+            if (lock) {
+                col = vec4(mix(col.rgb, nuke_rgb(mode, col.rgb, paint), a), col.a);
+            } else {
+                col = nuke_composite(mode, col, vec4(paint, 1.0), a);
+            }
+        } else if (mode > 2) {
             // A brush in a blend mode: blend::composite_with_blend, or composite_atop_with_blend
             // where the layer's transparency is locked.
             let bl = lp_blend(mode, col.rgb, paint, u.slots[k].m.y > 0.5);
@@ -368,7 +579,7 @@ impl LiveKit {
         if let Some(i) = self.pipelines.iter().position(|(f, _)| *f == format) {
             return &self.pipelines[i].1;
         }
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("pc_live_paint"), source: wgpu::ShaderSource::Wgsl(LIVE_WGSL.into()) });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("pc_live_paint"), source: wgpu::ShaderSource::Wgsl(live_wgsl().into()) });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("pc_live_paint"), bind_group_layouts: &[Some(&self.bgl)], immediate_size: 0 });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("pc_live_paint"),
@@ -558,7 +769,8 @@ mod tests {
 
     #[test]
     fn the_live_paint_shader_validates() {
-        let module = wgpu::naga::front::wgsl::parse_str(LIVE_WGSL).unwrap_or_else(|e| panic!("{}", e.emit_to_string(LIVE_WGSL)));
+        let source = live_wgsl();
+        let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::empty())
             .validate(&module)
             .unwrap_or_else(|e| panic!("{e:?}"));
@@ -574,7 +786,18 @@ mod tests {
         assert_eq!(live_mode(BlendMode::LinearDodge), Some(11));
         assert_eq!(live_mode(BlendMode::Luminosity), Some(27));
         assert_eq!(live_mode(BlendMode::Xor), None);
-        assert_eq!(live_mode(BlendMode::NukePlus), None);
+        assert_eq!(live_mode(BlendMode::PaintNetColorDodge), None);
+        assert_eq!(live_mode(BlendMode::NukeMultiply), Some(35));
+        assert_eq!(live_mode(BlendMode::NukePlus), Some(42));
+        assert_eq!(live_mode(BlendMode::NukeAtop), Some(61));
+    }
+
+    /// The pass's Nuke operations are the compositor's, text for text: a change to compose.wgsl's
+    /// has to be copied here.
+    #[test]
+    fn the_nuke_functions_are_the_compositors() {
+        assert!(crate::kit::SHADER.contains(NUKE_HELPERS_WGSL), "NUKE_HELPERS_WGSL differs from the compositor's shader");
+        assert!(crate::kit::SHADER.contains(NUKE_COMPOSITE_WGSL), "NUKE_COMPOSITE_WGSL differs from the compositor's shader");
     }
 
     #[test]
