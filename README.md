@@ -39,6 +39,19 @@
   <a href="https://getartcraft.com/apps">All Crafting Apps</a>
 </p>
 
+<h2 align="center">PhotoCraft VFX</h2>
+
+<p align="center">
+  <b>This fork adds VFX features:</b> 32-bit scene-linear ACEScg, OpenColorIO, Large Brush Mode for 16K float plates,<br>
+  Nuke-matched blend modes, Grade and Curves, and EXR export with a ready-made Nuke script.
+</p>
+
+<p align="center">
+  <a href="https://youtu.be/2dZ_dE4wUco"><img src="https://img.youtube.com/vi/2dZ_dE4wUco/maxresdefault.jpg" width="720" alt="PhotoCraft VFX v0.6.0 demo video: 32-bit HDR painting, ACES/OCIO and a round trip to Nuke"></a>
+  <br>
+  <sub>▶ <a href="https://youtu.be/2dZ_dE4wUco">Watch the demo on YouTube</a> · <a href="https://github.com/metalrahul/photocraft-vfx/releases/latest">Download the latest Windows build</a></sub>
+</p>
+
 <br>
 
 <p align="center">
