@@ -60,9 +60,9 @@ Downloads are on the [Releases](https://github.com/edlo727/photocraft/releases) 
 </p>
 
 <p align="center">
-  <a href="https://github.com/edlo727/photocraft/releases/download/projection-edition-v0.23.1-vfx/photocraft-projection-demo.mp4"><img src="docs/images/projection-demo-thumb.jpg" width="720" alt="PhotoCraft Projection Edition demo: Lasso and Content-Aware Fill, then Clone Stamp, inside a live perspective view of a 20K 32-bit EXR panorama"></a>
+  <a href="https://youtu.be/D_voEKHKOJY"><img src="docs/images/projection-demo-thumb.jpg" width="720" alt="PhotoCraft Projection Edition demo: Lasso and Content-Aware Fill, then Clone Stamp, inside a live perspective view of a 20K 32-bit EXR panorama"></a>
   <br>
-  <sub>▶ <a href="https://github.com/edlo727/photocraft/releases/download/projection-edition-v0.23.1-vfx/photocraft-projection-demo.mp4">Watch the demo (mp4)</a> · <a href="https://github.com/edlo727/photocraft/releases/latest">Download the latest Windows build</a></sub>
+  <sub>▶ <a href="https://youtu.be/D_voEKHKOJY">Watch the demo on YouTube</a> · <a href="https://github.com/edlo727/photocraft/releases/latest">Download the latest Windows build</a></sub>
 </p>
 
 ### Equirectangular Live Projection (Ctrl+Alt+Shift+J)
