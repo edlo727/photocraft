@@ -52,6 +52,34 @@ Downloads are on the [Releases](https://github.com/edlo727/photocraft/releases) 
   <a href="https://getartcraft.com/apps">All Crafting Apps</a>
 </p>
 
+<h2 align="center">PhotoCraft Projection Edition</h2>
+
+<p align="center">
+  <b>An unofficial build for matte painting and 360° work:</b> paint, clone and fill straight inside a latlong<br>
+  with Equirectangular Live Projection, on top of PhotoCraft VFX's 32-bit ACEScg, OpenColorIO and Large Brush Mode.
+</p>
+
+<p align="center">
+  <a href="https://github.com/edlo727/photocraft/releases/download/projection-edition-v0.23.1-vfx/photocraft-projection-demo.mp4"><img src="docs/images/projection-demo-thumb.jpg" width="720" alt="PhotoCraft Projection Edition demo: Lasso and Content-Aware Fill, then Clone Stamp, inside a live perspective view of a 20K 32-bit EXR panorama"></a>
+  <br>
+  <sub>▶ <a href="https://github.com/edlo727/photocraft/releases/download/projection-edition-v0.23.1-vfx/photocraft-projection-demo.mp4">Watch the demo (mp4)</a> · <a href="https://github.com/edlo727/photocraft/releases/latest">Download the latest Windows build</a></sub>
+</p>
+
+### Equirectangular Live Projection (Ctrl+Alt+Shift+J)
+- Opens a perspective view into a 2:1 latlong. Look around with the mouse or arrow keys; the scroll wheel sets the field of view. The status bar shows yaw, pitch and FOV.
+- Brush, Clone Stamp, Spot Healing, Lasso and Content-Aware Fill, Gradient, Paint Bucket, Paste, Move, Free Transform, the Pen tools, Type and Shapes all work through the view. Edits are written back to the latlong and wrap across the ±180° seam.
+- Built for big 32-bit EXRs (tested on 20K plates). HDR values are kept.
+
+### Included from PhotoCraft VFX 0.6.1
+This edition is merged with [metalrahul/photocraft-vfx](https://github.com/metalrahul/photocraft-vfx): 32-bit scene-linear ACEScg, OpenColorIO viewer, Viewer Channel (R/G/B/A/Y), Large Brush Mode for 16K float plates (including brush blend modes), Nuke-matched blend modes, Grade and Curves, and EXR export with a Nuke script. The Windows build has OpenColorIO 2.4.2 built in.
+
+### Build it yourself
+The Windows exe is built by GitHub Actions ([projection-windows.yml](.github/workflows/projection-windows.yml), MSVC + vcpkg OpenColorIO). Locally: `cargo build --release -p photocraft` with `VCPKG_ROOT` set (or `PHOTOCRAFT_NO_OCIO=1` to build without colorspaces).
+
+<sub>Unofficial, maintained by Ed Lopez (edlo727). Not affiliated with or endorsed by the PhotoCraft team or the PhotoCraft VFX author. MIT OR Apache-2.0, same as PhotoCraft.</sub>
+
+<br>
+
 <h2 align="center">PhotoCraft VFX</h2>
 
 <p align="center">
