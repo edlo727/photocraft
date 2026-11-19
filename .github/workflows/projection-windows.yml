@@ -1,10 +1,12 @@
 # PhotoCraft Projection Edition (unofficial): Windows x64 build with OpenColorIO.
-# Run by hand (Actions › Projection Edition Windows build › Run workflow) on a projection branch.
+# Runs on every push to projection-vfx (or by hand once this file is on the default branch).
 # OpenColorIO 2.4.2 is built once by vcpkg (vcpkg.json) and cached; the exe is uploaded as an artifact.
 name: Projection Edition Windows build
 
 on:
   workflow_dispatch:
+  push:
+    branches: [projection-vfx]
 
 permissions:
   contents: read
