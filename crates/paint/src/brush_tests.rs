@@ -1982,10 +1982,11 @@ fn general_loop_strokes_render_the_same_in_parallel_and_serially_at_every_depth(
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_parallel_composite_converts_through_the_documents_cmyk_profile() {
-    use photocraft_cms::synth::{CmykParams, cmyk_profile};
+    use craft_cms::synth::{CmykParams, cmyk_profile};
     use photocraft_color::convert::{CmykSpace, with_cmyk_space};
     let profile =
-        cmyk_profile(&CmykParams { description: "Brush Test CMYK".into(), tvi: [0.26, 0.26, 0.26, 0.3], grid_a2b: 5, grid_b2a: 9, ..Default::default() });
+        cmyk_profile(&CmykParams { description: "Brush Test CMYK".into(), tvi: [0.26, 0.26, 0.26, 0.3], grid_a2b: 5, grid_b2a: 9, ..Default::default() })
+            .unwrap();
     let bytes = profile.to_bytes();
     let Some(space) = CmykSpace::for_profile(Some(&bytes)) else { panic!("the synthetic profile is a CMYK space") };
     let fmt = PixelFormat::new(ColorMode::Cmyk, SampleType::U16, true);
@@ -2096,4 +2097,30 @@ fn touches_covers_every_pixel_with_coverage() {
     assert!(!r.touches(Rect::new(400, 400, 400, 400)), "empty");
     assert!(r.touches(Rect::new(i32::MIN, i32::MIN, i32::MAX, i32::MAX)), "huge, without a huge scan");
     assert!(!r.touches(Rect::new(1_000_000, 1_000_000, i32::MAX, i32::MAX)));
+}
+
+/// Pen Speed: a still pen paints at full value, a fast one towards the minimum, smoothed over
+/// the stroke's times; points without times read as still.
+#[test]
+fn pen_speed_thins_a_fast_stroke() {
+    use crate::dynamics::{PathWalker, StepInput, base_diameter};
+    let mut b = BrushSettings { size: 100.0, pressure_size: false, ..Default::default() };
+    b.shape_dynamics.enabled = true;
+    b.shape_dynamics.size.control = Control::PenSpeed;
+    b.shape_dynamics.size.minimum = 0.2;
+    let walk = |ms_per_px: f64| {
+        let mut w = PathWalker::new(None);
+        let mut steps: Vec<StepInput> = Vec::new();
+        for i in 0..=40 {
+            let x = f64::from(i) * 10.0;
+            w.push(StrokePoint { time: x * ms_per_px, ..StrokePoint::new(x, 0.0, 1.0) }, &|_| 5.0, &mut |s| steps.push(s));
+        }
+        steps.last().map(|s| base_diameter(&b, s)).unwrap_or(0.0)
+    };
+    let (slow, fast) = (walk(10.0), walk(0.05));
+    assert!(slow > 90.0, "a slow pen paints (nearly) full size: {slow}");
+    assert!(fast < 40.0 && fast >= 20.0, "a fast one thins towards the minimum: {fast}");
+    // No times: still.
+    let still = walk(0.0);
+    assert!(still > 99.0, "{still}");
 }

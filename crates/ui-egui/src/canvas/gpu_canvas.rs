@@ -47,6 +47,7 @@ mod residency;
 mod resources;
 mod setup;
 mod shaders;
+mod stroke_overlay;
 mod texels;
 
 #[cfg(all(test, windows))]
@@ -54,8 +55,9 @@ use budget::detect_video_memory;
 #[cfg(all(test, target_os = "linux"))]
 use budget::nvidia_video_memory;
 pub use budget::{
-    COMPOSITOR_BUILDING, DEFER_PX, MIN_GPU_BUDGET, OVER_BUDGET, OVER_CANVAS_BUDGET, REFRESH_DEFERRED, REFRESH_OVER_BUDGET, canvas_budget, canvas_texture_bytes,
-    memory_budget, physical_memory, video_memory, vram_share,
+    COMPOSITOR_BUILDING, DEFER_PX, MIN_GPU_BUDGET, OVER_BUDGET, OVER_CANVAS_BUDGET, REFRESH_DEFERRED, REFRESH_OVER_BUDGET, canvas_budget,
+    canvas_texture_bytes, composite_cache_cap, efficient_canvas_budget, efficient_memory_budget, forced_canvas_budget, forced_memory_budget,
+    memory_budget, physical_memory, profile_budgets, video_memory, vram_reserve, vram_share,
 };
 #[cfg(test)]
 use budget::{NVIDIA_VENDOR, bounded_output, drm_video_memory, parse_nvidia_smi};
@@ -92,22 +94,24 @@ const WHOLE_MIP_SIDE: u32 = 128;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Canvas texture format of high-bit documents (see [`GpuCanvas::format_for`]).
 const FORMAT_HIGH: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-/// Largest high-bit document (in pixels) given an `Rgba16Float` canvas texture: 100 MP is
-/// 800 MB at level 0, about 1.07 GB with mips (twice the `Rgba8Unorm` cost). Bigger 16/32-bit
-/// documents (a 14000² one would need 2.1 GB) use `Rgba8Unorm`, so they stay on the GPU like
-/// 8-bit ones. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas off, `=1` ignores this budget.
+/// Formerly a fixed cap on high-bit documents given an `Rgba16Float` canvas texture. The float
+/// canvas is now limited by the canvas memory budget alone ([`canvas_budget`], sized from the
+/// card's memory and the Performance settings), so a 16K × 8K 32-bit plate (about 1.3 GB with
+/// mips) keeps its values above 1.0 for the viewer's exposure on any card with room for it.
+/// Kept for callers; no longer consulted. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas
+/// off, `=1` ignores the budget.
 pub const F16_BUDGET_PX: u64 = 100_000_000;
-/// View › Float Display for Large Documents: high-bit documents over [`F16_BUDGET_PX`] get the
-/// `Rgba16Float` canvas too (a 20k × 10k latlong takes about 2.1 GB of GPU memory with mips),
-/// so big 32-bit HDR panoramas don't band or clip at 8 bits.
+/// View › Float Display for Large Documents. Since the VFX merge the float canvas has no pixel
+/// cap (only the canvas memory budget), so big 32-bit HDR panoramas already get `Rgba16Float`;
+/// the setting is kept so saved preferences and the menu still work.
 static FLOAT_LARGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Set [`FLOAT_LARGE`]; returns whether it changed.
 pub fn set_float_large(on: bool) -> bool {
     FLOAT_LARGE.swap(on, std::sync::atomic::Ordering::Relaxed) != on
 }
-const VIEW_UNIFORM_SIZE: u64 = 160;
-const VIEW_FLOATS: usize = 40;
+const VIEW_UNIFORM_SIZE: u64 = 176;
+const VIEW_FLOATS: usize = 44;
 const TILE_UNIFORM_SIZE: u64 = 32;
 
 /// Whether this view can use the GPU canvas. Flip and non-square pixel aspect correction are
@@ -145,6 +149,9 @@ pub struct ViewParams {
     /// before the display LUT; `None` when off. The display LUT must then leave it out
     /// (`ColorState::gpu_canvas_lut`).
     pub hdr: Option<[f32; 2]>,
+    /// View › Viewer Channel (`photocraft_engine::proof_sim::ViewerChannel::code`): 0 RGB, 1 R,
+    /// 2 G, 3 B, 4 A, 5 luminance, each shown as grey. Display only.
+    pub channel: u8,
     /// Where this draw puts the document, in document pixels from its own place: `[0, 0]` for the
     /// document, a whole number of widths and heights for a View › Pattern Preview copy (#1067).
     /// A copy samples the same texture, so nothing is composited again.
@@ -250,11 +257,14 @@ impl GpuCanvas {
         };
         // Device loss and uncaptured errors mark this flag instead of panicking (#243).
         let health = photocraft_gpu::DeviceHealth::watch(&rs.device);
-        let mut res = Resources::new(&rs.device, &rs.queue, rs.target_format, high != HighPolicy::Off);
+        // Large Brush Mode builds pen-pressure opacity exactly where the GPU can (compute pass).
+        let exact = stroke_overlay::exact_dabs_supported(&rs.adapter);
+        let mut res = Resources::new(&rs.device, &rs.queue, rs.target_format, high != HighPolicy::Off, exact);
         res.health = health.clone();
         let info = rs.adapter.get_info();
         res.separate_mip_targets = separate_mip_targets(info.backend, info.vendor, std::env::var("PHOTOCRAFT_SEPARATE_MIPS").ok().as_deref());
         let vram = video_memory(&info);
+        res.stroke.set_card(vram);
         res.canvas_budget.store(canvas_budget(physical_memory(), vram), Ordering::Relaxed);
         let budget = res.canvas_budget.clone();
         rs.renderer.write().callback_resources.insert(res);
@@ -392,25 +402,21 @@ impl GpuCanvas {
     }
 
     /// The canvas texture format for a document of `depth` and `size`: `Rgba16Float` for 16/32-bit
-    /// documents when the adapter supports it and the document fits [`F16_BUDGET_PX`], else
-    /// `Rgba8Unorm`.
+    /// documents when the adapter supports it and their float textures fit the canvas budget,
+    /// else `Rgba8Unorm`.
     /// The device's largest 2D texture side (egui textures can use it too).
     pub fn max_texture_side(&self) -> usize {
         self.rs.device.limits().max_texture_dimension_2d as usize
     }
 
     pub fn format_for(&self, depth: photocraft_doc::SampleType, size: [u32; 2]) -> wgpu::TextureFormat {
-        let px = size[0] as u64 * size[1] as u64;
         let high = match self.high {
             HighPolicy::Off => false,
-            // Within the canvas budget too: a 16-bit canvas a small card can't hold as floats
-            // stays on the GPU as `Rgba8Unorm` rather than falling back to the CPU canvas.
-            // View › Float Display for Large Documents lifts only the 100 MP pixel cap, never
-            // the GPU Memory budget.
-            HighPolicy::Budget => {
-                (px <= F16_BUDGET_PX || FLOAT_LARGE.load(Ordering::Relaxed))
-                    && canvas_texture_bytes(size, self.tile, texel_bytes(FORMAT_HIGH)) <= self.canvas_budget.load(Ordering::Relaxed)
-            }
+            // Within the canvas budget: a high-bit canvas the card can't hold as floats stays on
+            // the GPU as `Rgba8Unorm` rather than falling back to the CPU canvas. No fixed pixel
+            // cap: an 8-bit canvas clips at 1.0, so the viewer's exposure couldn't bring a
+            // 32-bit plate's highlights (the sun) back down.
+            HighPolicy::Budget => canvas_texture_bytes(size, self.tile, texel_bytes(FORMAT_HIGH)) <= self.canvas_budget.load(Ordering::Relaxed),
             HighPolicy::Always => true,
         };
         if high && depth != photocraft_doc::SampleType::U8 { FORMAT_HIGH } else { FORMAT }
@@ -435,6 +441,15 @@ impl GpuCanvas {
         let mut r = self.rs.renderer.write();
         if let Some(res) = r.callback_resources.get_mut::<Resources>() {
             res.compositor_budget = Some(bytes);
+        }
+    }
+
+    /// Rendering Mode › GPU (always): keep full and large refreshes on the GPU even when their
+    /// layer pages are over the memory budget (the compositor evicts and re-uploads pages).
+    pub fn set_force_gpu(&self, on: bool) {
+        let mut r = self.rs.renderer.write();
+        if let Some(res) = r.callback_resources.get_mut::<Resources>() {
+            res.force_gpu = on;
         }
     }
 
@@ -545,6 +560,48 @@ impl GpuCanvas {
         CpuReason::Unsupported(e.0)
     }
 
+    /// Refresh `band` of document `key` with only the changed layer tiles meeting it uploaded:
+    /// the rest of a big edit stays as the GPU held it until its own band (a Large Brush Mode
+    /// stroke lands a band of rows per frame, its overlay covering what hasn't landed yet).
+    /// Never deferred to background blocks.
+    pub fn refresh_band(
+        &self,
+        key: u64,
+        doc: &photocraft_doc::Document,
+        band: photocraft_geom::Rect,
+        display: Option<&photocraft_engine::display_color::CanvasDisplay>,
+    ) -> Refresh {
+        let set = |region: Option<photocraft_geom::Rect>| {
+            let mut r = self.rs.renderer.write();
+            if let Some(res) = r.callback_resources.get_mut::<Resources>() {
+                res.upload_region = region;
+            }
+        };
+        set(Some(band));
+        let r = self.refresh_with(key, doc, Some(band), display, false);
+        set(None);
+        r
+    }
+
+    /// The most the compositor's lower-stack cache may hold (Performance Mode: 512 MiB, 1.5 GiB or
+    /// 4 GiB; see `photocraft_gpu::Compositor::set_composite_cache_cap`).
+    pub fn set_composite_cache_cap(&self, bytes: u64) {
+        let mut r = self.rs.renderer.write();
+        if let Some(res) = r.callback_resources.get_mut::<Resources>() {
+            if res.compositor_cache_cap == Some(bytes) {
+                return;
+            }
+            res.compositor_cache_cap = Some(bytes);
+            let budget = res.compositor_budget;
+            if let Some(comp) = &mut res.compositor {
+                comp.set_composite_cache_cap(bytes);
+                if let Some(b) = budget {
+                    comp.set_memory_budget(b);
+                }
+            }
+        }
+    }
+
     /// Cap lower-stack composite reuse; zero disables it for profiling the uncached path.
     pub fn set_composite_cache_budget(&self, bytes: u64) {
         let mut r = self.rs.renderer.write();
@@ -593,7 +650,7 @@ impl GpuCanvas {
             comp.set_memory_budget(b);
         }
         let needed = comp.working_set(doc, doc.bounds());
-        let fit = LayerFit { doc: doc.id.0, needed, budget: comp.fit_layers(needed, true) };
+        let fit = LayerFit { doc: doc.id.0, needed, budget: comp.fit_layers(needed, true), forced: res.force_gpu };
         res.layer_fit = Some(fit);
         Some(fit)
     }
@@ -768,6 +825,9 @@ impl GpuCanvas {
             },
         };
         comp.set_health(self.health.clone());
+        if let Some(cap) = res.compositor_cache_cap {
+            comp.set_composite_cache_cap(cap);
+        }
         // Measured, not waited for: the timestamps come back a frame or two later.
         comp.measure_gpu_time(device, queue);
         if let Some(b) = res.compositor_budget {
@@ -777,6 +837,9 @@ impl GpuCanvas {
             comp.set_composite_cache_budget(b);
         }
         comp.set_focus(res.compositor_focus);
+        comp.set_upload_region(res.upload_region);
+        // Large Brush Mode strokes painted into their layers, in their place in the stack.
+        comp.set_live_paint(res.stroke.live_paint(doc.id.0));
         let key = doc.id.0;
         let format = self.format_for(doc.depth, size);
         let fresh = res.docs.get(&key).is_none_or(|d| d.size != size || d.format != format);
@@ -793,7 +856,7 @@ impl GpuCanvas {
         let large = region.width() as u64 * region.height() as u64 >= DEFER_PX;
         if region == doc.bounds() || large {
             let needed = comp.working_set(doc, region);
-            let fit = LayerFit { doc: doc.id.0, needed, budget: comp.fit_layers(needed, region == doc.bounds()) };
+            let fit = LayerFit { doc: doc.id.0, needed, budget: comp.fit_layers(needed, region == doc.bounds()), forced: res.force_gpu };
             res.layer_fit = Some(fit);
             if !fit.fits() {
                 res.compositor = Some(comp);
@@ -875,6 +938,17 @@ impl GpuCanvas {
         } else if fresh {
             res.docs.remove(&key);
         }
+        // A stroke painted into its layer that the GPU memory budget couldn't hold a copy of the
+        // layer for: laid over the canvas instead, from this frame (no out-of-memory on a
+        // smaller card).
+        if comp.live_over_budget() {
+            res.stroke.lay_over_canvas(key, queue);
+        }
+        let held = comp.resident_bytes() + comp.live_bytes();
+        let result = result.map(|mut s| {
+            s.layer_bytes = held;
+            s
+        });
         res.compositor = Some(comp);
         result
     }
@@ -936,9 +1010,14 @@ impl GpuCanvas {
             Ok(stats) => {
                 out.kind = if damage.is_some() { "gpu-rect" } else { "gpu-full" };
                 out.px = region.width() as u64 * region.height() as u64;
-                // Encoding and submitting only: the GPU is still running this work.
-                out.composite_ms = now_ms() - t0;
+                // Encoding and submitting only: the GPU is still running this work. Converting
+                // and staging layer tiles is the upload part of it.
+                out.upload_ms = stats.sync_ms;
+                out.composite_ms = (now_ms() - t0 - stats.sync_ms).max(0.0);
                 out.uploads = stats.tiles_uploaded as u64;
+                out.ready = stats.tiles_ready as u64;
+                out.evicted = stats.evicted as u64;
+                out.layer_mb = stats.layer_bytes >> 20;
                 out.gpu = stats.gpu_time;
                 return out;
             }
@@ -1096,7 +1175,7 @@ impl GpuCanvas {
 
     /// Set a separately sampled curve/matrix/curve display transform. CMS validates this
     /// representation and provides bounded tables; no profile interpretation lives in the UI.
-    pub fn set_display_matrix_shaper(&self, doc: u64, output: u32, shaper: &photocraft_cms::GpuMatrixShaper) {
+    pub fn set_display_matrix_shaper(&self, doc: u64, output: u32, shaper: &craft_cms::GpuMatrixShaper) {
         if !self.health.is_ok() {
             return;
         }

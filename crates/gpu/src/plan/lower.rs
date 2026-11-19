@@ -109,8 +109,10 @@ pub(super) fn row_key(adj: &Adjustment, depth: photocraft_color::SampleType) -> 
                 level(&mut h, c);
             }
         }
-        Adjustment::Curves { master, per_channel, space, black, pencil } => {
+        Adjustment::Curves { master, per_channel, space, black, pencil, lookup } => {
             (1u8, depth, *space as u8, *pencil).hash(&mut h);
+            // The ColorLookup settings change the composed rows, so they key the table too.
+            (lookup.range.to_bits(), lookup.hold_ends, lookup.master_first).hash(&mut h);
             for c in [master, &per_channel[0], &per_channel[1], &per_channel[2], black] {
                 curve(&mut h, c);
             }
@@ -166,7 +168,9 @@ pub fn adjustment_on_gpu(adj: &Adjustment, mode: photocraft_color::ColorMode) ->
         photocraft_color::ColorMode::Cmyk => cmyk_channel_adjustment(adj),
         _ => false,
     };
-    !tone_in_space && !own_channels
+    // OpenColorIO conversions run on the CPU (exact; the GPU has no OCIO kernel yet).
+    let ocio = matches!(adj, Adjustment::OcioColorSpace { .. });
+    !tone_in_space && !own_channels && !ocio
 }
 
 /// A tone transfer as the shader's `t_decode`/`t_encode` exponent (0: the sRGB curve).
@@ -218,6 +222,17 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
             p[0] = [2f32.powf(*exposure), *offset, gamma.max(0.01), transfer_exponent(transfer.for_exposure())];
             (6, p, None)
         }
+        Adjustment::Grade { .. } => {
+            // compose::adjust::GradeCoefficients: a, b and 1/gamma per channel; p3 = black clamp,
+            // white clamp, the tone curve (integer documents grade in linear light), float doc.
+            let Some(g) = photocraft_compose::adjust::GradeCoefficients::of(adj) else { return (0, p, None) };
+            p[0] = [g.a[0], g.a[1], g.a[2], 0.0];
+            p[1] = [g.b[0], g.b[1], g.b[2], 0.0];
+            p[2] = [g.inv_gamma[0], g.inv_gamma[1], g.inv_gamma[2], 0.0];
+            let float = depth == photocraft_color::SampleType::F32;
+            p[3] = [f32::from(u8::from(g.black_clamp)), f32::from(u8::from(g.white_clamp)), transfer_exponent(transfer), f32::from(u8::from(float))];
+            (18, p, None)
+        }
         Adjustment::Levels { master, per_channel, space: ToneSpace::Rgb, .. } if depth == photocraft_color::SampleType::F32 => {
             // Twenty coefficients exceed the sixteen uniform parameters. Store four records
             // in LUT row 0, read texel-exact by the analytic float Levels kernel.
@@ -230,6 +245,13 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
         }
         // RGB space only (see `adjustment_on_gpu`); the rows are the CPU's channel∘master LUTs.
         Adjustment::Levels { .. } | Adjustment::Curves { .. } => {
+            // Nuke ColorLookup-style Curves (compose::adjust::lookup_tables): the composed rows
+            // over 0..range; p0 = (range, hold ends, float document).
+            if let Some(t) = adjust::lookup_tables(adj) {
+                let float = depth == photocraft_color::SampleType::F32;
+                p[0] = [t.range, if t.hold { 1.0 } else { 0.0 }, if float { 1.0 } else { 0.0 }, 0.0];
+                return (19, p, Some(t.rows.iter().map(|r| to_row(r)).collect()));
+            }
             for (v, identity) in p[0].iter_mut().zip(adjust::float_tone_identity(adj, Some(depth))) {
                 *v = if identity { 1.0 } else { 0.0 };
             }
@@ -327,8 +349,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photocraf
             p[0] = [n as f32, if *tetrahedral { 1.0 } else { 0.0 }, if *dither { 1.0 } else { 0.0 }, 0.0];
             (16, p, Some(rows))
         }
-        // Identity on the CPU too (not evaluated there).
-        Adjustment::ColorLookup { .. } | Adjustment::Unsupported { .. } => (0, p, None),
+        // Identity on the CPU too (not evaluated there). OCIO never reaches the GPU
+        // (`adjustment_on_gpu`).
+        Adjustment::ColorLookup { .. } | Adjustment::OcioColorSpace { .. } | Adjustment::Unsupported { .. } => (0, p, None),
     }
 }
 
@@ -395,6 +418,35 @@ pub fn mode_index(m: BlendMode) -> i32 {
         BlendMode::Xor => 31,
         BlendMode::PaintNetColorBurn => 32,
         BlendMode::PaintNetColorDodge => 33,
+        // Nuke Merge operations (the shader's `nuke_channel` / `nuke_composite`, from 34).
+        BlendMode::NukeMin => 34,
+        BlendMode::NukeMultiply => 35,
+        BlendMode::NukeColorBurn => 36,
+        BlendMode::NukeUnder => 37,
+        BlendMode::NukeIn => 38,
+        BlendMode::NukeMax => 39,
+        BlendMode::NukeScreen => 40,
+        BlendMode::NukeColorDodge => 41,
+        BlendMode::NukePlus => 42,
+        BlendMode::NukeOut => 43,
+        BlendMode::NukeOverlay => 44,
+        BlendMode::NukeSoftLight => 45,
+        BlendMode::NukeHardLight => 46,
+        BlendMode::NukeGeometric => 47,
+        BlendMode::NukeHypot => 48,
+        BlendMode::NukeMask => 49,
+        BlendMode::NukeStencil => 50,
+        BlendMode::NukeDifference => 51,
+        BlendMode::NukeExclusion => 52,
+        BlendMode::NukeMinus => 53,
+        BlendMode::NukeDivide => 54,
+        BlendMode::NukeMatte => 55,
+        BlendMode::NukeAverage => 56,
+        BlendMode::NukeConjointOver => 57,
+        BlendMode::NukeDisjointOver => 58,
+        BlendMode::NukeXor => 59,
+        BlendMode::NukeFrom => 60,
+        BlendMode::NukeAtop => 61,
     }
 }
 

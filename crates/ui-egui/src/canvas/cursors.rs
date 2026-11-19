@@ -34,11 +34,13 @@ pub(crate) fn pencil_tip_is_round(size: f32) -> bool {
     (h - 0.5) * std::f32::consts::SQRT_2 > h
 }
 
-/// Whether a brush-tip circle draws its centre mark.
-/// Clone Stamp and Healing Brush stay an empty circle until Option is held, the source-point
-/// cursor. Other brushes follow Preferences › Cursors › Show Crosshair in Brush Tip, as in
-/// Photoshop; the Background Eraser always shows its sampling hotspot, and the Remove tool its
-/// centre + (#12550).
+/// Whether a brush-tip circle draws its centre mark, for Normal and Full Size Brush Tip cursors
+/// alike (both draw through this). Quick Selection never draws one. Clone Stamp and Healing Brush
+/// stay an empty circle until Option is held, the source-point cursor (the Healing Brush's ⌥ with
+/// Normal Brush Tip shows the sample target instead, #12113). Other brushes follow
+/// Preferences › Cursors › Show Crosshair in Brush Tip, as in Photoshop; the Background Eraser
+/// and the Color Replacement tool (#11934) always show their sampling hotspot, and the Remove
+/// tool its centre + (#12550).
 pub(super) fn brush_tip_centre(tool: Tool, option: bool, show_crosshair: bool) -> bool {
     if tool == Tool::QuickSelection {
         return false;
@@ -46,7 +48,7 @@ pub(super) fn brush_tip_centre(tool: Tool, option: bool, show_crosshair: bool) -
     if matches!(tool, Tool::CloneStamp | Tool::Healing) {
         return option || show_crosshair;
     }
-    show_crosshair || matches!(tool, Tool::BackgroundEraser | Tool::Remove)
+    show_crosshair || matches!(tool, Tool::BackgroundEraser | Tool::ColorReplacement | Tool::Remove)
 }
 
 /// The display colour of an RGB triple (0..1 per channel) as an egui colour.
@@ -213,8 +215,9 @@ pub(super) fn alt_pick_cursor(app: &mut PhotocraftApp, painter: &egui::Painter, 
     }
 }
 
-/// The Mixer Brush's ⌥ cursor, the reference's sample target (#11957): a small circle with a
-/// crosshair through it, centred on the hotspot. Draws it at `p` and returns the OS cursor to set.
+/// The Mixer Brush's and the Healing Brush's ⌥ cursor, the reference's sample target (#11957,
+/// #12113): a small circle with a crosshair through it, centred on the hotspot. Draws it at `p`
+/// and returns the OS cursor to set.
 pub(crate) fn sample_target_cursor(painter: &egui::Painter, p: Pos2) -> egui::CursorIcon {
     let across = vec![vec2(-8.0, 0.0), vec2(8.0, 0.0)];
     let down = vec![vec2(0.0, -8.0), vec2(0.0, 8.0)];
@@ -241,6 +244,10 @@ pub(crate) fn mixer_target_locked(app: &PhotocraftApp) -> bool {
 #[cfg(test)]
 #[path = "../mixer_cursor_tests.rs"]
 mod mixer_cursor_tests;
+
+#[cfg(test)]
+#[path = "../healing_alt_cursor_tests.rs"]
+mod healing_alt_cursor_tests;
 
 /// The Paint Bucket artwork and target share one cached cursor image. Report rasterization
 /// failures once per distinct message, with the same concise error in the dialog and status bar.
@@ -280,20 +287,23 @@ pub(crate) fn paint_bucket_cursor(app: &mut PhotocraftApp, painter: &egui::Paint
 /// Decided when the press starts, so ⌥ pressed or released mid-stroke never switches between
 /// painting and sampling.
 pub(super) fn alt_eyedropper(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
-    if matches!(ev, ToolEvent::Down { .. }) {
+    if let ToolEvent::Down { x, y, .. } = ev {
         let physical_right = app.services.right_button_down.as_ref().is_some_and(|f| f());
-        app.alt_sampling = !physical_right && !app.secondary_erase && alt_samples(app.active_tool(), mods);
+        app.alt_sampling = !physical_right && !app.secondary_erase && (alt_samples(app.active_tool(), mods) || shape_alt_samples(app, mods, x, y));
     }
     if !app.alt_sampling {
         return false;
     }
+    // The Triangle tool's ⇧⌥ at the press samples as ⌥ does, and the release point's colour is the
+    // one it keeps (#13364).
+    let triangle = app.active_tool() == Tool::Triangle;
     match ev {
         // ⇧⌥-click adds a colour sampler at the clicked pixel instead, as the Color Sampler tool
         // places one: no foreground change, nothing painted (#11890). A refused point (the
         // document's limit) reports in the status bar as that tool's does; off the canvas, as that
         // tool, it places none and says nothing. A press on an existing point wasn't measured, so
         // it samples the foreground as before.
-        ToolEvent::Down { x, y, .. } if mods.shift && !on_sampler(app, x, y) => {
+        ToolEvent::Down { x, y, .. } if mods.shift && !triangle && !on_sampler(app, x, y) => {
             let size = app.session.active().map(|d| d.doc.size);
             let inside = size.is_some_and(|s| (0.0..f64::from(s.width)).contains(&x) && (0.0..f64::from(s.height)).contains(&y));
             if inside && let Err(e) = app.run("view.colorSamplers.add", json!({"x": x, "y": y})) {
@@ -305,12 +315,40 @@ pub(super) fn alt_eyedropper(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui:
             }
         }
         // While ⇧⌥ stay held after that press, moves sample nothing.
-        ToolEvent::Move { .. } if mods.shift => {}
+        ToolEvent::Move { .. } if mods.shift && !triangle => {}
+        ToolEvent::Down { x, y, .. } | ToolEvent::Move { x, y, .. } if triangle => sample_shape_fill(app, x, y),
         // Without ⌥: the sample sets the foreground colour, whatever the Eyedropper would do.
         ToolEvent::Down { x, y, .. } | ToolEvent::Move { x, y, .. } => sample_eyedropper(app, x, y, egui::Modifiers::NONE),
-        ToolEvent::Up { .. } => app.alt_sampling = false,
+        ToolEvent::Up { x, y } => {
+            if triangle {
+                sample_shape_fill(app, x, y);
+            }
+            app.alt_sampling = false;
+        }
     }
     true
+}
+
+/// The Triangle tool samples with ⌥ held at the press at (x, y) only in Shape mode and with no
+/// shape layer active (#13364): with one, ⌥ subtracts from it. Path or Pixels mode and a press
+/// with nothing to sample (off the image, over transparency) weren't measured and keep drawing
+/// from the centre. Control+⌥ stays the brush-resize drag, as in [`alt_samples`].
+fn shape_alt_samples(app: &mut PhotocraftApp, mods: egui::Modifiers, x: f64, y: f64) -> bool {
+    mods.alt
+        && !mods.ctrl
+        && app.active_tool() == Tool::Triangle
+        && app.ui.tool_options.shape_mode == "shape"
+        && crate::vector_ui::active_shape_path(app).is_none()
+        && eyedropper_color(app, x, y).is_some()
+}
+
+/// The Triangle tool's ⌥ sample: the colour at (x, y) becomes the foreground and the tool's Fill, a
+/// solid fill, which follows the foreground (#13364). Where nothing is sampled, both stay.
+fn sample_shape_fill(app: &mut PhotocraftApp, x: f64, y: f64) {
+    if sampled_eyedropper(app, x, y, egui::Modifiers::NONE) {
+        app.ui.tool_options.shape_fill = true;
+        app.ui.tool_options.shape_fill_gradient = None;
+    }
 }
 
 /// Is document point (x, y) on a colour sampler, within the Color Sampler tool's reach of one (7
@@ -321,12 +359,21 @@ fn on_sampler(app: &PhotocraftApp, x: f64, y: f64) -> bool {
 }
 
 #[cfg(test)]
+#[path = "triangle_alt_eyedropper_tests.rs"]
+mod triangle_alt_eyedropper_tests;
+
+#[cfg(test)]
 #[path = "../brush_shift_alt_sampler_tests.rs"]
 mod brush_shift_alt_sampler_tests;
 
 /// Sample the image or targeted raster mask at (x, y) using the configured Sample Size.
 /// Write a valid sample to the foreground swatch, or to the background swatch with Alt.
 pub(super) fn sample_eyedropper(app: &mut PhotocraftApp, x: f64, y: f64, mods: egui::Modifiers) {
+    sampled_eyedropper(app, x, y, mods);
+}
+
+/// [`sample_eyedropper`], true when it set a swatch.
+fn sampled_eyedropper(app: &mut PhotocraftApp, x: f64, y: f64, mods: egui::Modifiers) -> bool {
     let rgb = if let Some((surface, canvas)) = eyedropper_mask_source(app) {
         sample_layer_mask(surface, canvas, x, y, app.ui.tool_options.eyedropper_size)
     } else {
@@ -334,8 +381,9 @@ pub(super) fn sample_eyedropper(app: &mut PhotocraftApp, x: f64, y: f64, mods: e
     };
     if let Some(rgb) = rgb {
         let key = if mods.alt { "background" } else { "foreground" };
-        let _ = app.run("tools.setColors", json!({ key: [rgb[0],rgb[1],rgb[2],1.0] }));
+        return app.run("tools.setColors", json!({ key: [rgb[0],rgb[1],rgb[2],1.0] })).is_ok();
     }
+    false
 }
 
 /// Only the Eyedropper's Current Layer and Current & Below modes pick the targeted raster mask.
@@ -381,11 +429,54 @@ fn sample_color(app: &mut PhotocraftApp, x: f64, y: f64, sample_layer: &str) -> 
     let size = app.ui.tool_options.eyedropper_size;
     // The box depends on the view zoom at 100 % and below, as in Photoshop (#11751).
     let zoom = f64::from(app.current_zoom());
-    let v = app.run("document.sampleColor", json!({"x": x, "y": y, "size": size, "sampleLayer": sample_layer, "zoom": zoom})).ok()?;
-    match serde_json::from_value::<Vec<f32>>(v).ok()?[..] {
-        [r, g, b, a] if a > 0.0 => Some([r, g, b]),
-        _ => None,
+    let params = json!({"x": x, "y": y, "size": size, "sampleLayer": sample_layer, "zoom": zoom});
+    // Strokes painted into their layers: painted into a copy of the picked pixels, then the
+    // stack sampled as usual (sizes past 11 px fall back to laying their colour over the sample).
+    let in_layer = app.session.active().map(|st| super::strokes::pending_in_layer(app, st.doc.id)).unwrap_or_default();
+    // Large Brush Mode strokes still being written show as their overlays: the pick lays those
+    // over the document's own sample rather than waiting for the writes (`pending_paint`).
+    let pending = app.session.active().map(|st| st.doc.id).map(|doc| super::strokes::pending_paint(app, doc, x, y, size)).unwrap_or_default();
+    // (Laid over the canvas only: strokes in layers were painted in above, or at a big sample
+    // size laid over too.)
+    let mut pending = pending;
+    if size > 11 {
+        for s in &in_layer {
+            let n = size.clamp(1, 5) as usize;
+            let (cx, cy) = (x.floor() as f32 + 0.5, y.floor() as f32 + 0.5);
+            let side = size.clamp(1, 101) as f32;
+            let at = |i: usize| if n == 1 { 0.0 } else { (i as f32 / (n - 1) as f32 - 0.5) * (side - 1.0) };
+            let mut sum = 0.0;
+            for j in 0..n {
+                for i in 0..n {
+                    sum += super::strokes::dabs_coverage(&s.dabs, cx + at(i), cy + at(j));
+                }
+            }
+            let a = (sum / (n * n) as f32 * s.opacity).clamp(0.0, 1.0);
+            if a > 0.0 {
+                pending.push((s.paint, a));
+            }
+        }
     }
+    let painted = if in_layer.is_empty() || size > 11 { None } else { sample_with_pending(app, x, y, size, sample_layer, &in_layer) };
+    // Where no stroke still being written paints, the document's sample is already exact.
+    let v = if let Some(v) = painted {
+        v
+    } else if app.gpu_commits.is_empty() {
+        app.run("document.sampleColor", params).ok()?
+    } else {
+        app.session.execute("document.sampleColor", params).ok()?
+    };
+    let (r, g, b, a) = match serde_json::from_value::<Vec<f32>>(v).ok()?[..] {
+        [r, g, b, a] => (r, g, b, a),
+        _ => return None,
+    };
+    // Over the sample (straight colour), oldest stroke first, as the canvas lays them.
+    let (mut c, mut alpha) = ([r * a, g * a, b * a], a.clamp(0.0, 1.0));
+    for (paint, k) in pending {
+        c = std::array::from_fn(|i| paint[i] * k + c[i] * (1.0 - k));
+        alpha = k + alpha * (1.0 - k);
+    }
+    (alpha > 0.0).then(|| c.map(|v| v / alpha))
 }
 
 /// What the Eyedropper tool (and a painting tool's ⌥-click) picks at document point (x, y): its
@@ -409,9 +500,64 @@ pub(crate) fn alt_picks(tool: Tool, mods: egui::Modifiers) -> bool {
     alt_samples(tool, mods) || alt_loads_mixer(tool, mods)
 }
 
+/// `document.sampleColor` at (x, y) with the Large Brush Mode strokes still being written into
+/// their layers (`in_layer`, oldest first) painted into a copy of the sampled pixels, as the
+/// stroke buffer lays them (Normal paint over the layer's pixel, or its colour alone where the
+/// layer's transparency is locked). `None` when there is nothing to sample.
+fn sample_with_pending(
+    app: &PhotocraftApp,
+    x: f64,
+    y: f64,
+    size: u32,
+    sample_layer: &str,
+    in_layer: &[super::strokes::PendingInLayer],
+) -> Option<serde_json::Value> {
+    use photocraft_engine::sample_cmds::{SampleLayers, sample_color, sample_rect};
+    let st = app.session.active()?;
+    let mut doc = (*st.doc).clone();
+    let rect = sample_rect(x, y, size, doc.bounds())?;
+    for s in in_layer {
+        let Some(surf) = doc.layer_mut(s.layer).and_then(|l| l.surface_mut()) else { continue };
+        let n = surf.channels();
+        if n < 4 {
+            continue;
+        }
+        let mut px = vec![0.0f32; n];
+        for py in rect.y0..rect.y1 {
+            for qx in rect.x0..rect.x1 {
+                let a = (super::strokes::dabs_coverage(&s.dabs, qx as f32 + 0.5, py as f32 + 0.5) * s.opacity).clamp(0.0, 1.0);
+                if a <= 0.0 {
+                    continue;
+                }
+                surf.read_pixel(qx, py, &mut px);
+                let la = px.get(3).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+                if s.lock {
+                    for (v, p) in px.iter_mut().zip(s.paint) {
+                        *v = *v * (1.0 - a) + p * a;
+                    }
+                } else {
+                    let out = a + la * (1.0 - a);
+                    for (v, p) in px.iter_mut().zip(s.paint) {
+                        *v = if out > 0.0 { (p * a + *v * la * (1.0 - a)) / out } else { 0.0 };
+                    }
+                    if let Some(alpha) = px.get_mut(3) {
+                        *alpha = out;
+                    }
+                }
+                surf.write_pixel(qx, py, &px);
+            }
+        }
+    }
+    let which = SampleLayers::parse(sample_layer).unwrap_or_default();
+    Some(serde_json::json!(sample_color(&doc, st.active_layer, x, y, size, which)))
+}
 #[cfg(test)]
 #[path = "../eyedropper_mask_sample_tests.rs"]
 mod eyedropper_mask_sample_tests;
+
+#[cfg(test)]
+#[path = "../color_replacement_cursor_tests.rs"]
+mod color_replacement_cursor_tests;
 
 #[cfg(test)]
 #[path = "../color_replacement_alt_click_tests.rs"]
@@ -424,3 +570,7 @@ mod background_eraser_alt_click_tests;
 #[cfg(test)]
 #[path = "remove_cursor_tests.rs"]
 mod remove_cursor_tests;
+
+#[cfg(test)]
+#[path = "paint_bucket_cursor_tests.rs"]
+mod paint_bucket_cursor_tests;

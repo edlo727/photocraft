@@ -24,6 +24,14 @@ fn browse_field(app: &mut PhotocraftApp, id: u64, fields: &serde_json::Map<Strin
     let key = key.to_string();
     let r = if is_folder_field(&key) {
         app.ask_folder(move |app, path| fill_field(app, id, &key, path))
+    } else if fields.get("__command").and_then(Value::as_str) == Some("edit.colorSettings") {
+        // Color Settings › Ocio Config: a config.ocio file.
+        let initial_dir = crate::file_dialog::last_used_dir(&app.ui.recent_files);
+        let request = crate::file_dialog::FileDialogRequest::Open { multiple: false, initial_dir, extensions: Some(vec!["ocio".into()]) };
+        app.ask_file(request, move |app, answer| match answer {
+            crate::file_dialog::FileDialogAnswer::Paths(mut paths) if !paths.is_empty() => fill_field(app, id, &key, paths.remove(0)),
+            _ => Ok(Value::Null),
+        })
     } else if fields.get("__command").and_then(Value::as_str) == Some("plugin.install") {
         let initial_dir = crate::file_dialog::last_used_dir(&app.ui.recent_files);
         let request = crate::file_dialog::FileDialogRequest::Open { multiple: false, initial_dir, extensions: Some(vec!["wasm".into()]) };
@@ -314,6 +322,8 @@ fn command_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fields: 
         _ if crate::fill_ui::owns(fields) => crate::fill_ui::body(app, ui, fields),
         _ if crate::pattern_fill_ui::owns(fields) => crate::pattern_fill_ui::body(app, ui, fields),
         _ if crate::stroke_ui::owns(fields) => crate::stroke_ui::body(ui, fields),
+        _ if crate::depth_ui::owns(fields) => crate::depth_ui::body(ui, fields),
+        _ if crate::input_space_ui::owns(fields) => crate::input_space_ui::body(ui, fields),
         _ if crate::new_group_ui::owns(fields) => crate::new_group_ui::body(ui, fields),
         _ if crate::snapshot_dialog::owns(fields) => crate::snapshot_dialog::body(ui, fields),
         _ if crate::channel_options_ui::owns(fields) => crate::channel_options_ui::body(ui, fields),
@@ -355,7 +365,7 @@ fn command_body_more(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fie
             }
         }
         _ if crate::color_range_ui::owns(fields) => crate::color_range_ui::body(app, ui, fields),
-        _ if crate::prefs_ui::owns(fields) => crate::prefs_ui::body(app, ui, fields),
+        _ if crate::prefs_ui::owns(fields) => crate::prefs_ui::body(app, ui, fields, d.id),
         _ if fields.contains_key("__export") => crate::export_dialog::body(app, ui, fields),
         // Image Size and Canvas Size open on Width, selected (#2329).
         _ if fields.contains_key("__sizing") => first_field_focused(ui, id, |ui| crate::sizing::body(ui, fields)),
@@ -432,7 +442,9 @@ fn filter_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fields: &
     crate::filter_dialog::refresh_match_color_sources(&app.session, fields);
     // Color Settings: the monitor profile in use can change while it is open.
     if fields.get("__command").and_then(Value::as_str) == Some("edit.colorSettings") {
-        fields.insert("__note".into(), Value::String(crate::monitor_status::note(app)));
+        // And which OCIO config is in use (the preference, as saved).
+        let ocio = photocraft_engine::color_cmds::ocio_status(&app.session.prefs().file_handling.ocio_config);
+        fields.insert("__note".into(), Value::String(format!("{}\n{ocio}", crate::monitor_status::note(app))));
     }
     // Long parameter lists (Flame, Lighting Effects) scroll, so the title and the
     // OK / Cancel buttons stay inside a small window. The preview window below the
@@ -547,12 +559,14 @@ fn button_row(
         } else {
             dialog_buttons(ui, &[ok, cancel])
         };
+        // Enter is the default button, except where a popup takes it or Export As waits for a click.
+        let enter_confirms = can_ok && !popup_blocks_enter && crate::export_dialog::enter_confirms(fields);
         match clicked {
             Some(ButtonRole::Cancel) if reset => crate::dialog_alt_reset::apply(app, ui.ctx(), fields),
             Some(ButtonRole::Cancel) => outcome = Some(false),
             Some(ButtonRole::Apply) => apply_requested = true,
             Some(_) => outcome = Some(true),
-            None if interactive && can_ok && !popup_blocks_enter && ui.input(|i| i.key_pressed(egui::Key::Enter)) => outcome = Some(true),
+            None if interactive && enter_confirms && ui.input(|i| i.key_pressed(egui::Key::Enter)) => outcome = Some(true),
             None => {}
         }
     }
@@ -561,7 +575,9 @@ fn button_row(
 
 /// The default button's label: what OK means for this dialog.
 fn ok_label(d: &Dialog) -> &'static str {
-    if d.kind == DialogKind::NewDocument {
+    if image_processor_ui::owns(&d.fields) {
+        tl!("Run")
+    } else if d.kind == DialogKind::NewDocument {
         tl!("Create")
     } else if crate::open_prompt::owns_memory(&d.fields) {
         tl!("Open anyway")
@@ -630,6 +646,8 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let mut drag = egui::Vec2::ZERO;
         let mut close_clicked = false;
         let mut sizing = false;
+        let mut processor_alert = None;
+        let mut fit_image_alert = None;
         let area = match start {
             Some(offset) => egui::Modal::default_area(id).anchor(egui::Align2::LEFT_TOP, offset),
             None => egui::Modal::default_area(id),
@@ -722,8 +740,12 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
             crate::widgets::hairline(ui);
             ui.add_space(8.0);
             crate::field_tab::begin(ui.ctx());
-            if let Some(done) = dialog_body(app, ui, &d, &mut fields, id, interactive) {
-                outcome = Some(done);
+            if image_processor_ui::owns(&fields) {
+                processor_alert = image_processor_ui::body(ui, &mut fields);
+            } else if fit_image_range::owns(&fields) {
+                fit_image_alert = fit_image_range::body(ui, &mut fields);
+            } else {
+                outcome = dialog_body(app, ui, &d, &mut fields, id, interactive);
             }
             crate::field_tab::end(ui.ctx(), tab);
             if let Some(Value::String(key)) = fields.remove(BROWSE_FIELD) {
@@ -789,6 +811,8 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         {
             outcome = Some(false);
         }
+        outcome = image_processor_ui::finish(&mut app.ui, interactive, processor_alert, outcome);
+        outcome = fit_image_range::finish(&mut app.ui, interactive, fit_image_alert, outcome);
         if let Some(dm) = app.ui.dialog_mut(d.id) {
             dm.fields = fields;
         }
@@ -897,6 +921,8 @@ const ROUTES: &[fn(&Fields) -> bool] = &[
     crate::fill_ui::owns,
     crate::pattern_fill_ui::owns,
     crate::stroke_ui::owns,
+    crate::depth_ui::owns,
+    crate::input_space_ui::owns,
     crate::channel_options_ui::owns,
     crate::channel_options_ui::owns_new_spot,
     merge_channels_ui::owns,
@@ -1121,6 +1147,8 @@ fn confirm_command(app: &mut PhotocraftApp, d: Dialog) -> Result<Value, String> 
         _ if crate::fill_ui::owns(&d.fields) => crate::fill_ui::confirm(app, &d.fields),
         _ if crate::pattern_fill_ui::owns(&d.fields) => crate::pattern_fill_ui::confirm(app, &d.fields),
         _ if crate::stroke_ui::owns(&d.fields) => crate::stroke_ui::confirm(app, &d.fields),
+        _ if crate::depth_ui::owns(&d.fields) => crate::depth_ui::confirm(app, &d.fields),
+        _ if crate::input_space_ui::owns(&d.fields) => crate::input_space_ui::confirm(app, &d.fields),
         _ if crate::new_group_ui::owns(&d.fields) => crate::new_group_ui::confirm(app, &d.fields),
         _ if crate::snapshot_dialog::owns(&d.fields) => crate::snapshot_dialog::confirm(app, &d.fields),
         _ if crate::channel_options_ui::owns(&d.fields) => crate::channel_options_ui::confirm(app, &d.fields),
@@ -1169,6 +1197,8 @@ fn confirm_command_more(app: &mut PhotocraftApp, d: Dialog) -> Result<Value, Str
 
 pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
     confirm_preflight(app, id)?;
+    image_processor_ui::preflight(&mut app.ui, id)?;
+    fit_image_range::preflight(&mut app.ui, id)?;
     let d = app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
     match d.kind {
         DialogKind::NewDocument => {
@@ -1310,16 +1340,21 @@ pub mod duplicate_layer_ui;
 pub mod edit_history;
 pub mod equalize_ui;
 pub mod export_dialog;
+pub(crate) mod fade_modes;
 pub mod file_ui;
 pub mod fill_ui;
 pub mod filter_dialog;
 pub(super) mod filter_preview_ui;
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) mod filter_preview_worker;
+mod fit_image_range;
+#[cfg(test)]
+mod fit_image_range_tests;
 pub mod gallery_ui;
 pub(crate) mod guide_edit;
 pub mod guide_layout_ui;
 pub mod history_options_ui;
+mod image_processor_ui;
 pub mod jpeg_options_ui;
 #[cfg(test)]
 mod label_column_tests;
@@ -1335,6 +1370,10 @@ pub mod new_guide_ui;
 pub mod new_layer_ui;
 pub mod open_prompt;
 pub mod palette;
+#[cfg(test)]
+mod paths_export_default_tests;
+#[cfg(test)]
+mod paths_export_document_bounds_tests;
 pub(crate) mod pattern_fill_ui;
 pub mod preset_group_prompt;
 pub mod rasterize_prompt;
@@ -1350,6 +1389,8 @@ pub mod snapshot_dialog;
 pub(crate) mod solid_fill_ui;
 pub mod stack_dialog;
 pub mod stroke_ui;
+pub mod depth_ui;
+pub mod input_space_ui;
 pub mod targa_options_ui;
 #[cfg(test)]
 mod tests;

@@ -802,6 +802,10 @@ fn automation_rejects_ambient_path_commands_and_preferences() {
         "fileHandling.lutFolder",
         "fileHandling",
         "scratchDisks.disks",
+        "integrations",
+        "integrations.readRoot",
+        "integrations.writeRoot",
+        ".integrations.writeRoot",
         ".",
         "..historyLog.filePath",
     ] {
@@ -812,6 +816,23 @@ fn automation_rejects_ambient_path_commands_and_preferences() {
     );
     assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": "interface.language", "value": "fr"})).is_ok());
     assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": "fileHandling.autosave", "value": false})).is_ok());
+    assert!(
+        authorize_engine_command("prefs.set", &serde_json::json!({"values": {"integrations.controlPort": 7878, "integrations.writeRoot": "/outside"}}))
+            .is_err(),
+        "a batch may not grant automation roots either"
+    );
+    assert!(authorize_engine_command("prefs.set", &serde_json::json!({"path": "integrations.controlPort", "value": 7878})).is_ok());
+}
+
+/// The OCIO viewer's LUT and the OCIO config are host files, so a headless caller cannot name
+/// them; the built-in configs and "none" stay available.
+#[test]
+fn ocio_paths_are_refused_but_builtin_configs_are_not() {
+    assert!(authorize_engine_command("view.ocioViewer", &serde_json::json!({"lut": "/outside/show.cube"})).is_err());
+    assert!(authorize_engine_command("view.ocioViewer", &serde_json::json!({"lut": "", "view": "ACES 1.0 - SDR Video"})).is_ok());
+    assert!(authorize_engine_command("edit.colorSettings", &serde_json::json!({"ocioConfig": "C:\\ocio\\config.ocio"})).is_err());
+    assert!(authorize_engine_command("edit.colorSettings", &serde_json::json!({"ocioConfig": "ocio://cg-config-v2.1.0_aces-v1.3_ocio-v2.3"})).is_ok());
+    assert!(authorize_engine_command("edit.colorSettings", &serde_json::json!({"ocioConfig": ""})).is_ok());
 }
 
 #[test]
@@ -827,6 +848,8 @@ fn registry_filesystem_path_params_are_classified() {
         "input": "/outside/photocraft-input",
         "output": "/outside/photocraft-output",
         "paths": ["/outside/photocraft-probe.psd"],
+        "lut": "/outside/photocraft-probe.cube",
+        "ocioConfig": "/outside/photocraft-probe.ocio",
     });
     let preference_probe = serde_json::json!({"path": ".scriptEvents", "value": {}});
     let unclassified: Vec<_> = photocraft_engine::command_specs()
@@ -1012,6 +1035,7 @@ fn documents_filesystem_path_params(id: &str, params: &str) -> bool {
             | "path.convertPoint"
             | "path.addAnchor"
             | "path.deleteAnchor"
+            | "path.deleteSegment"
             | "path.mergeShapeComponents"
             | "path.setOperation"
             | "path.clippingPath.set"
@@ -1509,7 +1533,7 @@ fn csh_import_requires_inline_data_in_automation() {
 
 /// A one-shape CSH set (version 2) named `name`, with a single open one-knot subpath.
 fn one_shape_csh(name: &str) -> Vec<u8> {
-    use photocraft_psd::path::{PathData, PsdKnot, PsdSubpath};
+    use craft_psd::path::{PathData, PsdKnot, PsdSubpath};
     let mut bytes = b"cush".to_vec();
     bytes.extend_from_slice(&2u32.to_be_bytes());
     bytes.extend_from_slice(&1u32.to_be_bytes());

@@ -6,6 +6,14 @@ use super::{
 impl PhotocraftApp {
     /// Run an engine command, reporting errors in the status bar.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        // A Large Brush Mode stroke still being written goes in first, so commands see it.
+        let waited = self.perf.stage.wait_ms;
+        if !crate::canvas::tool_state_only(id) {
+            crate::canvas::finish_gpu_commit(self, true);
+        }
+        if self.perf.stage.wait_ms > waited {
+            crate::canvas::note_gpu_wait(self, waited, &format!("the command `{id}`"));
+        }
         let params = if id == "select.findLayers" { crate::layer_filter_ui::find::params_for_run(self, params) } else { params };
         if let Some(result) = delete_layer_prompt::intercept(self, id, &params) {
             return result;
@@ -193,7 +201,11 @@ impl PhotocraftApp {
             jobs_ui::run(self, id, params)
         };
         let creates_adjustment_or_fill = id.starts_with("layer.newAdjustmentLayer.") || id.starts_with("layer.newFillLayer.");
+        let t_effects = gpu_canvas::now_ms();
         self.sync_command_side_effects(id, &r, creates_active_mask, creates_active_vector_mask, creates_adjustment_or_fill, path_mask);
+        if self.run_depth == 1 {
+            self.perf.stage.effects_ms += gpu_canvas::now_ms() - t_effects;
+        }
         self.perf.last_command = id.to_string();
         self.perf.command_ms = gpu_canvas::now_ms() - t0;
         if self.run_depth == 1 {

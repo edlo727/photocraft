@@ -128,6 +128,18 @@ pub struct Compositor {
     /// Timestamp queries measuring how long the GPU spends on a refresh (see
     /// [`Compositor::measure_gpu_time`]); `None` = not measured.
     timer: Option<timing::GpuTimer>,
+    /// Upload only the changed tiles that meet this rect (see [`Compositor::set_upload_region`]).
+    upload_region: Option<Rect>,
+    /// Large Brush Mode strokes painted into their layers ([`Compositor::set_live_paint`]).
+    live: Option<live::LivePaint>,
+    live_kit: Option<live::LiveKit>,
+    /// The region the current render composites.
+    render_region: Rect,
+    /// While strokes are live: passes from here on draw a live layer, so no lower-stack
+    /// composite may stand in for them (a cached one doesn't hold the live paint).
+    live_limit: Option<usize>,
+    /// A painted copy didn't fit its budget since [`Compositor::live_over_budget`] last asked.
+    live_over: bool,
 }
 use W::{F, I, U};
 
@@ -140,6 +152,7 @@ mod convert;
 mod encode;
 mod fx_passes;
 mod kit;
+mod live;
 mod paging;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod readback;
@@ -156,8 +169,11 @@ pub use consts::{ACC_FORMAT, CHUNK, FX_BUDGET, PAGE, PATTERN_BUDGET, PATTERN_IDL
 pub use context::{GpuContextError, NativeContext, NativeContextOptions};
 use convert::W;
 #[cfg(test)]
-use convert::{CONVERT_BATCH, colour_managed, convert_tile, convert_tiles, rgb_gray16_to_f16, rgb_gray32_to_f16};
-pub use convert::{f16_to_f32, f32_to_f16};
+use convert::convert_tiles;
+#[cfg(test)]
+use convert::{CONVERT_BATCH, colour_managed, convert_tile, convert_tiles_ready, rgb_gray16_to_f16, rgb_gray32_to_f16};
+pub use convert::{f16_to_f32, f32_to_f16, preconvert};
+pub use live::{LIVE_SLOTS, LivePaint, LiveSlot};
 pub use kit::SHADER;
 use kit::{Kit, tex_entry};
 pub use paging::OVER_BUDGET;

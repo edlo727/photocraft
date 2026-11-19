@@ -1,9 +1,9 @@
 use super::shortcuts::normalize_shortcut;
 use super::{
     AppearanceMode, Ask, CanvasBorder, CanvasColor, CheckerColors, CheckerSize, ColorPicker, DarkTheme, ExportLocation, ExportMetadata, FontPreview,
-    GpuBackend, Interpolation, LightTheme, LineStyle, LinuxDisplayServer, LogDestination, LogDetail, OtherCursor, PaintingCursor, PlaybackPerformance,
+    GpuBackend, Interpolation, LightTheme, LineStyle, LinuxDisplayServer, LogDestination, LogDetail, OtherCursor, PaintingCursor, PerformanceMode, PlaybackPerformance,
     PointSize, PressureCurve, QuickExportFormat, RawColorSpace, RawDemosaic, RawDepth, RawSharpen, RenderingMode, RightClickPaint, TabletInput, TextEngine,
-    Theme, TypeUnit, UiFontSize, UiScale, Unit, Value,
+    Theme, TypeUnit, UiFontSize, UiScale, Unit, Value, WhenAppClosed,
 };
 
 /// Preferences dialog sections in Photoshop's order: (id, title).
@@ -102,6 +102,8 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
         "performance.gpuBackend" => GpuBackend::NAMES,
         "performance.linuxDisplayServer" => LinuxDisplayServer::NAMES,
         "performance.renderingMode" => RenderingMode::NAMES,
+        "performance.performanceMode" => PerformanceMode::NAMES,
+        "integrations.whenAppClosed" => WhenAppClosed::NAMES,
         "actions.performance" => PlaybackPerformance::NAMES,
         _ => return None,
     })
@@ -234,6 +236,9 @@ pub(super) fn check_value(path: &str, v: &Value) -> std::result::Result<(), Stri
     }
     if matches!(path, "performance.renderingMode" | "performance.memoryUsagePercent") && v.is_null() {
         return Ok(()); // Legacy policy, resolved from useGpu and gpuBackend.
+    }
+    if path == "performance.performanceMode" && v.is_null() {
+        return Ok(()); // Not chosen: follows Rendering Mode (`Performance::effective_performance_mode`).
     }
     if let Some(c) = choices(path) {
         let s = v.as_str().ok_or_else(|| format!("`{path}` must be one of {}", c.join("|")))?;

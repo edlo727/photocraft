@@ -136,7 +136,7 @@ pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context, command: &str) -> Res
     let opacity = l.opacity * l.fill_opacity;
     let preview_doc = crate::distort_ui::without_layer(&st.doc, layer);
     let key = app.ui.alloc_id();
-    let texture = ctx.load_texture(format!("persp-{key}"), crate::distort_ui::surface_image(&surface, bounds, 2048), egui::TextureOptions::LINEAR);
+    let texture = ctx.load_texture(format!("persp-{key}"), crate::distort_ui::surface_image(&surface, bounds, 2048, &crate::distort_ui::PreviewDisplay::for_doc(app, &st.doc)), egui::TextureOptions::LINEAR);
     let mut s = PerspSession {
         key,
         document: st.doc.id,

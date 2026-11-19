@@ -129,6 +129,10 @@ impl CanvasCallback {
             },
             p.center[0],
             p.center[1],
+            f32::from(p.channel.min(5)),
+            0.0,
+            0.0,
+            0.0,
             proj[0],
             proj[1],
             proj[2],
@@ -212,6 +216,8 @@ impl CallbackTrait for CanvasCallback {
         let cen = self.params.center;
         let [ox, oy] = self.params.offset.map(|v| if v.is_finite() { v } else { 0.0 });
         pass.set_bind_group(2, res.luts.get(&(self.params.doc, self.params.output)).unwrap_or(&res.identity_lut), &[]);
+        // Large Brush Mode's stroke overlay (stroke_overlay.rs), or the idle one.
+        pass.set_bind_group(3, res.stroke.bind_group(self.params.doc), &[]);
         if self.params.projection.is_some() {
             // Every tile covers the whole view and keeps only the directions that land in it.
             pass.set_pipeline(&res.proj_pipeline);

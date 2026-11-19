@@ -3341,7 +3341,7 @@ fn float_curves_extend_past_the_unit_range_like_photoshop() {
     use photocraft_doc::adjust::CurvePoint;
     let line = vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 128.0 / 255.0 }];
     let ident = vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 1.0 }];
-    let adj = Adjustment::Curves { master: line, per_channel: std::array::from_fn(|_| ident.clone()), space: ToneSpace::Rgb, black: Vec::new(), pencil: false };
+    let adj = Adjustment::Curves { master: line, per_channel: std::array::from_fn(|_| ident.clone()), space: ToneSpace::Rgb, black: Vec::new(), pencil: false, lookup: Default::default() };
     let input = Buffer { rect: Rect::new(0, 0, 3, 1), px: vec![[-0.5, -0.5, -0.5, 1.0], [0.5, 0.5, 0.5, 1.0], [2.0, 2.0, 2.0, 1.0]] };
     // Photoshop's samples, compared in f64 so the reference keeps its printed digits.
     let want = [-0.250980407f64, 0.250980407, 1.003921628];
@@ -3401,11 +3401,12 @@ fn float_adjustments_preserve_hdr_range() {
                 space: Default::default(),
                 black: Vec::new(),
                 pencil: false,
+                lookup: Default::default(),
             },
             [4.0, 2.0, 0.5],
         ),
         (
-            Adjustment::Curves { master: Vec::new(), per_channel: Default::default(), space: Default::default(), black: Vec::new(), pencil: false },
+            Adjustment::Curves { master: Vec::new(), per_channel: Default::default(), space: Default::default(), black: Vec::new(), pencil: false, lookup: Default::default() },
             [4.0, 2.0, 0.5],
         ),
     ];
@@ -3438,6 +3439,7 @@ fn float_tone_adjustments_preserve_negative_and_untouched_channels() {
                 space: Default::default(),
                 black: Vec::new(),
                 pencil: false,
+                lookup: Default::default(),
             },
             [-0.1, 4.0, 0.25],
         ),
@@ -4135,6 +4137,7 @@ fn lab_adjustment_results_are_whole_samples() {
         space: ToneSpace::Lab,
         black: Vec::new(),
         pencil: false,
+        lookup: Default::default(),
     };
     // A straight line from (0, 0) through (100, 120.4): L 100 lands between two bytes.
     let adj = curves(&[(0.0, 0.0), (100.0 / 255.0, 120.4 / 255.0), (1.0, 1.0)]);
@@ -4160,6 +4163,7 @@ fn lab_adjustment_results_round_a_and_b_after_the_opacity_mix() {
         space: ToneSpace::Lab,
         black: Vec::new(),
         pencil: false,
+        lookup: Default::default(),
     };
     let mut doc = lab_stack([0.5, 140.0 / 255.0, 0.5], SampleType::U8, vec![adj]);
     if let Some(l) = doc.layers.last_mut() {

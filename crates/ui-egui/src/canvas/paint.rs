@@ -609,6 +609,9 @@ pub(super) fn draw_drag_preview(app: &mut PhotocraftApp, painter: &egui::Painter
                 draw_smoothing_string(painter, xf, s);
             }
         }
+        // Large Brush Mode: the GPU overlay shows the stroke (`GpuStroke`); a CPU trail of the
+        // whole document's dabs on top would cost more than the stroke it previews.
+        t if strokes_live(t) && app.gpu_stroke.is_some() => {}
         t if t.is_brushlike() || t == Tool::QuickSelection => {
             // Retouching strokes preview as a translucent trail of the brush footprint: a mask,
             // not a brush-wide egui polyline (which zoomed in tessellates into wedges, #189).

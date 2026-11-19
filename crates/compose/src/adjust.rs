@@ -31,8 +31,9 @@ pub use color::{
 use tone::LUT_SIZE;
 pub(crate) use tone::apply_tone;
 pub use tone::{
-    TONE_SLOPE_SPAN, contour_curve_lut, curve_lut, curve_lut_mode, curve_map_lut, curve_samples, float_tone_extrapolates, float_tone_identity, levels,
-    levels_float, levels_gamma, levels_q, modern_brightness, modern_contrast, modern_lut, posterize, posterize_in, tone_luts, tone_luts_depth, tone_luts_q,
+    LookupTables, TONE_SLOPE_SPAN, contour_curve_lut, curve_lut, curve_lut_mode, curve_map_lut, curve_samples, float_tone_extrapolates, float_tone_identity,
+    levels, levels_float, levels_gamma, levels_q, lookup_sample, lookup_tables, modern_brightness, modern_contrast, modern_lut, posterize, posterize_in,
+    spline_knots, spline_samples, tone_luts, tone_luts_depth, tone_luts_q,
 };
 use tone::{lut, map_rgb};
 
@@ -170,6 +171,17 @@ fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
             }
         }
         Adjustment::Levels { space, .. } | Adjustment::Curves { space, .. } => {
+            // Nuke ColorLookup-style Curves (range, ends, order): evaluated over their own range.
+            if let Some(t) = lookup_tables(adj) {
+                let float = depth == Some(SampleType::F32);
+                map_rgb(buf, |c| {
+                    std::array::from_fn(|i| {
+                        let v = lookup_sample(&t.rows[i], c[i], t.range, t.hold);
+                        if float { v } else { v.clamp(0.0, 1.0) }
+                    })
+                });
+                return;
+            }
             let identity = float_tone_identity(adj, depth);
             if identity == [true; 3] {
                 return;
@@ -286,8 +298,152 @@ fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
                 p[..3].copy_from_slice(&o);
             }
         }
+        Adjustment::Grade { .. } => {
+            let Some(g) = GradeCoefficients::of(adj) else { return };
+            if depth == Some(SampleType::F32) {
+                map_rgb(buf, |c| g.apply(c));
+            } else {
+                // Integer documents: graded in linear light, as Nuke grades, then re-encoded.
+                map_rgb(buf, |c| g.apply(c.map(|v| transfer.decode(v))).map(|v| transfer.encode(v.max(0.0)).clamp(0.0, 1.0)));
+            }
+        }
+        Adjustment::OcioColorSpace { input, output } => {
+            // The process-wide OCIO config; without OpenColorIO (or for unknown spaces) the
+            // layer is an identity, as Nuke shows an erroring node's input.
+            if input == output {
+                return;
+            }
+            let Some(p) = photocraft_ocio::current().and_then(|c| c.processor(input, output)).ok().filter(|p| !p.is_noop()) else { return };
+            p.apply_rgba(&mut buf.px);
+            if depth != Some(SampleType::F32) {
+                for px in &mut buf.px {
+                    for v in &mut px[..3] {
+                        *v = v.clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
         // Not evaluated: identity (still round-trips through PSD).
         Adjustment::ColorLookup { .. } | Adjustment::Unsupported { .. } => {}
+    }
+}
+
+/// Nuke Grade, precomputed per channel: `out = (a · in + b)^(1/gamma)`, gamma on positive values
+/// only, then the clamps (see [`Adjustment::Grade`]). Shared by the compositor, the GPU kernel's
+/// parameters and the EXR beauty pass, so all three grade identically.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GradeCoefficients {
+    pub a: [f32; 3],
+    pub b: [f32; 3],
+    /// `1 / gamma` per channel (gamma floored at 1e-4, as a zero gamma is a hard step in Nuke).
+    pub inv_gamma: [f32; 3],
+    pub black_clamp: bool,
+    pub white_clamp: bool,
+}
+
+impl GradeCoefficients {
+    /// The coefficients of a Grade adjustment; None for any other kind.
+    pub fn of(adj: &Adjustment) -> Option<Self> {
+        let Adjustment::Grade { blackpoint, whitepoint, lift, gain, multiply, offset, gamma, black_clamp, white_clamp } = adj else { return None };
+        let a: [f32; 3] = std::array::from_fn(|i| {
+            let range = whitepoint[i] - blackpoint[i];
+            // Nuke treats an empty input range as a step; keep it finite.
+            let range = if range.abs() < 1e-6 { 1e-6f32.copysign(range) } else { range };
+            multiply[i] * (gain[i] - lift[i]) / range
+        });
+        let b = std::array::from_fn(|i| offset[i] + lift[i] - a[i] * blackpoint[i]);
+        let inv_gamma = std::array::from_fn(|i| 1.0 / gamma[i].max(1e-4));
+        Some(GradeCoefficients { a, b, inv_gamma, black_clamp: *black_clamp, white_clamp: *white_clamp })
+    }
+
+    /// One linear RGB value through the grade.
+    pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|i| {
+            let mut v = self.a[i] * c[i] + self.b[i];
+            if self.inv_gamma[i] != 1.0 && v > 0.0 {
+                v = v.powf(self.inv_gamma[i]);
+            }
+            if self.black_clamp {
+                v = v.max(0.0);
+            }
+            if self.white_clamp {
+                v = v.min(1.0);
+            }
+            v
+        })
+    }
+}
+
+#[cfg(test)]
+mod grade_tests {
+    use super::*;
+
+    fn grade(f: impl FnOnce(&mut [[f32; 3]; 7])) -> Adjustment {
+        // blackpoint, whitepoint, lift, gain, multiply, offset, gamma
+        let mut k = [[0.0; 3], [1.0; 3], [0.0; 3], [1.0; 3], [1.0; 3], [0.0; 3], [1.0; 3]];
+        f(&mut k);
+        Adjustment::Grade {
+            blackpoint: k[0],
+            whitepoint: k[1],
+            lift: k[2],
+            gain: k[3],
+            multiply: k[4],
+            offset: k[5],
+            gamma: k[6],
+            black_clamp: true,
+            white_clamp: false,
+        }
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    #[test]
+    fn default_grade_is_identity_and_keeps_superwhites() {
+        let g = GradeCoefficients::of(&grade(|_| {})).unwrap();
+        assert!(close(g.apply([0.18, 2.5, 16.0]), [0.18, 2.5, 16.0]));
+    }
+
+    #[test]
+    fn matches_nuke_grade_formula() {
+        // blackpoint 0.1, whitepoint 0.9, lift 0.05, gain 1.2, multiply 1.5, offset 0.01, gamma 2:
+        // A = 1.5·(1.2−0.05)/0.8 = 2.15625, B = 0.01 + 0.05 − A·0.1 = −0.155625.
+        let g = GradeCoefficients::of(&grade(|k| {
+            k[0] = [0.1; 3];
+            k[1] = [0.9; 3];
+            k[2] = [0.05; 3];
+            k[3] = [1.2; 3];
+            k[4] = [1.5; 3];
+            k[5] = [0.01; 3];
+            k[6] = [2.0; 3];
+        }))
+        .unwrap();
+        let x: f32 = 0.5;
+        let want = (2.15625 * x - 0.155625).sqrt();
+        assert!(close(g.apply([x; 3]), [want; 3]));
+        // Below the black point: negative before gamma, so the black clamp gives 0.
+        assert_eq!(g.apply([0.0; 3]), [0.0; 3]);
+        // Gain 2 doubles a superwhite: nothing clips at 1 without the white clamp.
+        let g = GradeCoefficients::of(&grade(|k| k[3] = [2.0; 3])).unwrap();
+        assert!(close(g.apply([3.0; 3]), [6.0; 3]));
+    }
+
+    #[test]
+    fn per_channel_and_clamps() {
+        let mut adj = grade(|k| {
+            k[3] = [2.0, 1.0, 0.5];
+            k[5] = [-0.5, 0.0, 0.0];
+        });
+        let g = GradeCoefficients::of(&adj).unwrap();
+        assert!(close(g.apply([1.0; 3]), [1.5, 1.0, 0.5]));
+        assert_eq!(g.apply([0.1; 3])[0], 0.0); // 2·0.1 − 0.5 < 0, black-clamped
+        if let Adjustment::Grade { black_clamp, white_clamp, .. } = &mut adj {
+            *black_clamp = false;
+            *white_clamp = true;
+        }
+        let g = GradeCoefficients::of(&adj).unwrap();
+        assert!(close(g.apply([0.1, 4.0, 1.0]), [-0.3, 1.0, 0.5]));
     }
 }
 
@@ -416,5 +572,66 @@ mod lut3d_guard_tests {
             assert_eq!(lut3d_sample(&[0.0; 3], 2, c, tetra), c);
             assert_eq!(lut3d_sample(&[0.0; 24], usize::MAX, c, tetra), c);
         }
+    }
+}
+
+#[cfg(test)]
+mod lookup_curve_tests {
+    use super::*;
+    use photocraft_doc::adjust::CurveLookup;
+
+    fn line(p: &[(f32, f32)]) -> Vec<CurvePoint> {
+        p.iter().map(|&(input, output)| CurvePoint { input, output }).collect()
+    }
+
+    fn curves(master: &[(f32, f32)], red: Option<&[(f32, f32)]>, lookup: CurveLookup) -> Adjustment {
+        let r = lookup.span();
+        let ident = line(&[(0.0, 0.0), (r, r)]);
+        Adjustment::Curves {
+            master: line(master),
+            per_channel: [red.map_or_else(|| ident.clone(), line), ident.clone(), ident],
+            space: ToneSpace::Rgb,
+            black: Vec::new(),
+            pencil: false,
+            lookup,
+        }
+    }
+
+    fn red_of(adj: &Adjustment, v: f32) -> f32 {
+        let mut b = Buffer { rect: photocraft_geom::Rect::new(0, 0, 1, 1), px: vec![[v, v, v, 1.0]] };
+        apply_depth(adj, &mut b, Transfer::for_document(ColorMode::Rgb, SampleType::F32), Some(SampleType::F32));
+        b.px[0][0]
+    }
+
+    #[test]
+    fn default_lookup_stays_photoshop_curves() {
+        assert!(lookup_tables(&curves(&[(0.0, 0.0), (1.0, 1.0)], None, CurveLookup::default())).is_none());
+    }
+
+    #[test]
+    fn range_puts_points_on_superwhites_and_ends_continue_or_hold() {
+        // Range 4, a straight line through (0, 0), (2, 1), (4, 2): halves every value.
+        let pts = [(0.0, 0.0), (2.0, 1.0), (4.0, 2.0)];
+        let a = curves(&pts, None, CurveLookup { range: 4.0, ..Default::default() });
+        for v in [0.18, 1.0, 3.0] {
+            assert!((red_of(&a, v) - v / 2.0).abs() < 1e-3, "{v}: {}", red_of(&a, v));
+        }
+        // Past the range it continues along the end slope…
+        assert!((red_of(&a, 8.0) - 4.0).abs() < 1e-2, "{}", red_of(&a, 8.0));
+        // …or holds the last point's value.
+        let h = curves(&pts, None, CurveLookup { range: 4.0, hold_ends: true, ..Default::default() });
+        assert!((red_of(&h, 8.0) - 2.0).abs() < 1e-3, "{}", red_of(&h, 8.0));
+    }
+
+    #[test]
+    fn master_first_changes_the_order() {
+        // Range 2: master doubles; red follows the line up to 1 and holds there.
+        let master = [(0.0, 0.0), (2.0, 4.0)];
+        let red: &[(f32, f32)] = &[(0.0, 0.0), (1.0, 1.0)];
+        let after = curves(&master, Some(red), CurveLookup { range: 2.0, hold_ends: true, master_first: false });
+        let before = curves(&master, Some(red), CurveLookup { range: 2.0, hold_ends: true, master_first: true });
+        // Photoshop order: red (0.75) then master → 1.5. Nuke order: master (1.5) then red → 1.
+        assert!((red_of(&after, 0.75) - 1.5).abs() < 1e-3, "{}", red_of(&after, 0.75));
+        assert!((red_of(&before, 0.75) - 1.0).abs() < 1e-3, "{}", red_of(&before, 0.75));
     }
 }

@@ -406,6 +406,7 @@ fn scalar_adjustment(adjustment: &photocraft_doc::Adjustment, k: usize) -> photo
                 space: ToneSpace::Rgb,
                 black: Vec::new(),
                 pencil: *pencil,
+                lookup: Default::default(),
             }
         }
         other => other.clone(),

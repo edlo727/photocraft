@@ -45,6 +45,15 @@ pub struct Stats {
     pub layers_batched: usize,
     /// Batched passes drawn with Normal's code alone (`fs_layerbatch_normal`), summed over chunks.
     pub normal_batches: usize,
+    /// Distinct tiles whose texels were converted ahead of time ([`crate::preconvert`]): only
+    /// staged here, not converted.
+    pub tiles_ready: usize,
+    /// CPU time converting and staging layer tiles, in ms (0 on the web).
+    pub sync_ms: f64,
+    /// Changed tiles left on the GPU as they were ([`crate::Compositor::set_upload_region`]).
+    pub tiles_deferred: usize,
+    /// GPU memory the layer pages and Large Brush Mode's painted copies hold after the render.
+    pub layer_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +151,11 @@ pub(crate) struct Resident {
     /// to it goes through the encoder too: a queued write lands before the encoder runs, and
     /// would be overwritten by the copy, or leak into it.
     pub(crate) ordered: bool,
+    /// The page with live Large Brush Mode strokes laid in, composited in its place
+    /// (`Compositor::set_live_paint`).
+    pub(crate) painted: Option<crate::live::Painted>,
+    /// Where tiles were written since the painted copy was last brought up to date.
+    pub(crate) dirty: Rect,
 }
 
 impl Resident {

@@ -162,7 +162,7 @@ macro_rules! gallery_specs {
                 menu: &[],
                 shortcut: None,
                 params: GalleryFilter::$v.params_doc(),
-                enabled: crate::filters::has_filterable_layer,
+                enabled: crate::filters::has_filterable_layer_in_range,
                 run: |s, p| crate::filters::run_filter(s, GalleryFilter::$v.command_id(), p),
                 journal: true,
             }
@@ -178,7 +178,7 @@ pub fn specs() -> Vec<CommandSpec> {
         menu: &["Filter"],
         shortcut: None,
         params: r##"{"effects":json,"foreground":json,"background":json,"list":bool}"##,
-        enabled: crate::filters::has_filterable_layer,
+        enabled: crate::filters::has_filterable_layer_in_range,
         run: run_gallery,
         journal: true,
     }];

@@ -11,9 +11,37 @@
 
 #![allow(unsafe_code, clippy::upper_case_acronyms)]
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 static BARREL_DOWN: AtomicBool = AtomicBool::new(false);
+/// Counts barrel presses (up → down), so a quick click between two frames isn't missed.
+static BARREL_PRESSES: AtomicU32 = AtomicU32::new(0);
+/// Wakes the UI when the barrel button changes: a press with the pen held still sends no
+/// event winit passes on, so without this the canvas would not see it until the pen moves.
+static WAKER: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Call `wake` (from the UI thread's hook) whenever the barrel button goes down or up.
+pub fn set_waker(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = WAKER.set(Box::new(wake));
+}
+
+/// Barrel presses so far; a change since the last read means the button went down meanwhile.
+pub fn barrel_presses() -> u32 {
+    BARREL_PRESSES.load(Ordering::Relaxed)
+}
+
+fn set_barrel(down: bool) {
+    let was = BARREL_DOWN.swap(down, Ordering::Relaxed);
+    if down != was {
+        if down {
+            BARREL_PRESSES.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(wake) = WAKER.get() {
+            wake();
+        }
+    }
+}
 
 /// The pointer id of the pen last seen, or [`NO_PEN`]. Ids come from a 16-bit field, so
 /// `u32::MAX` is never one.
@@ -213,7 +241,9 @@ pub fn handle_pointer_message(message: u32, w_param: usize, pen_flags: impl FnOn
         contact: decode_end(CONTACT_END.load(Ordering::Relaxed)),
     };
     let next = next_state(prev, message, w_param, pen_flags);
-    BARREL_DOWN.store(next.barrel, Ordering::Relaxed);
+    // Through `set_barrel`, not a bare store: it counts the presses the Brush Preset picker
+    // reads ([`barrel_presses`]) and wakes the UI for one released between frames.
+    set_barrel(next.barrel);
     PEN_END.store(encode_end(next.end), Ordering::Relaxed);
     PEN_ID.store(next.pen_id.unwrap_or(NO_PEN), Ordering::Relaxed);
     CONTACT_END.store(encode_end(next.contact), Ordering::Relaxed);

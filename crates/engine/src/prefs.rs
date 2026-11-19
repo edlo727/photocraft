@@ -76,6 +76,14 @@ choice!(
     RenderingMode { Auto = "auto", Gpu = "gpu", Cpu = "cpu" } default Auto
 );
 choice!(
+    /// How much of the graphics card the canvas plans for (Preferences › Performance ›
+    /// Performance Mode). Efficient: about half the card, leaving room for other apps and smaller
+    /// cards (8–16 GB). Balanced: about three quarters, falling back to the CPU when layers don't
+    /// fit. Maximum: most of the card minus a safety reserve, layers that don't fit paged in and
+    /// out on the GPU (24 GB cards and up).
+    PerformanceMode { Efficient = "efficient", Balanced = "balanced", Maximum = "maximum" } default Balanced
+);
+choice!(
     /// Linux display server of the desktop app's window (applies at next launch). `x11` runs
     /// PhotoCraft through XWayland on a Wayland session, where native file drag and drop works
     /// (winit 0.30 has none on Wayland, issue #386); fractional scaling may then look softer.
@@ -119,6 +127,11 @@ choice!(
     /// (Hirakawa–Parks) keeps edges cleanest, Malvar–He–Cutler is sharp and fast, bilinear is the
     /// fastest and softest. Photoshop's Camera Raw has no such choice.
     RawDemosaic { Ahd = "ahd", Mhc = "mhc", Bilinear = "bilinear" } default Ahd
+);
+choice!(
+    /// MCP › When PhotoCraft Is Closed: what `photocraft-cli mcp` does when an
+    /// agent calls a tool and the app isn't running.
+    WhenAppClosed { Launch = "launch", Headless = "headless", Error = "error" } default Launch
 );
 
 impl Unit {
@@ -579,6 +592,11 @@ pub struct FileHandling {
     /// Most renderers write ACEScg EXRs without stating the colour space. With this on, an EXR
     /// that would otherwise open as linear sRGB opens as ACEScg (AP1, linear) instead.
     pub exr_aces_cg: bool,
+    /// VFX working space: every RGB or grayscale image opens converted to 32-bit linear ACEScg,
+    /// as a Nuke Read node set to its input colour space → ACEScg. The file's own profile (sRGB
+    /// when it has none) is decoded and its primaries and white point converted to AP1 / ACES
+    /// white by the CMS. Off: images open in their own space and depth.
+    pub open_images_as_aces_cg: bool,
     pub ask_before_saving_layered_tiff: bool,
     pub maximize_psd_compatibility: Ask,
     /// A `.pcraft` save also writes the flattened document at its canvas size as
@@ -592,6 +610,10 @@ pub struct FileHandling {
     /// A folder whose `.cube`, `.3dl` and `.look` files Color Lookup lists under its built-in
     /// looks (native only, #6558). Empty lists none.
     pub lut_folder: String,
+    /// The OpenColorIO config for the OCIO viewer and the OCIO Colorspace adjustment: a
+    /// `config.ocio` path or an `ocio://` URI. Empty: `$OCIO` when set (as Nuke), else OCIO's
+    /// built-in ACES 1.3 studio config.
+    pub ocio_config: String,
 }
 
 impl FileHandling {
@@ -617,6 +639,7 @@ impl Default for FileHandling {
             pdf_first_page: 0,
             pdf_last_page: 0,
             exr_aces_cg: false,
+            open_images_as_aces_cg: false,
             ask_before_saving_layered_tiff: true,
             maximize_psd_compatibility: Ask::Always,
             pcraft_full_composite: false,
@@ -624,6 +647,7 @@ impl Default for FileHandling {
             recent_file_count: 20,
             recent_files: Vec::new(),
             lut_folder: String::new(),
+            ocio_config: String::new(),
         }
     }
 }
@@ -723,7 +747,12 @@ pub struct Performance {
     /// Draw the canvas with the GPU (applies at next launch).
     pub use_gpu: bool,
     /// Explicit rendering policy. None preserves older useGpu/gpuBackend preferences.
+    /// `Gpu` (GPU, always) also keeps over-budget documents on the GPU: larger memory budgets and
+    /// no CPU redraw when the layers don't fit (see `forced_memory_budget` in ui-egui).
     pub rendering_mode: Option<RenderingMode>,
+    /// GPU memory profile (see [`PerformanceMode`]). None follows Rendering Mode: GPU (always)
+    /// is Maximum, anything else Balanced.
+    pub performance_mode: Option<PerformanceMode>,
     /// Graphics backend (applies at next launch; see [`GpuBackend`]).
     pub gpu_backend: GpuBackend,
     /// Which graphics adapter the window and canvas use on a machine with several (applies at
@@ -757,6 +786,12 @@ impl Performance {
     /// Resolve old preferences without allowing legacy flags to override an explicit mode.
     pub fn effective_rendering_mode(&self) -> RenderingMode {
         self.rendering_mode.unwrap_or_else(|| if !self.use_gpu || self.gpu_backend == GpuBackend::Cpu { RenderingMode::Cpu } else { RenderingMode::Auto })
+    }
+
+    /// The Performance Mode in effect: the stored one, else Maximum under Rendering Mode › GPU
+    /// (always), which planned for most of the card before the setting existed, else Balanced.
+    pub fn effective_performance_mode(&self) -> PerformanceMode {
+        self.performance_mode.unwrap_or(if self.effective_rendering_mode() == RenderingMode::Gpu { PerformanceMode::Maximum } else { PerformanceMode::Balanced })
     }
 
     /// [`Performance::memory_usage_mb`] as the build can honour it: capped on the web, where the
@@ -808,6 +843,7 @@ impl Default for Performance {
             cache_tile_size: 8192,
             use_gpu: true,
             rendering_mode: None,
+            performance_mode: None,
             gpu_backend: GpuBackend::Auto,
             gpu_adapter: String::new(),
             low_resolution_previews: true,
@@ -1169,18 +1205,62 @@ impl Default for RawDefaults {
     }
 }
 
+/// Before the agents switch, a Control Port other than 0 started the control server by itself.
+/// A saved `integrations` section like that keeps its connection: the port now means "on, at this
+/// port". Every reader of the saved section applies this (the app, its launch read, and
+/// `photocraft-cli mcp`), so they agree.
+pub fn migrate_integrations(section: &mut Value) {
+    if let Some(integrations) = section.as_object_mut()
+        && !integrations.contains_key("connectAgents")
+        && integrations.get("controlPort").and_then(Value::as_u64).is_some_and(|p| (1..=65535).contains(&p))
+    {
+        integrations.insert("connectAgents".into(), json!(true));
+    }
+}
+
+/// A saved `integrations` section read as the app's preference load reads it: migrated, and
+/// leniently (a value of the wrong type keeps its default, the rest still loads). The desktop
+/// app's launch read and `photocraft-cli mcp` use it, so a bad value can't reset, say, When
+/// PhotoCraft Is Closed for them alone.
+pub fn read_integrations_section(mut section: Value) -> Integrations {
+    migrate_integrations(&mut section);
+    read_section(section)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Integrations {
     /// Allow agents to drive the app over the loopback control channel / MCP bridge.
     pub allow_agent_control: bool,
-    /// Default control port (0 = only when `--control` is given).
+    /// Port agents connect to (0 = any free port, published in the connection file).
     pub control_port: u32,
+    /// The folder automation may read from when no `--automation-read-root` is given (empty =
+    /// none). Applied at once while agents are connected.
+    pub read_root: String,
+    /// The folder automation may write to when no `--automation-write-root` is given (empty =
+    /// none). Applied at once while agents are connected.
+    pub write_root: String,
+    /// Without the suite's `AI-MCP` flag, agents may connect: the desktop app serves the control
+    /// protocol on loopback for `photocraft-cli mcp` without `--control`, and starts or stops it at
+    /// once when this changes (off by default; launch flags still win). Set from a saved Control
+    /// Port ([`migrate_integrations`]); not in the dialog. With the flag the ArtCraft Launcher's
+    /// switch decides instead. After the older fields, so a
+    /// section saved as a list still reads them where they were.
+    pub connect_agents: bool,
+    /// What `photocraft-cli mcp` does while agents may use the app but it is closed.
+    pub when_app_closed: WhenAppClosed,
 }
 
 impl Default for Integrations {
     fn default() -> Self {
-        Self { allow_agent_control: true, control_port: 0 }
+        Self {
+            allow_agent_control: true,
+            control_port: 0,
+            read_root: String::new(),
+            write_root: String::new(),
+            connect_agents: false,
+            when_app_closed: WhenAppClosed::Launch,
+        }
     }
 }
 
@@ -1652,6 +1732,9 @@ impl Session {
             && language.as_str().is_some_and(|code| code.eq_ignore_ascii_case("sr"))
         {
             *language = json!("sr-latn");
+        }
+        if let Some(integrations) = v.get_mut("integrations") {
+            migrate_integrations(integrations);
         }
         let color = v.as_object_mut().and_then(|m| m.remove("colorSettings"));
         let presets = v.as_object_mut().and_then(|m| m.remove("presets"));

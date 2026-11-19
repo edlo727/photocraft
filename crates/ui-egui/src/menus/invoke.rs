@@ -106,6 +106,9 @@ fn frame_convert_dialog(app: &mut PhotocraftApp, id: &str) -> Result<Value, Stri
 fn invoke_early_commands(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if let Some(tool) = crate::tool_shortcuts::tool(id) {
         crate::tool_memory::select(app, tool);
+        // The tool's own brush now, not at the next frame, so a paint command right after uses
+        // it: a first Pencil pick its 1 px tip (#12200), any other tool its remembered brush.
+        crate::paint_mouse::sync_tool_brush(app);
         return Some(Ok(json!({"tool": tool})));
     }
     // Paste and Free Transform in View › Equirectangular Live Projection.
@@ -470,6 +473,15 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
             app.ui.panels.properties = true;
             app.ui.dock_tabs.properties = 0;
             Ok(r)
+        }
+        // Image › Mode › 16 / 8 Bits/Channel on a 32-bit document: what the conversion does and how
+        // values above 1.0 are handled. Explicit params run the engine directly.
+        _ if crate::depth_ui::fronts(app, id) && params.as_object().is_none_or(|o| o.is_empty()) => {
+            crate::depth_ui::open(app, id).map(|d| json!({"dialog": d})).ok_or_else(|| "no document open".to_string())
+        }
+        // Image › Input Colour Space…: a dialog listing the OCIO config's colour spaces.
+        crate::input_space_ui::COMMAND if params.as_object().is_none_or(|o| o.is_empty()) => {
+            crate::input_space_ui::open(app).map(|d| json!({"dialog": d}))
         }
         // Edit › Stroke…: open its full options dialog when called from menus/context
         // menus. Explicit params from Actions, CLI, MCP and control channel execute directly.

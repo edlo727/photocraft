@@ -40,6 +40,8 @@ pub fn navigator_gpu_view(app: &PhotocraftApp, idx: usize, rect: Rect, ctx: &egu
         shadow: false,
         pixel_grid: false,
         view_key: egui::Id::unique(("pc-navigator", ctx.viewport_id(), idx)).value(),
+        // The Navigator always shows the image in colour.
+        channel: 0,
         offset: [0.0, 0.0],
         projection: None,
         ..params

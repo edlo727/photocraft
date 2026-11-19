@@ -477,6 +477,59 @@ pub(crate) fn effect_reach(layers: &[photocraft_doc::Layer]) -> i32 {
         .unwrap_or(0)
 }
 
+/// What [`gpu_damage`] needs about the document and the view, beyond `app` itself.
+struct DamageCx {
+    idx: usize,
+    id: photocraft_doc::DocId,
+    /// The revision and display key the GPU cache last saw, if it has seen this document at all.
+    seen: Option<(u64, u64)>,
+    /// This frame's revision and raw display key.
+    now: (u64, u64),
+    display_key: u64,
+    last_damage: (u64, Option<DRect>),
+    /// The region a blend preview may have to refresh, and the viewport itself.
+    blend_visible: DRect,
+    visible: DRect,
+}
+
+/// The region the GPU canvas must redraw for this document: what changed since the cache last
+/// saw it, widened by the stroke bands and dialog previews that land outside it. Also returns the
+/// Large Brush Mode damage taken on the way, which the caller draws again further down.
+fn gpu_damage(app: &mut PhotocraftApp, cx: &DamageCx) -> (Option<DRect>, Option<DRect>) {
+    let (revision, raw_key) = cx.now;
+    let damage_start = crate::gpu_canvas::now_ms();
+    let mut damage = cx.seen.and_then(|seen| damage_since(app, cx.idx, seen, cx.now, cx.display_key, cx.last_damage));
+    if let Some(region) = damage {
+        damage = Some(crate::blend_preview::clip_damage(app, cx.id, revision, raw_key, region, cx.blend_visible));
+    }
+    app.perf.stage.damage_ms += crate::gpu_canvas::now_ms() - damage_start;
+    // A stroke landing in bands that another edit overtook: the rows it hadn't refreshed go with
+    // this refresh.
+    if let Some(rest) = super::strokes::flush_band(app, cx.id, revision) {
+        damage = damage.map(|d| d.union(&rest));
+    }
+    // Large Brush Mode strokes painted into their layers: where their new dabs land.
+    let live_damage = super::strokes::take_live_damage(app, cx.id);
+    if let Some(r) = live_damage {
+        damage = damage.map(|d| d.union(&r));
+    }
+    // To an adjustment dialog's preview: only what the view shows now (the rest as it moves there).
+    // Nothing to move if there is no damage: the previews only narrow what is already redrawn.
+    let from = cx.seen.filter(|s| s.0 == revision && damage.is_some()).map(|s| s.1 ^ cx.display_key);
+    if let Some(from) = from
+        && let Some(r) = crate::adjust_preview::switch_region(app, cx.id, revision, from, raw_key)
+    {
+        damage = Some(crate::adjust_preview::switch_damage(app, raw_key, r, cx.visible));
+    }
+    // The same for a Properties-panel drag's previews.
+    if let Some(from) = from
+        && let Some(r) = crate::adjust_preview::live_switch_region(app, cx.id, revision, from, raw_key)
+    {
+        damage = Some(crate::adjust_preview::live_switch_damage(app, raw_key, r, cx.visible));
+    }
+    (damage, live_damage)
+}
+
 /// GPU path: make sure document `idx` is current in the GPU canvas. Edits draw their damage;
 /// unchanged lower-stack composites can be reused by the compositor inside that region.
 /// Returns false if there is no GPU canvas.
@@ -497,24 +550,7 @@ pub(crate) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     // The texture is shared by every display: only what it stores counts, not the monitor.
     let display_key = texture_key(display.as_deref(), &doc);
     let seen = app.canvases.get(&(id, GPU_OUTPUT)).map(|c| (c.revision, c.preview_key));
-    let damage_start = crate::gpu_canvas::now_ms();
-    let mut damage = seen.and_then(|seen| damage_since(app, idx, seen, (revision, raw_key), display_key, last_damage));
-    if let Some(region) = damage {
-        damage = Some(crate::blend_preview::clip_damage(app, id, revision, raw_key, region, blend_visible));
-    }
-    app.perf.stage.damage_ms += crate::gpu_canvas::now_ms() - damage_start;
-    // To an adjustment dialog's preview: only what the view shows now (the rest as it moves there).
-    if damage.is_some()
-        && let Some(r) = seen.filter(|s| s.0 == revision).and_then(|s| crate::adjust_preview::switch_region(app, id, revision, s.1 ^ display_key, raw_key))
-    {
-        damage = Some(crate::adjust_preview::switch_damage(app, raw_key, r, visible));
-    }
-    // The same for a Properties-panel drag's previews.
-    if damage.is_some()
-        && let Some(r) = seen.filter(|s| s.0 == revision).and_then(|s| crate::adjust_preview::live_switch_region(app, id, revision, s.1 ^ display_key, raw_key))
-    {
-        damage = Some(crate::adjust_preview::live_switch_damage(app, raw_key, r, visible));
-    }
+    let (mut damage, live_damage) = gpu_damage(app, &DamageCx { idx, id, seen, now: (revision, raw_key), display_key, last_damage, blend_visible, visible });
     let preview_key = raw_key ^ display_key;
     // The Navigator may draw this texture while it holds the plain document or a drag preview
     // that updates the full texture (not an adjustment preview composited only where the view is).
@@ -551,10 +587,31 @@ pub(crate) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     // next full refresh. Once per switch: the fit then names this document.
     if present && app.perf.gpu_layer_fit.is_none_or(|f| f.doc != id.0) {
         gpu_budget(app, &gpu, idx, false, visible);
-        let fit = gpu.measure_fit(&doc).unwrap_or(crate::gpu_canvas::LayerFit { doc: id.0, needed: 0, budget: 0 });
+        let fit = gpu.measure_fit(&doc).unwrap_or(crate::gpu_canvas::LayerFit { doc: id.0, ..Default::default() });
         crate::render_path::layer_fit(app, fit);
     }
     if present && current {
+        // A Large Brush Mode stroke painted into its layer: recomposite where it drew.
+        if let Some(r) = live_damage {
+            let r = gpu.refresh_with(id.0, &doc, Some(r), display.as_deref(), false);
+            app.perf.record_refresh(&r);
+            if !r.kind.starts_with("gpu") {
+                // The compositor can't draw it: lay the strokes over the canvas instead.
+                gpu.stroke_to_overlay(id.0);
+            }
+        }
+        // A big Large Brush Mode stroke landing: its next band of rows.
+        if let Some(r) = super::strokes::step_band(app, ctx, &gpu, &doc, display.as_deref()) {
+            app.perf.record_refresh(&r);
+            if r.kind.starts_with("gpu") {
+                return true;
+            }
+            // The GPU couldn't: redraw the canvas as usual.
+            if let Some(cache) = app.canvases.get_mut(&(id, GPU_OUTPUT)) {
+                cache.revision = 0;
+            }
+            return false;
+        }
         // An adjustment preview composited where the view was: catch up where it moved to.
         if let Some(r) = crate::adjust_preview::uncovered(app, id, raw_key, visible) {
             let r = gpu.refresh(id.0, &doc, Some(r), display.as_deref());
@@ -568,11 +625,13 @@ pub(crate) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
         // Use the normal refresh path so CPU fallback and pending redraws stay synchronized.
         damage = crate::blend_preview::uncovered(app, id, revision, raw_key, blend_visible);
         if damage.is_none() {
+            super::strokes::committed_shown(app, id);
             return true;
         }
     }
     // Display textures for a canvas this large would not fit the GPU: the reduced CPU canvas
     // draws it (checked before the memory budget, which walks the history, every frame).
+    apply_force_gpu(app, &gpu);
     if !gpu.fits_canvas(&doc) {
         crate::background_redraw::cancel(app, id);
         // Drawn on the CPU canvas: no layer budget applies to it.
@@ -587,8 +646,25 @@ pub(crate) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     let budget_start = crate::gpu_canvas::now_ms();
     gpu_budget(app, &gpu, idx, partial, visible);
     app.perf.stage.damage_ms += crate::gpu_canvas::now_ms() - budget_start;
-    let defer = crate::background_redraw::enabled(app);
-    let r = gpu.refresh_with(id.0, &doc, if partial { damage } else { None }, display.as_deref(), defer);
+    // A Large Brush Mode stroke just committed is drawn now, not in background blocks: its
+    // overlay goes in this frame, so the stroke doesn't blink out while the blocks come in.
+    let committing = super::strokes::committing(app, id);
+    // Nor while strokes are painted into layers: the CPU's background blocks don't hold them.
+    let defer = crate::background_redraw::enabled(app) && !committing && !gpu.stroke_showing();
+    // A big one lands a band of rows per frame instead (`strokes::start_bands`).
+    let banded = match damage.filter(|_| committing && partial) {
+        Some(region) => super::strokes::start_bands(app, ctx, &gpu, &doc, revision, region, raw_key, display.as_deref()),
+        None => None,
+    };
+    let r = match banded {
+        Some(r) => r,
+        None => {
+            if committing {
+                super::strokes::end_landed_in_layer(app, &gpu, id);
+            }
+            gpu.refresh_with(id.0, &doc, if partial { damage } else { None }, display.as_deref(), defer)
+        }
+    };
     app.perf.gpu_layer_fit = gpu.layer_fit();
     if r.kind == "lost" || r.kind == crate::gpu_canvas::REFRESH_OVER_BUDGET {
         // The device is gone (`gpu_status` then drops the GPU canvas) or the canvas is over the
@@ -623,6 +699,9 @@ pub(crate) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     if r.kind.starts_with("gpu") {
         app.perf.gpu_uploads = r.uploads;
     }
+    if committing {
+        super::strokes::committed_shown(app, id);
+    }
     let Some(cache) = app.canvases.get_mut(&(id, GPU_OUTPUT)) else { return true };
     cache.revision = revision;
     cache.preview_key = preview_key;
@@ -631,12 +710,35 @@ pub(crate) fn ensure_gpu(app: &mut PhotocraftApp, ctx: &egui::Context, idx: usiz
     true
 }
 
+/// Recomposite, now, where Large Brush Mode strokes painted into their layers of the active
+/// document drew new dabs: the canvas texture then holds them before this frame is drawn, as
+/// the overlay did (waiting for the next frame's refresh put the stroke a frame behind the pen).
+pub(crate) fn refresh_live_now(app: &mut PhotocraftApp) {
+    let Some(gpu) = app.gpu.clone() else { return };
+    let Some(idx) = app.session.active_index() else { return };
+    let Some((id, revision)) = app.session.documents().get(idx).map(|st| (st.doc.id, st.revision)) else { return };
+    // Only over a canvas that is current: otherwise the frame's own refresh takes the damage.
+    let current = app.canvases.get(&(id, GPU_OUTPUT)).is_some_and(|c| c.on_gpu && c.revision == revision);
+    if !current {
+        return;
+    }
+    let Some(r) = super::strokes::take_live_damage(app, id) else { return };
+    let (doc, _) = display_doc(app, idx);
+    let (display, _) = canvas_display(app, &doc, None);
+    let refresh = gpu.refresh_with(id.0, &doc, Some(r), display.as_deref(), false);
+    app.perf.record_refresh(&refresh);
+    if !refresh.kind.starts_with("gpu") {
+        gpu.stroke_to_overlay(id.0);
+    }
+}
+
 /// Point the wgpu compositor at what the view shows, and size its memory budget from GPU Memory,
 /// or Memory Usage, the document's pixels and History (charged where the GPU shares the system's
 /// memory), physical memory and the GPU's own: on full refreshes (pixels counted once per
 /// structural change, not per brush dab) and whenever either preference changes.
 fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: usize, partial: bool, visible: DRect) {
     gpu.set_focus(Some(visible));
+    apply_force_gpu(app, gpu);
     let allowance = budget_allowance(app);
     let changed = app.perf.gpu_budget_allowance != allowance;
     if partial && !changed && gpu.memory_budget().is_some() {
@@ -644,7 +746,9 @@ fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: 
     }
     let Some(st) = app.session.documents().get(idx) else { return };
     let pixels = st.memory_bytes() as u64;
-    let budget = crate::gpu_canvas::memory_budget(allowance.0, pixels, crate::gpu_canvas::physical_memory(), gpu.video_memory(), allowance.1);
+    let ram = crate::gpu_canvas::physical_memory();
+    let mode = app.session.prefs().performance.effective_performance_mode();
+    let (budget, _) = crate::gpu_canvas::profile_budgets(mode, allowance.0, pixels, ram, gpu.video_memory(), allowance.1, app.gpu_oom_retries);
     gpu.set_memory_budget(budget);
     app.perf.gpu_budget_mb = budget >> 20;
     app.perf.gpu_budget_allowance = allowance;
@@ -653,10 +757,37 @@ fn gpu_budget(app: &mut PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas, idx: 
     }
 }
 
-/// Memory Usage and GPU Memory (Preferences › Performance), in bytes.
-fn budget_allowance(app: &PhotocraftApp) -> (u64, u64) {
+/// Rendering Mode › GPU or Performance Mode › Maximum (Preferences › Performance): stay on the
+/// GPU for large 32-bit documents and big brushes, paging layers in and out, instead of redrawing
+/// on the CPU when they are over the memory budget.
+pub(crate) fn force_gpu(app: &PhotocraftApp) -> bool {
+    use photocraft_engine::prefs::{PerformanceMode, RenderingMode};
+    let p = &app.session.prefs().performance;
+    match p.effective_rendering_mode() {
+        RenderingMode::Gpu => true,
+        RenderingMode::Cpu => false,
+        RenderingMode::Auto => p.effective_performance_mode() == PerformanceMode::Maximum,
+    }
+}
+
+/// Tell the GPU canvas whether [`force_gpu`] is on, and size its canvas texture budget from
+/// Performance Mode ([`crate::gpu_canvas::profile_budgets`]), smaller after out-of-memory errors.
+fn apply_force_gpu(app: &PhotocraftApp, gpu: &crate::gpu_canvas::GpuCanvas) -> bool {
+    let force = force_gpu(app);
+    gpu.set_force_gpu(force);
+    let mode = app.session.prefs().performance.effective_performance_mode();
+    let (_, canvas) = crate::gpu_canvas::profile_budgets(mode, 0, 0, crate::gpu_canvas::physical_memory(), gpu.video_memory(), 0, app.gpu_oom_retries);
+    gpu.set_canvas_budget(canvas);
+    gpu.set_composite_cache_cap(crate::gpu_canvas::composite_cache_cap(mode));
+    force
+}
+
+/// Memory Usage and GPU Memory (Preferences › Performance), in bytes, and a key for Performance
+/// Mode and the out-of-memory errors so far: a change to any of them resizes the budget.
+fn budget_allowance(app: &PhotocraftApp) -> (u64, u64, u32) {
     let performance = &app.session.prefs().performance;
-    (u64::from(performance.effective_memory_usage_mb()).saturating_mul(1 << 20), u64::from(performance.gpu_memory_mb).saturating_mul(1 << 20))
+    let profile = performance.effective_performance_mode() as u32 * 16 + app.gpu_oom_retries.min(15);
+    (u64::from(performance.effective_memory_usage_mb()).saturating_mul(1 << 20), u64::from(performance.gpu_memory_mb).saturating_mul(1 << 20), profile)
 }
 
 /// The document pixels a view shows, with a margin for filtering. Uses all four canvas corners

@@ -203,6 +203,12 @@ fn worst(a: &Surface, b: &Surface, r: Rect) -> f32 {
     a.read_region(r).iter().zip(b.read_region(r)).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
 }
 
+/// [`worst`] with `b` clipped to 0..1 first: a float surface keeps the resampling kernel's
+/// overshoot where an integer one clips it, so the depths only line up once both are clipped.
+fn worst_clipped(a: &Surface, b: &Surface, r: Rect) -> f32 {
+    a.read_region(r).iter().zip(b.read_region(r)).map(|(x, y)| (x - y.clamp(0.0, 1.0)).abs()).fold(0.0, f32::max)
+}
+
 fn lasso(points: &[[f64; 2]], amount: Option<f64>) -> LiquifyStroke {
     let mut s = LiquifyStroke::new(LiquifyTool::LassoMask, 1.0);
     s.points = points.iter().map(|p| p.to_vec()).collect();
@@ -398,18 +404,18 @@ fn full_resolution_preview_matches_the_unit_scale_proxy_and_partial_updates() {
         let proxy = ProxyImage::new(&source, canvas, 96);
         assert_eq!(proxy.scale, 1.0);
         let mut want = vec![[0; 4]; proxy.w * proxy.h];
-        proxy.render(&field, [0, 0, proxy.w, proxy.h], &mut want);
+        proxy.render(&field, [0, 0, proxy.w, proxy.h], &mut want, NO_ENCODE);
 
         let mut got = vec![[0; 4]; proxy.w * proxy.h];
         let mut scratch = Vec::new();
-        assert!(ProxyImage::render_full_resolution(&source, &field, canvas, canvas, &mut got, &mut scratch));
+        assert!(ProxyImage::render_full_resolution(&source, &field, canvas, canvas, &mut got, &mut scratch, NO_ENCODE));
         assert_eq!(got, want, "full-resolution render at {sample_type:?}");
 
         let mut more = LiquifyStroke::new(LiquifyTool::Bloat, 16.0);
         more.points = vec![vec![43.0, 32.0, 1.0]];
         let dirty = field.apply_stroke(&more);
-        proxy.render(&field, proxy.proxy_rect(dirty), &mut want);
-        assert!(ProxyImage::render_full_resolution(&source, &field, canvas, dirty, &mut got, &mut scratch));
+        proxy.render(&field, proxy.proxy_rect(dirty), &mut want, NO_ENCODE);
+        assert!(ProxyImage::render_full_resolution(&source, &field, canvas, dirty, &mut got, &mut scratch, NO_ENCODE));
         assert_eq!(got, want, "partial update at {sample_type:?}");
     }
 }
@@ -550,7 +556,14 @@ fn replay_is_deterministic_and_depths_agree() {
     assert_eq!(a, b);
     let r8 = apply_liquify(&sample(SampleType::U8), &a);
     let r32 = apply_liquify(&sample(SampleType::F32), &a);
-    assert!(worst(&r8, &r32, bounds()) < 2.0 / 255.0 + 1e-4);
+    // `cubic_taps` is a Catmull-Rom kernel, whose negative lobes ring at a hard edge; the sample
+    // is a 0/1 checkerboard, so they ring past it. A float surface keeps that overshoot, as
+    // Nuke's filters do and as a scene-linear warp should, leaving any clamp to the artist; an
+    // integer surface has nowhere to put it. Clipped alike, the two depths agree.
+    assert!(worst_clipped(&r8, &r32, bounds()) < 2.0 / 255.0 + 1e-4);
+    let px = r32.read_region(bounds());
+    let (lo, hi) = px.iter().fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+    assert!(lo < -1e-4 || hi > 1.0 + 1e-4, "the float warp keeps the overshoot: {lo}..{hi}");
 }
 
 #[test]
@@ -562,7 +575,7 @@ fn proxy_matches_the_full_render_roughly() {
     let p = ProxyImage::new(&src, bounds(), 96);
     assert_eq!((p.w, p.h, p.scale), (96, 64, 1.0));
     let mut out = vec![[0u8; 4]; p.w * p.h];
-    p.render(&f, [0, 0, p.w, p.h], &mut out);
+    p.render(&f, [0, 0, p.w, p.h], &mut out, NO_ENCODE);
     let full = apply_liquify(&src, &f);
     let mut bad = 0;
     for y in 0..64 {

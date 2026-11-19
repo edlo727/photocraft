@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use crate::PhotocraftApp;
 use crate::state::DialogKind;
 
-mod bar;
+pub(crate) mod bar;
 pub mod enable_rules;
 mod invoke;
 mod items;
@@ -64,6 +64,9 @@ pub(crate) const DOCUMENT_ITEM: &str = "window.document.";
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod open_recent_position_tests;
 
 #[cfg(test)]
 mod open_recent_tests {

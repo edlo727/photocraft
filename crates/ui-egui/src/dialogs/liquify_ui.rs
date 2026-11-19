@@ -39,6 +39,7 @@ fn render_components(
     bounds: Rect,
     dirty: Rect,
     out: &mut [[u8; 4]],
+    display: &crate::distort_ui::PreviewDisplay,
 ) -> bool {
     let Ok(Some(colors)) = photocraft_engine::color_channels::explicit(&json!({"target":target}), source.format().mode.color_channels()) else { return false };
     let width = bounds.width() as usize;
@@ -77,7 +78,7 @@ fn render_components(
                     source.sample_channel(x, y, channel)
                 };
             }
-            let rgba = photocraft_raster::to_rgba(&fmt, &native);
+            let rgba = display.apply(photocraft_raster::to_rgba(&fmt, &native));
             let a = rgba[3].clamp(0.0, 1.0);
             let encoded = [rgba[0] * a, rgba[1] * a, rgba[2] * a, a].map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
             let index = (y - bounds.y0) as usize * width + (x - bounds.x0) as usize;
@@ -237,6 +238,8 @@ pub struct LiquifyDialog {
     /// The lasso polygon being drawn (document px) and whether it thaws (Alt held at pointer-down).
     lasso: Option<(bool, Vec<[f64; 2]>)>,
     proxy: ProxyImage,
+    /// How the document's pixels reach the screen (the canvas's own transform).
+    display: crate::distort_ui::PreviewDisplay,
     source: Surface,
     target: Value,
     native_proxy: Option<Surface>,
@@ -501,12 +504,14 @@ impl LiquifyDialog {
     /// Renders proxy pixels `r` through the field, then through the selection.
     fn render_proxy(&mut self, r: [usize; 4]) {
         let field = self.identity.as_ref().filter(|_| !self.preview).unwrap_or(&self.field);
+        // The proxy holds the document's own values; the display runs as they quantise.
+        let display = self.display.clone();
         if let Some(source) = &self.native_proxy {
             let bounds = Rect::new(0, 0, self.proxy.w as i32, self.proxy.h as i32);
             let dirty = Rect::new(r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32);
-            render_components(source, bounds, field, self.proxy.scale, &self.target, bounds, dirty, &mut self.out);
+            render_components(source, bounds, field, self.proxy.scale, &self.target, bounds, dirty, &mut self.out, &display);
         } else {
-            self.proxy.render(field, r, &mut self.out);
+            self.proxy.render(field, r, &mut self.out, &move |p| display.apply(p));
         }
         let Some(sel) = &self.selection else { return };
         let w = self.proxy.w;
@@ -610,9 +615,14 @@ impl LiquifyDialog {
         let started = crate::gpu_canvas::now_ms();
         let field = self.identity.as_ref().filter(|_| !self.preview).unwrap_or(&self.field);
         let rendered = if self.native_proxy.is_some() {
-            render_components(&self.source, self.canvas, field, 1.0, &self.target, bounds, dirty, &mut self.view_out)
+            render_components(&self.source, self.canvas, field, 1.0, &self.target, bounds, dirty, &mut self.view_out, &self.display)
         } else {
-            ProxyImage::render_full_resolution(&self.source, field, bounds, dirty, &mut self.view_out, &mut self.view_source_scratch)
+            {
+            let display = self.display.clone();
+            ProxyImage::render_full_resolution(&self.source, field, bounds, dirty, &mut self.view_out, &mut self.view_source_scratch, &move |p| {
+                display.apply(p)
+            })
+        }
         };
         if !rendered {
             self.view_bounds = None;
@@ -735,6 +745,9 @@ fn open_on(
     let st = app.session.active().ok_or("no document")?;
     let canvas = st.doc.bounds();
     let name = st.doc.layer(layer).map(|l| l.name.clone()).unwrap_or_default();
+    let display = crate::distort_ui::PreviewDisplay::for_doc(app, &st.doc);
+    // The proxy keeps the document's own values; both renderers put them on screen through
+    // `display` as they quantise, so the warp interpolates scene light and the display runs once.
     let proxy = ProxyImage::new(&surf, canvas, PROXY_SIDE);
     let target = if smart_filter.is_some() { json!("pixels") } else { crate::distort_ui::colour_set_target(app) };
     let colors = photocraft_engine::color_channels::explicit(&json!({"target":target}), surf.format().mode.color_channels()).map_err(|e| e.to_string())?;
@@ -768,6 +781,7 @@ fn open_on(
         cur: None,
         lasso: None,
         proxy,
+        display,
         source: surf,
         target,
         native_proxy,
@@ -1105,7 +1119,7 @@ fn load_backdrop(app: &PhotocraftApp, ctx: &egui::Context, of: Option<u64>, canv
     let mut s = photocraft_raster::Surface::new(photocraft_color::PixelFormat::RGBA8);
     let flat: Vec<f32> = buf.px.iter().flat_map(|p| *p).collect();
     s.write_region(canvas, &flat);
-    Some(ctx.load_texture("liquify-backdrop", crate::distort_ui::surface_image(&s, canvas, PROXY_SIDE), egui::TextureOptions::LINEAR))
+    Some(ctx.load_texture("liquify-backdrop", crate::distort_ui::surface_image(&s, canvas, PROXY_SIDE, &crate::distort_ui::PreviewDisplay::for_doc(app, &st.doc)), egui::TextureOptions::LINEAR))
 }
 
 /// The document [`load_backdrop`] renders for Use `of`.

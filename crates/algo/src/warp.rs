@@ -421,6 +421,9 @@ fn triangles(
         converted = src.convert(fmt);
         &converted
     };
+    // Float surfaces hold scene-linear values: a warp moves pixels, it must not clip highlights
+    // above 1.0 or the small negatives of a wide gamut.
+    let hdr = fmt.sample == photocraft_color::SampleType::F32;
     let mut out = Surface::new(fmt);
     if src_rect.is_empty() || tris.is_empty() {
         return out;
@@ -833,7 +836,8 @@ fn triangles(
             let b = o * n;
             for c in 0..a {
                 // The unclamped alpha, so a bicubic overshoot past 1 doesn't lighten the colour (#6203).
-                outp[b + c] = (acc[c] / acc[a]).clamp(0.0, 1.0) as f32;
+                let v = acc[c] / acc[a];
+                outp[b + c] = if hdr { v } else { v.clamp(0.0, 1.0) } as f32;
             }
             outp[b + a] = al as f32;
         }

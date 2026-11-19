@@ -132,7 +132,13 @@ impl Compositor {
     ) -> Result<Stats, Unsupported> {
         let canvas = doc.bounds();
         let region = region.intersect(&canvas);
-        let plan = plan(doc)?;
+        // Layers live strokes paint into cover where they paint (`set_live_paint`).
+        let live = self.live_rects(doc.id);
+        let plan = if live.is_empty() { plan(doc)? } else { crate::plan::plan_live(doc, &live)? };
+        self.render_region = region;
+        self.live_limit = (!live.is_empty())
+            .then(|| plan.passes.iter().position(|p| p.tex.as_ref().is_some_and(|t| live.iter().any(|(id, _)| *id == t.layer))))
+            .flatten();
         self.check_fx(doc, &plan)?;
         self.pattern_mode = doc.pixel_format().mode;
         self.pattern_doc = doc.id;
@@ -168,7 +174,9 @@ impl Compositor {
         let runs = batch_runs(&plan);
         let checkpoint = if flush {
             let starts = run_starts(&runs);
-            let resumable: Vec<_> = plan.checkpoints.iter().filter(|c| starts.get(c.pass_end).copied().unwrap_or(false)).copied().collect();
+            let limit = self.live_limit.unwrap_or(usize::MAX);
+            let resumable: Vec<_> =
+                plan.checkpoints.iter().filter(|c| starts.get(c.pass_end).copied().unwrap_or(false) && c.pass_end <= limit).copied().collect();
             self.prefix.prepare(doc, &resumable)
         } else {
             None
@@ -183,7 +191,7 @@ impl Compositor {
                 self.sync_fx(device, queue, encoder, doc, f, (f.layer.id, None), f.region, &mut stats)?;
             }
         }
-        let fr = self.frame_res(device, queue, canvas, &plan)?;
+        let fr = self.frame_res(device, queue, canvas, &plan, &live)?;
 
         // Page cells; every other frame in reverse, so a repeated full refresh of a document
         // larger than the budget starts with the pages still resident.
@@ -408,13 +416,22 @@ impl Compositor {
     }
 
     /// Per-frame resources of `plan`: the tile area of each pass's surfaces, its LUT and pattern.
-    fn frame_res(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, canvas: Rect, plan: &Plan<'_>) -> Result<FrameRes, Unsupported> {
+    fn frame_res(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, canvas: Rect, plan: &Plan<'_>, live: &[(LayerId, Rect)]) -> Result<FrameRes, Unsupported> {
         let grid = tile_grid(canvas);
         let area = |s: &Surface| s.tile_bounds().intersect(&grid);
+        // A live stroke's layer also covers the tiles it paints on (an empty layer has none).
+        let painted = |t: &crate::plan::TexUse<'_>| {
+            live.iter().filter(|(id, _)| *id == t.layer && t.role == crate::Role::Content).fold(Rect::EMPTY, |a, (_, r)| a.union(&tile_grid(*r)))
+        };
         let areas = plan
             .passes
             .iter()
-            .map(|p| (p.tex.as_ref().map_or(Rect::EMPTY, |t| area(t.surface.get())), p.mask.as_ref().map_or(Rect::EMPTY, |m| area(m.surface.get()))))
+            .map(|p| {
+                (
+                    p.tex.as_ref().map_or(Rect::EMPTY, |t| area(t.surface.get()).union(&painted(t).intersect(&grid))),
+                    p.mask.as_ref().map_or(Rect::EMPTY, |m| area(m.surface.get())),
+                )
+            })
             .collect();
         let luts = plan.passes.iter().map(|p| p.lut.as_ref().map(|rows| lut_texture(device, queue, rows))).collect();
         let patterns = plan.passes.iter().map(|p| p.pattern.map(|pat| self.pattern_view(device, queue, pat)).transpose()).collect::<Result<_, _>>()?;

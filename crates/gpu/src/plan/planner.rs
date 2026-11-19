@@ -14,6 +14,10 @@ pub(super) struct Planner<'a> {
     /// Layers planned so far, counting a layer each time it is planned (a clipped pass-through
     /// group is planned twice).
     visits: usize,
+    /// Layers a Large Brush Mode stroke paints into on the GPU, with where it paints: their
+    /// passes cover that too, though the layer's own pixels don't reach there yet
+    /// ([`crate::Compositor::set_live_paint`]).
+    pub(super) live: Vec<(LayerId, Rect)>,
     /// Gradient lookup tables built so far (64 KiB of host memory each, kept in the plan).
     luts: std::cell::Cell<usize>,
 }
@@ -200,6 +204,7 @@ impl<'a> Planner<'a> {
             fx: Vec::new(),
             checkpoints: Vec::new(),
             visits: 0,
+            live: Vec::new(),
             luts: std::cell::Cell::new(0),
         }
     }
@@ -592,6 +597,10 @@ impl<'a> Planner<'a> {
     fn local_clip(&self, layer: &Layer) -> Option<Rect> {
         let canvas = self.cx.canvas;
         let b = bounds::composite_bounds(layer, canvas)?;
+        let b = match self.live.iter().find(|(id, _)| *id == layer.id) {
+            Some((_, r)) => b.union(&r.intersect(&canvas)),
+            None => b,
+        };
         (b.width() as u64 * b.height() as u64 * 2 <= canvas.width() as u64 * canvas.height() as u64).then_some(b)
     }
 
@@ -701,7 +710,9 @@ impl<'a> Planner<'a> {
     fn surface_tex(&self, p: &mut Pass<'a>, id: LayerId, s: &'a Surface) {
         let dp = s.default_pixel();
         p.color = photocraft_raster::to_rgba(&s.format(), &dp);
-        if s.tile_count() > 0 {
+        // A layer a live stroke paints into reads its texture even with no pixels yet: the
+        // stroke is laid into that texture's painted copy.
+        if s.tile_count() > 0 || self.live.iter().any(|(l, _)| *l == id) {
             p.tex = Some(TexUse { layer: id, role: Role::Content, surface: SurfaceRef::Doc(s) });
         }
     }
@@ -788,7 +799,8 @@ impl<'a> Planner<'a> {
     /// adjust::apply_with on a slot (consumes it).
     fn adjust(&mut self, adj: &Adjustment, src: Slot) -> Result<Slot, Unsupported> {
         if !adjustment_on_gpu(adj, self.cx.mode) {
-            return Err(Unsupported(format!("{} on CMYK/Lab channels (evaluated on the CPU)", adj.label())));
+            let why = if matches!(adj, Adjustment::OcioColorSpace { .. }) { "OpenColorIO" } else { "on CMYK/Lab channels" };
+            return Err(Unsupported(format!("{} {why} (evaluated on the CPU)", adj.label())));
         }
         if let Adjustment::GradientMap { stops, .. } = adj {
             check_gradient_stops(stops)?;

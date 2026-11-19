@@ -147,10 +147,80 @@ pub(crate) fn tag_exr_colorspace(s: &Session, name: &str, doc: &mut Document) {
     if !name.to_ascii_lowercase().ends_with(".exr") || !s.prefs.get().file_handling.exr_aces_cg {
         return;
     }
-    let linear = photocraft_cms::Builtin::LinearSrgb.profile().to_bytes();
+    let linear = craft_cms::Builtin::LinearSrgb.profile().to_bytes();
     if doc.icc_profile.as_ref().map(|v| v.as_slice()) == Some(linear.as_slice()) {
-        doc.icc_profile = Some(photocraft_cms::Builtin::AcesCg.profile().to_bytes());
+        doc.icc_profile = Some(craft_cms::Builtin::AcesCg.profile().to_bytes());
     }
+}
+
+/// Colour handling for a freshly decoded file, before the open policy sees it: File Handling's
+/// EXR tagging ([`tag_exr_colorspace`]), then "Convert opened images to ACEScg"
+/// ([`convert_opened_to_aces_cg`]). Every open path (Open, Open As, background opens, Open EXR
+/// Parts) calls this.
+pub(crate) fn prepare_opened(s: &Session, name: &str, doc: &mut Document) {
+    tag_exr_colorspace(s, name, doc);
+    convert_opened_to_aces_cg(s, doc);
+}
+
+/// File Handling › "Convert opened images to ACEScg (32-bit linear)": like a Nuke Read node
+/// with its input colour space set to the file's (sRGB for a JPEG/PNG without a profile) and
+/// ACEScg as the working space. The samples are widened to 32-bit float unchanged, then the
+/// CMS converts them from the document's profile to ACEScg in one step: the tone curve is
+/// decoded to linear light, sRGB/Rec.709 primaries become AP1 and the D65 white is adapted to
+/// the ACES white (Bradford, relative colorimetric, no black point compensation, as OCIO's ACES
+/// configs do). 32-bit linear RGB files (EXR/HDR) are converted with the exact linear matrix
+/// between the two profiles ([`linear_to_aces_cg`]) instead of the CMS, whose float transforms
+/// clamp to 0..1: highlights above 1 survive, as in Nuke. Grayscale opens as RGB; CMYK, Lab,
+/// Indexed, Bitmap and Duotone documents are left as they are. A conversion error leaves the
+/// document unconverted.
+pub(crate) fn convert_opened_to_aces_cg(s: &Session, doc: &mut Document) {
+    use photocraft_color::{ColorMode, SampleType};
+    if !s.prefs.get().file_handling.open_images_as_aces_cg || !matches!(doc.mode, ColorMode::Rgb | ColorMode::Grayscale) {
+        return;
+    }
+    let aces = craft_cms::Builtin::AcesCg.profile();
+    let already = doc.depth == SampleType::F32
+        && doc.mode == ColorMode::Rgb
+        && doc.icc_profile.as_ref().and_then(|b| crate::color_cmds::profile_from_bytes(b).ok()).is_some_and(|p| p.same_colors(aces));
+    if already {
+        return;
+    }
+    if linear_to_aces_cg(doc) {
+        return;
+    }
+    let mut converted = doc.clone();
+    if converted.depth != SampleType::F32 {
+        crate::image_cmds::change_depth_keep_values(&mut converted, SampleType::F32);
+    }
+    if crate::color_cmds::convert_document(&mut converted, aces, craft_cms::Intent::RelativeColorimetric, false).is_ok() {
+        *doc = converted;
+    }
+}
+
+/// A 32-bit RGB document in a linear matrix/TRC profile (an EXR's linear sRGB, linear Rec.2020,
+/// …) moved to ACEScg without the CMS: `rgb_aces = M_aces⁻¹ · M_src · rgb`, both colourant
+/// matrices adapted to the D50 PCS, which is the relative colorimetric matrix/shaper transform
+/// minus its 0..1 clamp. Pixel layers only (an opened EXR has nothing else); masks and alpha are
+/// untouched. Returns false (nothing changed) for any other document.
+fn linear_to_aces_cg(doc: &mut Document) -> bool {
+    use craft_cms::math::{apply, invert, mul};
+    use photocraft_color::{ColorMode, SampleType};
+    if doc.depth != SampleType::F32 || doc.mode != ColorMode::Rgb {
+        return false;
+    }
+    let src = crate::color_cmds::document_profile(doc);
+    let aces = craft_cms::Builtin::AcesCg.profile();
+    let linear = src.is_matrix_shaper() && src.trc.as_ref().is_some_and(|t| t.iter().all(|c| c.is_identity()));
+    let (true, Some(ms), Some(ma)) = (linear, src.matrix, aces.matrix) else { return false };
+    let Some(ma_inv) = invert(&ma) else { return false };
+    let m = mul(&ma_inv, &ms);
+    crate::image_cmds::for_each_surface(&mut doc.layers, false, &mut |surf, is_mask| {
+        if !is_mask {
+            surf.map_rgb(|c| apply(&m, c.map(f64::from)).map(|v| v as f32));
+        }
+    });
+    doc.icc_profile = Some(aces.to_bytes());
+    true
 }
 
 /// Edit › Preferences › Raw Defaults › Resolution: the ppi a raw developed on open gets, as
@@ -196,18 +266,21 @@ pub fn open_bytes_as_with_options(
     let mut opts = crate::jobs::import_options(s.prefs());
     opts.psd_high_memory_approved = approve_high_memory;
     opts.psd_approved_estimate = None;
-    let raw = super::raw_open::prepare(s, &decode_name, path.as_deref(), bytes)?;
+    let raw = super::raw_open::prepare(s, &decode_name, &file_name(name), path.as_deref(), bytes)?;
     let (r, raw_settings) = if let Some((imported, settings)) = raw {
         (imported, Some(settings))
     } else {
-        let r = photocraft_io::import_with_options(&decode_name, bytes, &opts).map_err(|e| crate::error::io_open_error(&decode_name, e))?;
+        let r = photocraft_io::import_with_options_as(&decode_name, bytes, as_ext, &opts).map_err(|e| match as_ext {
+            Some(ext) => crate::error::io_open_as_error(&file_name(name), ext, e),
+            None => crate::error::io_open_error(&decode_name, e),
+        })?;
         (r, None)
     };
     if (s.batch_open.is_some() || s.batch_open_notices.is_some()) && r.preview_only {
         return Err(EngineError::Other(format!("{name}: only an embedded preview could be read; Batch cannot process it as the source")));
     }
     let mut doc = r.document;
-    tag_exr_colorspace(s, &decode_name, &mut doc);
+    prepare_opened(s, &decode_name, &mut doc);
     raw_defaults(s, &r.warnings, &mut doc);
     let path = match template_name(s, name) {
         Some(untitled) => {
@@ -235,6 +308,22 @@ pub fn open_bytes_as_with_options(
     Ok(json!({"document": i, "color": color, "warnings": r.warnings}))
 }
 
+/// Extensions Open As reads besides the codec formats, the camera raw formats
+/// (`photocraft_io::raw::EXTENSIONS`) and the Affinity ones (`photocraft_io::affinity::EXTENSIONS`):
+/// the document and vector formats `photocraft_io::import` handles, and `raw`, the Open As type
+/// for any camera raw.
+const OPEN_AS_EXTRA: &[&str] = &["raw", "pdn", "ora", "xcf", "xcf.gz", "xcfgz", "kra", "krz", "psd", "psb", "psdt", "pcraft", "svg", "svgz", "pdf", "ai"];
+
+/// Whether `ext` (the `as` value of Open As) names a format PhotoCraft reads.
+fn is_open_as_format(ext: &str) -> bool {
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    let ext = ext.as_str();
+    OPEN_AS_EXTRA.contains(&ext)
+        || photocraft_io::raw::EXTENSIONS.contains(&ext)
+        || photocraft_io::affinity::EXTENSIONS.contains(&ext)
+        || photocraft_codecs::from_extension(ext).is_some_and(|f| f.caps().read)
+}
+
 /// Open the selected file with its decoder options and record its Batch source identity.
 pub(super) fn open_as(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_param(p, "path", "file.openAs")?.to_string();
@@ -246,6 +335,11 @@ pub(super) fn open_as(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(EngineError::BadParams { cmd: "file.openAs".into(), msg: "expected boolean for \"approveHighMemory\"".into() });
         }
     };
+    if let Some(ext) = as_ext
+        && !is_open_as_format(ext)
+    {
+        return Err(EngineError::BadParams { cmd: "file.openAs".into(), msg: format!("\"as\" names no format PhotoCraft reads: {ext:?}") });
+    }
     let bytes = read_file(&path)?;
     let result = open_bytes_as_with_options(s, &path, &bytes, as_ext, Some(path.clone()), approve_high_memory)?;
     remember_batch_open(s);

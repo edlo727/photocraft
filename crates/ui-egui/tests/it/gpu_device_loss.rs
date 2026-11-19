@@ -412,8 +412,7 @@ fn tiled_canvas_keeps_tiles_in_place() {
                 display: 0,
                 output: 0,
                 hdr: None,
-                offset: [0.0; 2],
-            },
+                offset: [0.0; 2], channel: 0 },
         }
     });
     let (_, size, pixels) = h.state().canvas.read_texels(1).expect("uploaded pixels");

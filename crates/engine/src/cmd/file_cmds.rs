@@ -45,12 +45,12 @@ pub(crate) use batch_run::{batch_action, batch_inputs, batch_keeps_step, batch_s
 pub use export::{LayerExportReport, SkippedExportLayer, bake_cube, export_layers_report_with, export_layers_with};
 use export::{color_lookup_tables, layers_to_files, push_unique};
 use info::file_info;
-pub use info::{CAMERA_FIELDS, camera_data, read_file_info, write_file_info};
+pub use info::{CAMERA_FIELDS, camera_data, copyright_marked, read_file_info, write_file_info};
 #[cfg(test)]
 use info::{exposure_text, find_element};
 pub(crate) use open::{BatchOpen, batch_open_notice, batch_open_params, remember_batch_open};
 pub use open::{PLACE_EMBEDDED, open_bytes_as, open_bytes_as_with_options, place_bytes, raw_defaults};
-pub(crate) use open::{PlaceInput, apply_place, import, import_with_options, tag_exr_colorspace};
+pub(crate) use open::{PlaceInput, apply_place, import, import_with_options, prepare_opened, tag_exr_colorspace};
 use open::{approve_memory, close_all, close_others, open_as, place, revert};
 pub use open_as_smart_object::admit_as_smart_object;
 use open_as_smart_object::open_as_smart_object;
@@ -377,7 +377,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Image Processor…",
             &["File", "Scripts"],
             None,
-            r##"{"source":"folder|current|open"="folder" (current processes a copy of the active document; open processes copies of all open documents, including unsaved edits; originals and history stay unchanged),"input":folder|[paths]? (required for folder source),"includeSubfolders":bool=false (a folder input also takes the images in its subfolders, up to 32 levels and 100000 files; each result keeps its subfolder under output),"output":folder,"format":"jpg|png|psd|tiff|…"="jpg","quality":0..12=8,"jpegFormat":"baseline|optimized|progressive"?,"tiffLayers":bool=false,"tiffCompression":"none|lzw|zip"?,"tiffTransparency":bool?,"tiffPyramid":bool=false,"tgaBits":24|32?,"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"ddsCompression":"none|bc1|bc2|bc3"="none" (DDS: uncompressed, or block compression; BC1 keeps alpha on or off),"ddsMipmaps":bool=false (DDS: also write the full mip chain),"maximizeCompatibility":bool? (PSD/PSB: write the real merged image; unset, Preferences > File Handling > Maximize PSD and PSB File Compatibility),"pdfSpotPlates":bool=true (PDF: spot channels as overprinting Separation plates after the image; a Multichannel document as plates alone, so false refuses it),"width":px?,"height":px? (fit, never enlarge),"convertToSrgb":bool=false} → {files, errors} (an input whose output name was already written in the run goes to errors)"##,
+            r##"{"source":"folder|current|open"="folder" (current processes a copy of the active document; open processes copies of all open documents, including unsaved edits; originals and history stay unchanged),"input":folder|[paths]? (required for folder source),"includeSubfolders":bool=false (a folder input also takes the images in its subfolders, up to 32 levels and 100000 files; each result keeps its subfolder under output),"output":folder,"format":"jpg|png|psd|tiff|…"="jpg","quality":0..12=8,"jpegFormat":"baseline|optimized|progressive"?,"tiffLayers":bool=false,"tiffCompression":"none|lzw|zip"?,"tiffTransparency":bool?,"tiffPyramid":bool=false,"tgaBits":24|32?,"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"ddsCompression":"none|bc1|bc2|bc3"="none" (DDS: uncompressed, or block compression; BC1 keeps alpha on or off),"ddsMipmaps":bool=false (DDS: also write the full mip chain),"maximizeCompatibility":bool? (PSD/PSB: write the real merged image; unset, Preferences > File Handling > Maximize PSD and PSB File Compatibility),"pdfSpotPlates":bool=true (PDF: spot channels as overprinting Separation plates after the image; a Multichannel document as plates alone, so false refuses it),"width":px?,"height":px? (fit, never enlarge),"convertToSrgb":bool=false,"jpeg":{enabled?:bool=true,quality?:1..12=5,convertToSrgb?:bool=false,resize?:bool=false,width?:1..30000=1,height?:1..30000=1}|false?,"psd":{enabled?:bool=true,maximizeCompatibility?:bool=true,resize?:bool=false,width?:1..30000=1,height?:1..30000=1}|false?,"tiff":{enabled?:bool=true,lzw?:bool=false,resize?:bool=false,width?:1..30000=1,height?:1..30000=1}|false?} → {files, errors} (without format, supplying jpeg/psd/tiff selects per-format mode; omitted, null, false or disabled sections are skipped; at least one must be enabled. Errors in per-format mode identify the format.)"##,
             native,
             image_processor
         ),
@@ -437,12 +437,20 @@ pub fn specs() -> Vec<CommandSpec> {
 mod tests;
 
 #[cfg(test)]
+#[path = "file_cmds/export_clut_cube_header_tests.rs"]
+mod export_clut_cube_header_tests;
+
+#[cfg(test)]
 #[path = "file_cmds/place_job_tests.rs"]
 mod place_job_tests;
 
 #[cfg(test)]
 #[path = "file_cmds/open_as_smart_object_tests.rs"]
 mod open_as_smart_object_tests;
+
+#[cfg(test)]
+#[path = "file_cmds/open_as_error_name_tests.rs"]
+mod open_as_error_name_tests;
 
 #[cfg(test)]
 mod aces_exr_tests {
@@ -464,8 +472,8 @@ mod aces_exr_tests {
         .unwrap();
         let bytes = photocraft_codecs::encode(&image, photocraft_codecs::Format::OpenExr, &photocraft_codecs::EncodeOptions::default()).unwrap();
 
-        let linear = photocraft_cms::Builtin::LinearSrgb.profile().to_bytes();
-        let aces = photocraft_cms::Builtin::AcesCg.profile().to_bytes();
+        let linear = craft_cms::Builtin::LinearSrgb.profile().to_bytes();
+        let aces = craft_cms::Builtin::AcesCg.profile().to_bytes();
 
         // Off (the default): io's linear-sRGB tagging stays.
         let mut s = Session::new();
@@ -489,8 +497,8 @@ mod aces_exr_tests {
         let image = photocraft_codecs::Image::from_f32(4, 4, photocraft_codecs::ChannelLayout::Rgb, &[0.5; 48]).unwrap();
         let bytes =
             std::sync::Arc::new(photocraft_codecs::encode(&image, photocraft_codecs::Format::OpenExr, &photocraft_codecs::EncodeOptions::default()).unwrap());
-        let linear = photocraft_cms::Builtin::LinearSrgb.profile().to_bytes();
-        let aces = photocraft_cms::Builtin::AcesCg.profile().to_bytes();
+        let linear = craft_cms::Builtin::LinearSrgb.profile().to_bytes();
+        let aces = craft_cms::Builtin::AcesCg.profile().to_bytes();
         for (on, want) in [(false, &linear), (true, &aces)] {
             let mut s = Session::new();
             s.prefs.edit(|p| p.file_handling.exr_aces_cg = on);
@@ -498,8 +506,8 @@ mod aces_exr_tests {
                 Started::Job(id) => s.wait_job(id).unwrap(),
                 Started::Done(v) => v,
             };
-            // ACEScg isn't the working space, so Ask When Opening holds it for the prompt, which
-            // names the ACEScg profile; linear sRGB (io's HDR default) opens without asking.
+            // 32-bit ACEScg, like linear sRGB (io's HDR default), now opens without the mismatch
+            // prompt; a held open (if a policy still asks) must name the ACEScg profile.
             let profile = match v.get("held").and_then(Value::as_u64) {
                 Some(held) => {
                     assert!(on, "{v}");
@@ -513,5 +521,91 @@ mod aces_exr_tests {
             };
             assert_eq!(profile.as_deref().map(|v| v.as_slice()), Some(want.as_slice()), "exr_aces_cg = {on}");
         }
+    }
+}
+
+#[cfg(test)]
+mod aces_open_tests {
+    use super::*;
+    use photocraft_color::{Color, SampleType};
+    use photocraft_doc::Size;
+
+    fn first_pixel(d: &Document) -> Vec<f32> {
+        match &d.layers[0].content {
+            LayerContent::Raster(s) => s.pixel(0, 0),
+            _ => panic!("background is not a pixel layer"),
+        }
+    }
+
+    fn srgb_doc(c: [f32; 3]) -> Document {
+        Document::with_background("t", Size::new(4, 4), ColorMode::Rgb, SampleType::U8, Color::rgba(c[0], c[1], c[2], 1.0))
+    }
+
+    /// File Handling › "Convert opened images to ACEScg": an 8-bit sRGB image becomes 32-bit
+    /// linear ACEScg, decoded and converted like a Nuke Read node (sRGB → ACEScg).
+    #[test]
+    fn open_images_as_aces_cg_converts_srgb_to_linear_ap1() {
+        let aces = craft_cms::Builtin::AcesCg.profile().to_bytes();
+        let grey = 128.0 / 255.0;
+
+        // Off (the default): nothing changes.
+        let s = Session::new();
+        let mut d = srgb_doc([grey; 3]);
+        prepare_opened(&s, "shot.png", &mut d);
+        assert_eq!((d.depth, d.icc_profile.is_none()), (SampleType::U8, true));
+
+        let mut s = Session::new();
+        s.prefs.edit(|p| p.file_handling.open_images_as_aces_cg = true);
+
+        // sRGB 128 grey: linear 0.2159, and still neutral after D65 → ACES white adaptation.
+        let mut d = srgb_doc([grey; 3]);
+        prepare_opened(&s, "shot.png", &mut d);
+        assert_eq!(d.depth, SampleType::F32);
+        assert_eq!(d.icc_profile.as_deref().map(|v| v.as_slice()), Some(aces.as_slice()));
+        let p = first_pixel(&d);
+        for c in &p[..3] {
+            assert!((c - 0.2159).abs() < 2e-3, "{p:?}");
+        }
+
+        // sRGB red: AP1 is wider, so it lands well inside (≈ 0.613, 0.070, 0.021).
+        let mut d = srgb_doc([1.0, 0.0, 0.0]);
+        prepare_opened(&s, "shot.png", &mut d);
+        let p = first_pixel(&d);
+        for (got, want) in p[..3].iter().zip([0.6131, 0.0702, 0.0206]) {
+            assert!((got - want).abs() < 0.01, "{p:?}");
+        }
+
+        // Converting again is a no-op, and the open policy keeps 32-bit ACEScg without asking.
+        let before = first_pixel(&d);
+        prepare_opened(&s, "shot.png", &mut d);
+        assert_eq!(first_pixel(&d), before);
+        assert!(s.color.open_question(&d).is_none());
+        let (_, r) = s.open_document(d, None);
+        assert_eq!(r["action"].as_str(), Some("kept"), "{r}");
+        assert_eq!(s.active().unwrap().doc.icc_profile.as_deref().map(|v| v.as_slice()), Some(aces.as_slice()));
+    }
+
+    /// A linear-sRGB EXR keeps its highlights: values above 1 go through the exact matrix, not
+    /// the CMS (whose float transforms clamp to 0..1).
+    #[test]
+    fn open_images_as_aces_cg_keeps_exr_values_above_one() {
+        let px = [4.0f32, 2.0, 0.5];
+        let data: Vec<f32> = px.iter().copied().cycle().take(48).collect();
+        let image = photocraft_codecs::Image::from_f32(4, 4, photocraft_codecs::ChannelLayout::Rgb, &data).unwrap();
+        let bytes = photocraft_codecs::encode(&image, photocraft_codecs::Format::OpenExr, &photocraft_codecs::EncodeOptions::default()).unwrap();
+        let mut s = Session::new();
+        s.prefs.edit(|p| p.file_handling.open_images_as_aces_cg = true);
+        open_bytes_as(&mut s, "shot.exr", &bytes, None, None).unwrap();
+        let d = &s.active().unwrap().doc;
+        let aces = craft_cms::Builtin::AcesCg.profile().to_bytes();
+        assert_eq!(d.icc_profile.as_deref().map(|v| v.as_slice()), Some(aces.as_slice()));
+        // Linear sRGB → ACEScg (Bradford): the standard matrix applied to (4, 2, 0.5).
+        let m = [[0.6131, 0.3395, 0.0474], [0.0702, 0.9164, 0.0134], [0.0206, 0.1096, 0.8698]];
+        let want: Vec<f32> = m.iter().map(|r| r[0] * px[0] + r[1] * px[1] + r[2] * px[2]).collect();
+        let got = first_pixel(d);
+        for (g, w) in got[..3].iter().zip(&want) {
+            assert!((g - w).abs() < 0.01, "{got:?} vs {want:?}");
+        }
+        assert!(got[0] > 3.0, "highlight clamped: {got:?}");
     }
 }

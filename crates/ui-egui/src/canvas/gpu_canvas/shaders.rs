@@ -3,13 +3,14 @@ struct View {
     a: vec4<f32>, // screen_w, screen_h, scale (device px per doc px), pixels_per_point
     b: vec4<f32>, // doc origin x, y (device px), doc w, h (doc px)
     c: vec4<f32>, // filter mode, lod, grid alpha, checker square (device px)
-    d: vec4<f32>, // pattern preview offset x, y (doc px), display (0 none, 1 LUT, 2 LUT + gamut, 3 matrix/shaper), output linear
+    d: vec4<f32>, // pattern preview offset x, y (doc px), display (0 none, 1 LUT, 2 LUT + gamut, 3 matrix/shaper, 4 OCIO viewer), output linear
     e: vec4<f32>, // checker light rgb, gamut warning opacity
     f: vec4<f32>, // checker dark rgb, 32-bit preview gain (2^exposure; 0 = off)
     g: vec4<f32>, // gamut warning rgb, 32-bit preview 1 / gamma
     h: vec4<f32>, // cos, sin, center_doc_x, center_doc_y
-    i: vec4<f32>, // live projection: on (1), yaw, pitch (radians), view-plane units per device px
-    j: vec4<f32>, // live projection: view centre x, y (device px), unused, unused
+    i: vec4<f32>, // viewer channel (0 RGB, 1 R, 2 G, 3 B, 4 A, 5 luminance), unused ×3
+    j: vec4<f32>, // live projection: on (1), yaw, pitch (radians), view-plane units per device px
+    k: vec4<f32>, // live projection: view centre x, y (device px), unused, unused
 };
 struct Tile { r: vec4<f32>, core: vec4<f32> }; // x, y, w, h in doc px; drawn x0, y0, x1, y1
 
@@ -21,6 +22,45 @@ struct Tile { r: vec4<f32>, core: vec4<f32> }; // x, y, w, h in doc px; drawn x0
 @group(2) @binding(1) var display_curves: texture_2d<f32>;
 struct DisplayMatrix { r: vec4<f32>, g: vec4<f32>, b: vec4<f32> };
 @group(2) @binding(2) var<uniform> display_matrix: DisplayMatrix;
+// Large Brush Mode (stroke_overlay.rs): up to four strokes' coverage in document space (one
+// being drawn, the rest waiting for their full-precision writes), and their paint.
+struct StrokeOverlay {
+    color: array<vec4<f32>, 4>, // per slot: paint rgb in the texture's encoding, opacity
+    p: array<vec4<f32>, 4>,     // per slot: coverage texels per doc px, on, linear document, unused
+    order: vec4<f32>,           // slots to lay over the document, oldest stroke first
+    n: vec4<f32>,               // how many of `order` show
+    hide: array<vec4<f32>, 4>,  // per slot: doc rect (x0, y0, x1, y1) its landed write already shows in
+};
+@group(3) @binding(0) var stroke_cov0: texture_2d<f32>;
+@group(3) @binding(1) var stroke_cov1: texture_2d<f32>;
+@group(3) @binding(2) var stroke_cov2: texture_2d<f32>;
+@group(3) @binding(3) var stroke_cov3: texture_2d<f32>;
+@group(3) @binding(4) var<uniform> stroke: StrokeOverlay;
+
+// Coverage texture `t` at texel-space point `q` (texel centres at +0.5), bilinear by hand: a
+// 32-bit float coverage texture isn't filterable everywhere. Clamped at the edges.
+fn cov_bilinear(t: texture_2d<f32>, q: vec2<f32>) -> f32 {
+    let dim = vec2<i32>(textureDimensions(t)) - 1;
+    let x = q - 0.5;
+    let i = vec2<i32>(floor(x));
+    let f = x - floor(x);
+    let a = textureLoad(t, clamp(i, vec2(0), dim), 0).r;
+    let b = textureLoad(t, clamp(i + vec2(1, 0), vec2(0), dim), 0).r;
+    let c = textureLoad(t, clamp(i + vec2(0, 1), vec2(0), dim), 0).r;
+    let e = textureLoad(t, clamp(i + vec2(1, 1), vec2(0), dim), 0).r;
+    return mix(mix(a, b, f.x), mix(c, e, f.x), f.y);
+}
+
+// Stroke slot `k`'s coverage at document pixel `d`.
+fn stroke_coverage(k: i32, d: vec2<f32>) -> f32 {
+    let q = d * stroke.p[k].x;
+    switch k {
+        case 0: { return cov_bilinear(stroke_cov0, q); }
+        case 1: { return cov_bilinear(stroke_cov1, q); }
+        case 2: { return cov_bilinear(stroke_cov2, q); }
+        default: { return cov_bilinear(stroke_cov3, q); }
+    }
+}
 
 fn curve_entry(index: u32) -> vec3<f32> {
     let width = textureDimensions(display_curves).x;
@@ -50,6 +90,11 @@ fn matrix_display(c: vec3<f32>) -> vec3<f32> {
 }
 
 struct VOut { @builtin(position) pos: vec4<f32> };
+
+// Interleaved gradient noise (Jimenez 2014): 0..1, evenly spread, no texture needed.
+fn ign(p: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(floor(p), vec2(0.06711056, 0.00583715))));
+}
 
 fn corner(i: u32) -> vec2<f32> {
     var c = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
@@ -188,14 +233,39 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         let f = clamp((tt - i - 0.5) * (scale / per) + 0.5, vec2(0.0), vec2(1.0));
         col = textureSampleLevel(tex, samp, (i + 0.5 + f) / texels, 0.0);
     }
-    return shade(col, d, view.c.z, scale);
+    // Large Brush Mode: the strokes drawn so far, oldest first, each Normal over the document as
+    // its commit will paint it; a linear document blends in linear light.
+    let strokes = i32(stroke.n.x);
+    for (var j = 0; j < strokes; j++) {
+        let k = clamp(i32(stroke.order[j]), 0, 3);
+        if (stroke.p[k].y < 0.5) {
+            continue;
+        }
+        let h = stroke.hide[k];
+        if (d.x >= h.x && d.x < h.z && d.y >= h.y && d.y < h.w) {
+            continue;
+        }
+        let a = clamp(stroke_coverage(k, d), 0.0, 1.0) * stroke.color[k].a;
+        if (a > 0.0) {
+            let paint_enc = max(stroke.color[k].rgb, vec3(0.0));
+            let out_a = a + col.a * (1.0 - a);
+            if (stroke.p[k].z > 0.5) {
+                let below = srgb_to_linear(max(col.rgb / max(col.a, 1e-6), vec3(0.0))) * col.a;
+                let lin = srgb_to_linear(paint_enc) * a + below * (1.0 - a);
+                col = vec4(linear_to_srgb(lin / max(out_a, 1e-6)) * out_a, out_a);
+            } else {
+                col = vec4(paint_enc * a + col.rgb * (1.0 - a), out_a);
+            }
+        }
+    }
+    return shade(col, d, view.c.z, scale, p);
 }
 
 // The 32-bit preview, display LUT, checkerboard, pixel grid and output encoding of a sampled
-// document colour `col` at document point `d`.
-fn shade(col_in: vec4<f32>, d: vec2<f32>, grid_alpha: f32, scale: f32) -> vec4<f32> {
+// document colour `col` at document point `d`; `p` is the screen pixel (dither noise).
+fn shade(col_in: vec4<f32>, d: vec2<f32>, grid_alpha: f32, scale: f32, p: vec2<f32>) -> vec4<f32> {
     var col = col_in;
-    if (view.f.w > 0.0 && col.a > 0.0) {
+    if (view.f.w > 0.0 && col.a > 0.0 && view.d.z < 3.5) {
         // View › 32-bit Preview Options: exposure and gamma in linear light on the sRGB-encoded
         // texture value, before the display LUT. A float canvas keeps values above 1.0, so they
         // are brought into range by the exposure instead of clipped.
@@ -203,7 +273,37 @@ fn shade(col_in: vec4<f32>, d: vec2<f32>, grid_alpha: f32, scale: f32) -> vec4<f
         let v = linear_to_srgb(min(pow(max(lin, vec3(1e-12)), vec3(view.g.w)), vec3(1.0)));
         col = vec4(v * col.a, col.a);
     }
-    if (view.d.z > 0.5 && col.a > 0.0) {
+    let channel = view.i.x;
+    if (channel > 0.5) {
+        // View › Viewer Channel (Nuke's R/G/B/A/Y): one channel as grey, display only. Alpha shows
+        // the coverage itself (opaque); the others the straight colour value, over the checker.
+        let straight = select(vec3(0.0), col.rgb / max(col.a, 1e-6), col.a > 0.0);
+        if (channel > 4.5) {
+            // Rec.709 luminance of the linear light the texture value encodes.
+            let y = dot(srgb_to_linear(max(straight, vec3(0.0))), vec3(0.2126, 0.7152, 0.0722));
+            col = vec4(linear_to_srgb(vec3(y)) * col.a, col.a);
+        } else if (channel > 3.5) {
+            col = vec4(vec3(col.a), 1.0);
+        } else {
+            let v = select(select(straight.b, straight.g, channel < 2.5), straight.r, channel < 1.5);
+            col = vec4(vec3(v) * col.a, col.a);
+        }
+    }
+    if (view.d.z > 3.5 && col.a > 0.0) {
+        // View › OCIO Viewer (photocraft_engine::ocio_viewer): scene-linear light (exposure applied
+        // as a gain, as Nuke's viewer does) through a log2 shaper over 2^-12 .. 2^12, then the
+        // baked display / view LUT; gamma on the display values after it. Values above 1.0
+        // tone-map through the view instead of clipping.
+        let gain = select(1.0, view.f.w, view.f.w > 0.0);
+        let lin = srgb_to_linear(max(col.rgb / col.a, vec3(0.0))) * gain;
+        let u = clamp((log2(max(lin, vec3(exp2(-12.0)))) + 12.0) / 24.0, vec3(0.0), vec3(1.0));
+        let n = f32(textureDimensions(lut).x);
+        var shown = textureSampleLevel(lut, samp, (u * (n - 1.0) + 0.5) / n, 0.0).rgb;
+        if (view.f.w > 0.0) {
+            shown = pow(max(shown, vec3(0.0)), vec3(view.g.w));
+        }
+        col = vec4(shown * col.a, col.a);
+    } else if (view.d.z > 0.5 && col.a > 0.0) {
         // Colour management, Proof Colors, Gamut Warning: the document's display LUT (alpha flags
         // out-of-gamut colours).
         let c = clamp(col.rgb / col.a, vec3(0.0), vec3(1.0));
@@ -232,6 +332,10 @@ fn shade(col_in: vec4<f32>, d: vec2<f32>, grid_alpha: f32, scale: f32) -> vec4<f
             rgb = rgb * (1.0 - white - black) + vec3(white);
         }
     }
+    // Half a display code value of interleaved-gradient noise: soft gradients (a 32-bit linear
+    // sky, a huge soft brush in the shadows) no longer band on 8- and 10-bit monitors. Display
+    // only; the document's pixels are untouched.
+    rgb = max(rgb + (ign(p) - 0.5) / 255.0, vec3(0.0));
     if (view.d.w > 0.5) {
         rgb = srgb_to_linear(rgb);
     }
@@ -264,13 +368,13 @@ fn proj_lod(k: f32, dx: f32, dy: f32, lat: f32, size_doc: vec2<f32>) -> f32 {
 @fragment
 fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
     // engine::equirect::ViewProjection::view_to_dir, then dir_to_equirect.
-    let k = view.i.w;
-    let dx = (in.pos.x - view.j.x) * k;
-    let dy = -(in.pos.y - view.j.y) * k;
-    let sy = sin(view.i.y);
-    let cy = cos(view.i.y);
-    let sp = sin(view.i.z);
-    let cp = cos(view.i.z);
+    let k = view.j.w;
+    let dx = (in.pos.x - view.k.x) * k;
+    let dy = -(in.pos.y - view.k.y) * k;
+    let sy = sin(view.j.y);
+    let cy = cos(view.j.y);
+    let sp = sin(view.j.z);
+    let cp = cos(view.j.z);
     let f = vec3(cp * sy, sp, cp * cy);
     let r = vec3(cy, 0.0, -sy);
     let u = vec3(-sp * sy, cp, -sp * cy);
@@ -288,7 +392,7 @@ fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
     }
     let lod = proj_lod(k, dx, dy, lat, size_doc);
     let col = textureSampleLevel(tex, samp, t / size, lod);
-    return shade(col, d, 0.0, 1.0);
+    return shade(col, d, 0.0, 1.0, in.pos.xy);
 }
 "#;
 

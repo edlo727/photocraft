@@ -36,12 +36,51 @@ pub(crate) struct Row {
     pub ui: f64,
     /// eframe's CPU time for the previous frame: UI, tessellation and GPU submission.
     pub cpu_prev: Option<f64>,
+    /// Damage tracking and GPU memory budgeting before the refresh.
+    pub damage: f64,
+    /// The part of `canvas` spent converting and uploading layer tiles.
+    pub upload: f64,
+    /// Layer tiles uploaded, and how many of them were converted ahead of time.
+    pub tiles: u64,
+    pub ready: u64,
+    /// Commands run (a landed Large Brush Mode stroke's commit is one), and the UI's side
+    /// effects of them.
+    pub command: f64,
+    pub effects: f64,
+    /// Waiting for Large Brush Mode strokes' background writes, and what waited.
+    pub wait: f64,
+    pub wait_for: String,
+    /// The GPU's own time for a recent canvas composite, when it reports one.
+    pub gpu: Option<f64>,
+    /// Layer pages evicted for the GPU memory budget, and the memory layers held (MiB; 0 when
+    /// the frame didn't composite).
+    pub evicted: u64,
+    pub layer_mb: u64,
 }
 
 impl Row {
     /// The trace's row for a frame's stages.
     pub(crate) fn from_stages(s: &FrameStages, interval: f64) -> Self {
-        Self { t: s.t, interval, moves: s.moves, stroke: s.stroke_ms, canvas: s.composite_ms + s.upload_ms, ui: s.ui_ms, cpu_prev: s.cpu_prev_ms }
+        Self {
+            t: s.t,
+            interval,
+            moves: s.moves,
+            stroke: s.stroke_ms,
+            canvas: s.composite_ms + s.upload_ms,
+            ui: s.ui_ms,
+            cpu_prev: s.cpu_prev_ms,
+            damage: s.damage_ms,
+            upload: s.upload_ms,
+            tiles: s.tiles,
+            ready: s.tiles_ready,
+            command: s.command_ms,
+            effects: s.effects_ms,
+            wait: s.wait_ms,
+            wait_for: s.wait_for.clone(),
+            gpu: s.gpu_ms,
+            evicted: s.evicted,
+            layer_mb: s.layer_mb,
+        }
     }
 }
 
@@ -207,11 +246,31 @@ impl StrokeTrace {
 pub(crate) fn csv(stroke: usize, rows: &[Row], header: bool) -> String {
     let mut s = String::new();
     if header {
-        s.push_str("stroke,t_ms,interval_ms,moves,stroke_ms,canvas_ms,ui_ms,cpu_prev_ms\n");
+        s.push_str("stroke,t_ms,interval_ms,moves,stroke_ms,canvas_ms,ui_ms,cpu_prev_ms,damage_ms,upload_ms,tiles,ready,command_ms,effects_ms,wait_ms,waited_for,gpu_ms,evicted,gpu_mb\n");
     }
     for r in rows {
         let cpu = r.cpu_prev.map_or(String::new(), |c| format!("{c:.3}"));
-        let _ = writeln!(s, "{stroke},{:.3},{:.3},{},{:.3},{:.3},{:.3},{cpu}", r.t, r.interval, r.moves, r.stroke, r.canvas, r.ui);
+        let _ = writeln!(
+            s,
+            "{stroke},{:.3},{:.3},{},{:.3},{:.3},{:.3},{cpu},{:.3},{:.3},{},{},{:.3},{:.3},{:.3},\"{}\",{},{},{}",
+            r.t,
+            r.interval,
+            r.moves,
+            r.stroke,
+            r.canvas,
+            r.ui,
+            r.damage,
+            r.upload,
+            r.tiles,
+            r.ready,
+            r.command,
+            r.effects,
+            r.wait,
+            r.wait_for.replace('"', "'"),
+            r.gpu.map_or(String::new(), |g| format!("{g:.3}")),
+            r.evicted,
+            r.layer_mb
+        );
     }
     s
 }
@@ -304,8 +363,11 @@ mod tests {
 
     #[test]
     fn csv_rows_and_odd_numbers() {
-        let rows = [Row { t: 1.0, interval: 16.5, moves: 2, stroke: 0.25, canvas: 1.0, ui: 3.0, cpu_prev: None }];
-        assert_eq!(csv(1, &rows, true), "stroke,t_ms,interval_ms,moves,stroke_ms,canvas_ms,ui_ms,cpu_prev_ms\n1,1.000,16.500,2,0.250,1.000,3.000,\n");
+        let rows = [Row { t: 1.0, interval: 16.5, moves: 2, stroke: 0.25, canvas: 1.0, ui: 3.0, cpu_prev: None, damage: 0.5, upload: 0.75, tiles: 4, ready: 3, command: 2.0, effects: 0.25, wait: 1.5, wait_for: "a \"test\"".into(), gpu: Some(0.5), evicted: 2, layer_mb: 900 }];
+        assert_eq!(
+            csv(1, &rows, true),
+            "stroke,t_ms,interval_ms,moves,stroke_ms,canvas_ms,ui_ms,cpu_prev_ms,damage_ms,upload_ms,tiles,ready,command_ms,effects_ms,wait_ms,waited_for,gpu_ms,evicted,gpu_mb\n1,1.000,16.500,2,0.250,1.000,3.000,,0.500,0.750,4,3,2.000,0.250,1.500,\"a 'test'\",0.500,2,900\n"
+        );
         assert_eq!(percentiles(vec![]), [0.0, 0.0]);
         assert_eq!(percentiles(vec![f64::NAN, 2.0, f64::INFINITY]), [2.0, 2.0]);
         assert_eq!(percentiles((1..=100).map(f64::from).collect()), [51.0, 95.0]);

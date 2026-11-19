@@ -284,6 +284,28 @@ const DISPLAY_LUT: usize = 33;
 pub(crate) fn sync_display_lut(app: &mut PhotocraftApp, doc: &photocraft_doc::Document, key: u64, display: Option<u32>) -> u8 {
     let Some(gpu) = app.gpu.clone() else { return 0 };
     let output = display.unwrap_or(0);
+    // View › OCIO Viewer: the display / view LUT replaces the ICC display transform (mode 4).
+    if app.session.color.ocio_viewer(doc.id).enabled {
+        let path = app.session.prefs().file_handling.ocio_config.clone();
+        let sig = photocraft_engine::ocio_viewer::signature(&app.session.color, doc, &path) ^ 0x4f43_494f_5649_4557;
+        if let Some((s, mode)) = gpu.display_lut_signature(key, output)
+            && s == sig
+        {
+            return mode;
+        }
+        match photocraft_engine::ocio_viewer::gpu_viewer_lut(&app.session.color, doc, &path) {
+            Ok(Some((bytes, _))) => {
+                gpu.set_display_lut(key, output, photocraft_engine::ocio_viewer::VIEWER_LUT as u32, Some(&bytes));
+                gpu.cache_display_lut_signature(key, output, sig, 4);
+                return 4;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                app.ui.status = e.to_string();
+                app.ui.status_error = true;
+            }
+        }
+    }
     // Rebuild only when anything feeding the LUT changes.
     let sig = app.session.color.display_signature_for(doc, display);
     if let Some((s, mode)) = gpu.display_lut_signature(key, output)

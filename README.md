@@ -52,6 +52,19 @@ Downloads are on the [Releases](https://github.com/edlo727/photocraft/releases) 
   <a href="https://getartcraft.com/apps">All Crafting Apps</a>
 </p>
 
+<h2 align="center">PhotoCraft VFX</h2>
+
+<p align="center">
+  <b>This fork adds VFX features:</b> 32-bit scene-linear ACEScg, OpenColorIO, Large Brush Mode for 16K float plates,<br>
+  Nuke-matched blend modes, Grade and Curves, and EXR export with a ready-made Nuke script.
+</p>
+
+<p align="center">
+  <a href="https://youtu.be/2dZ_dE4wUco"><img src="https://img.youtube.com/vi/2dZ_dE4wUco/maxresdefault.jpg" width="720" alt="PhotoCraft VFX v0.6.0 demo video: 32-bit HDR painting, ACES/OCIO and a round trip to Nuke"></a>
+  <br>
+  <sub>▶ <a href="https://youtu.be/2dZ_dE4wUco">Watch the demo on YouTube</a> · <a href="https://github.com/metalrahul/photocraft-vfx/releases/latest">Download the latest Windows build</a></sub>
+</p>
+
 <br>
 
 <p align="center">
@@ -219,7 +232,7 @@ Every screenshot here is the real app at work on public-domain art, rendered off
     </td>
     <td width="33%" valign="top">
       <h4>🗂️ Formats</h4>
-      PSD and PSB, layered TIFF (Photoshop's layer data in the TIFF, read and written in either byte order), <a href="docs/pdn.md">Paint.NET PDN3 (read, with editable layers and all 14 blend modes)</a>, <a href="docs/ora.md">OpenRaster (read and write, with layers, groups and blend modes, for Krita, MyPaint and GIMP)</a>, <a href="docs/xcf.md">GIMP XCF (read, with layers, groups, masks, blend modes, channels and the selection)</a>, <a href="docs/kra.md">Krita .kra (read, with paint layers, groups, blend modes and transparency masks)</a>, SVG (opens as shape layers, places as a vector Smart Object), plus flat PNG, JPEG, TIFF, WebP (lossy and lossless), GIF, BMP, TGA, ICO, QOI, PNM, OpenEXR, Radiance HDR and FITS (astronomy images: 8/16-bit and 32-bit float, gray or RGB, header kept), and the native <code>.pcraft</code> format. Flat formats retain the depths they support: PNG keeps 8/16-bit samples, TIFF keeps 8/16-bit and 32-bit float samples, and OpenEXR keeps half/float samples; JPEG, WebP and the other 8-bit formats reduce higher-depth samples with an export warning. See the <a href="crates/codecs/README.md#capability-matrix-default-build">codec capability matrix</a> for each format. HEIC photos from iPhone and Mac are read-only (included in official builds; optional <code>--features heif</code> for source builds). AVIF is write-only with the optional <code>avif</code> build feature; AVIF decoding and JPEG XL are unavailable. Affinity documents (<code>.af</code>, <code>.afdesign</code>, <code>.afphoto</code>, <code>.afpub</code>) open natively, read only, with artboards, layers, vectors, text, images and masks; effects, adjustments and other unsupported parts are listed in a warning, and Affinity export is unavailable.
+      PSD and PSB, layered TIFF (Photoshop's layer data in the TIFF, read and written in either byte order), <a href="docs/pdn.md">Paint.NET PDN3 (read, with editable layers and all 14 blend modes)</a>, <a href="docs/ora.md">OpenRaster (read and write, with layers, groups and blend modes, for Krita, MyPaint and GIMP)</a>, <a href="docs/xcf.md">GIMP XCF (read, with layers, groups, masks, blend modes, channels and the selection)</a>, <a href="docs/kra.md">Krita .kra (read, with paint layers, groups, blend modes and transparency masks)</a>, SVG (opens as shape layers, places as a vector Smart Object), plus flat PNG, JPEG, TIFF, WebP (lossy and lossless), GIF, BMP, TGA, ICO, QOI, PNM, OpenEXR, Radiance HDR and FITS (astronomy images: 8/16-bit and 32-bit float, gray or RGB, header kept), and the native <code>.pcraft</code> format. Flat formats retain the depths they support: PNG keeps 8/16-bit samples, TIFF keeps 8/16-bit and 32-bit float samples, and OpenEXR keeps half/float samples; JPEG, WebP and the other 8-bit formats reduce higher-depth samples with an export warning. See the <a href="https://github.com/storytold/craft-libs/tree/main/crates/image-codecs#capability-matrix-default-build">codec capability matrix</a> for each format. HEIC photos from iPhone and Mac are read-only (included in official builds; optional <code>--features heif</code> for source builds). AVIF is write-only with the optional <code>avif</code> build feature; AVIF decoding and JPEG XL are unavailable. Affinity documents (<code>.af</code>, <code>.afdesign</code>, <code>.afphoto</code>, <code>.afpub</code>) open natively, read only, with artboards, layers, vectors, text, images and masks; effects, adjustments and other unsupported parts are listed in a warning, and Affinity export is unavailable.
     </td>
     <td width="33%" valign="top">
       <h4>🪄 The everyday essentials</h4>
@@ -234,7 +247,7 @@ Every screenshot here is the real app at work on public-domain art, rendered off
 
 PhotoCraft's PSD support is a standalone crate written from Adobe's public specification and tested against a corpus of real-world files.
 
-- **Faithful round trips:** opening and re-saving a document renders the same for 307 of the 309 files in the psd-tools test set and 169 of 170 in our mixed ag-psd/psd-tools set (`crates/io/tests/it/corpus.rs`; fetch the psd-tools set with `cargo xtask corpus --psd-tools`), and anything we don't model yet (raw blocks, descriptors, extras) is carried over instead of being dropped. A re-saved file is not byte-identical to its source: PhotoCraft rewrites image resources, layer records and the composite. Only the standalone `photocraft-psd` crate, parsing and writing a file without the document model, reproduces every parseable corpus file byte for byte (`crates/psd/tests/it/corpus.rs`).
+- **Faithful round trips:** opening and re-saving a document renders the same for 307 of the 309 files in the psd-tools test set and 169 of 170 in our mixed ag-psd/psd-tools set (`crates/io/tests/it/corpus.rs`; fetch the psd-tools set with `cargo xtask corpus --psd-tools`), and anything we don't model yet (raw blocks, descriptors, extras) is carried over instead of being dropped. A re-saved file is not byte-identical to its source: PhotoCraft rewrites image resources, layer records and the composite. Only the standalone `craft-psd` crate, parsing and writing a file without the document model, reproduces every parseable corpus file byte for byte (`craft-psd/tests/it/corpus.rs`).
 - **Pixels that match:** a composite oracle compares our render with Photoshop's own merged image, covering gradient interpolation (Classic, Perceptual and Linear), layer effects, shape strokes, clipping and fill opacity.
 - **Large documents:** PSB, 16 and 32-bit files, and CMYK and Lab documents open natively.
 
@@ -285,6 +298,19 @@ Japanese fonts for the UI and Type tool come from [craft-fonts](https://github.c
 git clone https://github.com/storytold/craft-fonts ../craft-fonts
 CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo run --release -p photocraft
 ```
+
+### Building with OpenColorIO (PhotoCraft VFX)
+
+The VFX branch links [OpenColorIO](https://opencolorio.org/) (the colour management Nuke uses) statically, so releases need nothing installed. To build it yourself you need [vcpkg](https://github.com/microsoft/vcpkg) once; the repo's `vcpkg.json` pins OpenColorIO 2.4.2 and the first `cargo build` builds it into `vcpkg_installed/` (10–20 minutes, then cached):
+
+```sh
+git clone https://github.com/microsoft/vcpkg ../vcpkg
+../vcpkg/bootstrap-vcpkg.sh          # Windows: ..\vcpkg\bootstrap-vcpkg.bat
+export VCPKG_ROOT="$PWD/../vcpkg"     # Windows: setx VCPKG_ROOT <path>, then a new terminal
+cargo build --release -p photocraft
+```
+
+`OCIO_ROOT=<prefix>` uses an existing OpenColorIO 2.4.2 install instead, and `PHOTOCRAFT_NO_OCIO=1` builds without it (no OCIO colorspace features; the web build always does). The default config is OCIO's built-in ACES 1.3 studio config; `crates/ocio` explains the rest.
 
 New contributors and AI agents: start with [`AGENTS.md`](AGENTS.md), then [`docs/`](docs/).
 

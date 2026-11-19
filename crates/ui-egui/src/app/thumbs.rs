@@ -264,6 +264,15 @@ impl PhotocraftApp {
             }
             _ => false,
         };
+        // While strokes are going down (a drag, or Large Brush Mode strokes still writing or
+        // landing), keep the thumbnails a moment: each one recomposites the whole document on
+        // the CPU, which put a hitch on every big stroke's landing frame. They catch up once
+        // painting pauses.
+        let painting = self.drag.is_some() || self.gpu_stroke.is_some() || !self.gpu_commits.is_empty() || self.gpu_band.is_some();
+        if !current && painting && self.channel_thumbs.as_ref().is_some_and(|(d, ..)| *d == id) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            return self.channel_thumbs.as_ref().map(|(_, _, _, t)| t.iter().map(|t| t.id()).collect()).unwrap_or_default();
+        }
         if !current {
             // `thumbnail(&doc, 56)` with its proxy kept, so the ink thumbnails below sample the
             // same proxy instead of building another one.

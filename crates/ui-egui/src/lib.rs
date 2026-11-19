@@ -144,6 +144,7 @@ pub use dialogs::color_table_ui;
 pub use dialogs::credits;
 pub use dialogs::dds_options_ui;
 pub use dialogs::delete_layer_prompt;
+pub use dialogs::depth_ui;
 pub use dialogs::dialog_alt_reset;
 pub use dialogs::dialog_blend_ui;
 pub use dialogs::discard_ui;
@@ -161,6 +162,7 @@ pub use dialogs::gallery_ui;
 use dialogs::guide_edit;
 pub use dialogs::guide_layout_ui;
 pub use dialogs::history_options_ui;
+pub use dialogs::input_space_ui;
 pub use dialogs::jpeg_options_ui;
 pub use dialogs::layer_picker;
 pub use dialogs::layer_style;
@@ -269,11 +271,12 @@ pub(crate) use services::SAVE_OPTIONS_OPEN;
 #[cfg(test)]
 pub(crate) use services::saved_revision_after_write;
 pub use services::{
-    AdoptAutosaveFn, AppendTextFn, AutomationCommandFn, AutomationOpenPcraftFn, AutomationReadFn, AutomationWriteFn, AutosaveFn, AutosaveResultsFn, CapsLockFn,
-    CaptionStyleFn, ClipboardGetFn, ClipboardGetSvgFn, ClipboardSetFn, ClipboardUnreadableFn, CursorPosFn, DiscardAutosaveFn, EncodePngFn, ExportFn,
-    ExportSettings, ExternalSvgEditor, ExternalSvgSession, ExternalVectorSave, ExternalVectorSource, FileStamp, FileStampFn, FormatChoices, ImportFn, Inbox,
-    LastUpdateFn, LoadTextFn, OpenExternalSvgFn, OpenUrlFn, OsEventsFn, PenEndFn, PenScreenFn, PhotoshopShortcutsFn, PlaceInbox, QuitFn, RecoverFn,
-    Recoverable, RightButtonDownFn, SameFileFn, SaveFileFn, SaveTextFn, Services, SystemThemeFn, TabletPollFn, WindowFrameFn, WriteFn,
+    AdoptAutosaveFn, AgentLink, AgentLinkFn, AgentLinkStatus, AppendTextFn, AutomationAuthorizeFn, AutomationCommandFn, AutomationOpenPcraftFn,
+    AutomationReadFn, AutomationServices, AutomationWriteFn, AutosaveFn, AutosaveResultsFn, BarrelPressesFn, CapsLockFn, CaptionStyleFn, ClipboardGetFn, ClipboardGetSvgFn,
+    ClipboardSetFn, ClipboardUnreadableFn, CursorPosFn, DiscardAutosaveFn, EncodePngFn, ExportFn, ExportSettings, ExternalSvgEditor, ExternalSvgSession,
+    ExternalVectorSave, ExternalVectorSource, FileStamp, FileStampFn, FormatChoices, ImportFn, Inbox, LastUpdateFn, LoadTextFn, OpenExternalSvgFn, OpenUrlFn,
+    OsEventsFn, PenEndFn, PenScreenFn, PhotoshopShortcutsFn, PlaceInbox, QuitFn, RecoverFn, Recoverable, RightButtonDownFn, SameFileFn, SaveFileFn, SaveTextFn,
+    Services, SystemThemeFn, TabletPollFn, WindowFrameFn, WriteFn,
 };
 pub(crate) use services::{opaque_layer, saves_flat_in_place};
 pub use text::bidi_text;
@@ -403,6 +406,22 @@ pub struct PhotocraftApp {
     pub(crate) projection_view_px: Option<(usize, f64, f64)>,
     /// Brush/Eraser stroke being drawn, rendered by the engine (see `canvas::LiveStroke`).
     live_stroke: Option<canvas::LiveStroke>,
+    /// Large Brush Mode stroke being drawn: its dabs show as a GPU overlay and nothing is
+    /// rendered into the document until release (see `canvas::GpuStroke`).
+    gpu_stroke: Option<canvas::GpuStroke>,
+    /// Released Large Brush Mode strokes waiting to land in the document, oldest first; the first
+    /// renders at full precision off the UI thread (`canvas::finish_gpu_commit`).
+    gpu_commits: std::collections::VecDeque<canvas::QueuedCommit>,
+    /// Landed Large Brush Mode strokes whose overlays wait for the canvas refresh that shows
+    /// them: (overlay slot, document, frames waited).
+    gpu_landed: Vec<(usize, photocraft_doc::DocId, u8)>,
+    /// Landing a stroke runs its commit; commands it runs mustn't land the queue again.
+    gpu_commit_landing: bool,
+    /// A big landed Large Brush Mode stroke whose canvas refresh goes a band of rows per frame.
+    gpu_band: Option<canvas::LandingBand>,
+    /// Where Large Brush Mode strokes painted into their layers drew since the canvas last
+    /// recomposited (document, rect).
+    gpu_live_damage: Option<(photocraft_doc::DocId, photocraft_geom::Rect)>,
     /// A live stroke just committed with its own pixels: the canvas caches that showed it
     /// refresh only what it drew after the step they showed (`canvas::damage_since`).
     committed_stroke: Option<canvas::CommittedStroke>,
@@ -476,6 +495,8 @@ pub struct PhotocraftApp {
     /// The first digit of a two-digit opacity typed on the number keys (`opacity_keys`, #352).
     pub(crate) opacity_keys: opacity_keys::Pending,
     control_rx: Option<Receiver<ControlRequest>>,
+    /// Preferences › AI Integrations: the agent connection's state (see [`Services::agent_link`]).
+    pub agent_link: AgentLinkStatus,
     /// `ui.screenshot` requests: bounded admission, a weak-slot callback per issuance, monotonic
     /// deadlines and a capture-time geometry epoch (see `screenshot.rs`).
     captures: screenshot::Captures,
@@ -826,6 +847,8 @@ mod cam_no_pixels_alert_tests;
 #[cfg(test)]
 mod eyedropper_context_menu_tests;
 #[cfg(test)]
+mod menu_automate_groups_tests;
+#[cfg(test)]
 mod patch_shift_constrain_tests;
 #[cfg(test)]
 mod pencil_pressure_toggles_tests;
@@ -896,6 +919,8 @@ mod transform_fx_tests;
 
 #[cfg(test)]
 mod transform_commit_click_tests;
+#[cfg(test)]
+mod transform_drag_start_tests;
 
 #[cfg(test)]
 mod layer_props_ui_tests;
@@ -1053,6 +1078,10 @@ mod status_bar_tests;
 mod stroke_timing_tests;
 
 #[cfg(test)]
+mod cam_reset_tool_mode_tests;
+#[cfg(test)]
+mod patch_reset_tool_tests;
+#[cfg(test)]
 mod patch_tool_history_names_tests;
 #[cfg(test)]
 mod polygon_lasso_step_snap_tests;
@@ -1116,7 +1145,12 @@ mod background_eraser_digit_keys_tests;
 #[cfg(test)]
 mod clone_stamp_reset_tip_tests;
 #[cfg(test)]
+mod smudge_default_tip_tests;
+#[cfg(test)]
 mod sponge_default_tip_tests;
 
 #[cfg(test)]
 mod red_eye_context_menu_tests;
+
+#[cfg(test)]
+mod clone_stamp_indexed_bar_tests;

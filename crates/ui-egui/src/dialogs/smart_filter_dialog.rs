@@ -153,7 +153,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<String,
     ui.horizontal(|ui| {
         ui.label(tl!("Mode"));
         let mut blend = fields.get("blend").and_then(Value::as_str).unwrap_or("Normal").to_string();
-        let options: Vec<_> = BlendMode::LAYER_MODES.iter().map(|m| (m.label().to_string(), m.label())).collect();
+        let options: Vec<_> = BlendMode::menu_modes().map(|m| (m.label().to_string(), m.label())).collect();
         if widgets::dropdown(ui, "smart-filter-blend", tl!("Blend Mode"), &mut blend, &options, 200.0) {
             fields.insert("blend".into(), json!(blend));
         }

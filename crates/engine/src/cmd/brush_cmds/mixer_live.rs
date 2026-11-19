@@ -321,6 +321,7 @@ impl LiveMixer {
         session.live_commit = Some(LiveCommit {
             cmd: CMD.into(),
             base,
+            base_doc: std::sync::Weak::new(),
             params: params.clone(),
             seed: Some(self.seed),
             points: self.points,

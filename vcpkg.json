@@ -1,0 +1,15 @@
+{
+  "name": "photocraft-vfx",
+  "version-string": "0.1.0",
+  "description": "Native dependencies of PhotoCraft VFX, built by crates/ocio/build.rs (see README: Building with OpenColorIO).",
+  "dependencies": [
+    "opencolorio"
+  ],
+  "overrides": [
+    {
+      "name": "opencolorio",
+      "version-semver": "2.4.2"
+    }
+  ],
+  "builtin-baseline": "fa27ebf37451b46b55e3232a47750f2272853b0f"
+}

@@ -136,10 +136,13 @@ pub struct LayerFit {
     pub doc: u64,
     pub needed: u64,
     pub budget: u64,
+    /// Rendering Mode › GPU (always): the refresh stays on the GPU even when `needed` is over
+    /// `budget` (the compositor pages layers in and out instead).
+    pub forced: bool,
 }
 
 impl LayerFit {
     pub fn fits(&self) -> bool {
-        self.needed <= self.budget
+        self.forced || self.needed <= self.budget
     }
 }

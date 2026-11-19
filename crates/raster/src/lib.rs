@@ -1126,6 +1126,82 @@ impl Surface {
         self.put_tiles(tiles);
     }
 
+    /// Several non-overlapping [`Surface::write_region`]s at once: the tiles they land in are
+    /// written on all cores (serially on the web), each tile un-shared once. A large brush stroke
+    /// composites thousands of small regions per frame; written one by one they were a serial
+    /// copy of the whole stroke area on a 32-bit layer. Same bytes as writing them in order.
+    ///
+    /// This enters Rayon (see [`Surface::write_region_par`]).
+    pub fn write_regions_par(&mut self, regions: &[(Rect, &[f32])]) {
+        let n = self.channels();
+        let sample = self.format.sample;
+        let mut by_tile: BTreeMap<TileCoord, Vec<usize>> = BTreeMap::new();
+        for (i, (r, data)) in regions.iter().enumerate() {
+            assert_eq!(data.len(), r.width() as usize * r.height() as usize * n, "region data length mismatch");
+            for tc in r.tiles() {
+                by_tile.entry(tc).or_default().push(i);
+            }
+        }
+        let fmt = self.format;
+        let mut blank: Option<Arc<Tile>> = None;
+        let mut work: Vec<(TileCoord, Arc<Tile>, Vec<usize>)> = by_tile
+            .into_iter()
+            .map(|(c, idx)| {
+                let t = self.tiles.remove(&c).unwrap_or_else(|| blank.get_or_insert_with(|| Arc::new(Tile::filled(&fmt, &self.default_pixel))).clone());
+                (c, t, idx)
+            })
+            .collect();
+        let write = |(c, t, idx): &mut (TileCoord, Arc<Tile>, Vec<usize>)| {
+            let tile = Arc::make_mut(t);
+            for &i in idx.iter() {
+                let (r, data) = regions[i];
+                write_tile(tile, *c, r, data, r.width() as usize, n, sample);
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            work.par_iter_mut().for_each(write);
+        }
+        #[cfg(target_arch = "wasm32")]
+        work.iter_mut().for_each(write);
+        self.put_tiles(work.into_iter().map(|(c, t, _)| (c, t)));
+    }
+
+    /// Make `r` read exactly as it does in `src` (a snapshot of this surface, same format): the
+    /// tiles wholly inside `r` are shared with `src` (no pixels copied; a later edit copies them
+    /// on write as usual), only the tiles on its edges are copied, on all cores. Same pixels as
+    /// `self.write_region(r, &src.read_region(r))`, which a live brush ran every frame to take its
+    /// previous preview back: a huge soft tip's whole footprint read and written on one core.
+    pub fn copy_region_from(&mut self, src: &Surface, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
+        if self.format != src.format || self.default_pixel != src.default_pixel {
+            self.write_region(r, &src.read_region(r));
+            return;
+        }
+        let mut edges = Vec::new();
+        for tc in r.tiles() {
+            let full = tc.rect();
+            if full.intersect(&r) == full {
+                match src.tiles.get(&tc) {
+                    Some(t) => {
+                        self.tiles.insert(tc, t.clone());
+                    }
+                    None => {
+                        self.tiles.remove(&tc);
+                    }
+                }
+            } else {
+                edges.push(full.intersect(&r));
+            }
+        }
+        let data: Vec<(Rect, Vec<f32>)> = edges.into_iter().map(|e| (e, src.read_region(e))).collect();
+        let regions: Vec<(Rect, &[f32])> = data.iter().map(|(e, d)| (*e, d.as_slice())).collect();
+        self.write_regions_par(&regions);
+    }
+
     /// Take the tiles covering `r` out of the surface (missing ones filled with the default
     /// pixel), so they can be edited elsewhere, e.g. in parallel: `Arc::unwrap_or_clone` copies a
     /// tile only if an undo snapshot still shares it. Give them back with [`Surface::put_tiles`].
@@ -1374,6 +1450,46 @@ impl Surface {
 
     /// Applies `f` to every colour sample (not alpha), including the default pixel: a tone-curve
     /// change such as linearising when a document becomes 32-bit.
+    /// Like [`Self::map_color`], but maps the three colour channels of each pixel together
+    /// (`f([r, g, b])`), for colour matrices. Alpha and extra channels are untouched, values are
+    /// not clamped (32-bit float keeps values above 1), and surfaces with fewer than three
+    /// colour channels are left alone.
+    pub fn map_rgb(&mut self, f: impl Fn([f32; 3]) -> [f32; 3]) {
+        let format = self.format;
+        if format.mode.color_channels() < 3 {
+            return;
+        }
+        let n = format.channels();
+        let mut dp = decode_pixel(&format, &self.default_pixel);
+        let o = f([dp[0], dp[1], dp[2]]);
+        dp[..3].copy_from_slice(&o);
+        encode_pixel(&format, &dp, &mut self.default_pixel);
+        let coords: Vec<TileCoord> = self.tiles.keys().copied().collect();
+        let px_count = (TILE_SIZE * TILE_SIZE) as usize;
+        // Shared tiles are mapped once and stay shared, as in `map_color` (#4531).
+        let mut done: std::collections::HashMap<*const Tile, Arc<Tile>> = std::collections::HashMap::new();
+        for c in coords {
+            let Some(key) = self.tiles.get(&c).map(Arc::as_ptr) else { continue };
+            if let Some(mapped) = done.get(&key) {
+                self.tiles.insert(c, mapped.clone());
+                continue;
+            }
+            let tile = self.tile_mut(c);
+            let mut bytes = tile.bytes_mut();
+            for i in 0..px_count {
+                let at = i * n;
+                let rgb = [0, 1, 2].map(|k| read_sample(&bytes, format.sample, at + k));
+                for (k, v) in f(rgb).into_iter().enumerate() {
+                    write_sample(&mut bytes, format.sample, at + k, v);
+                }
+            }
+            drop(bytes);
+            if let Some(mapped) = self.tiles.get(&c) {
+                done.insert(key, mapped.clone());
+            }
+        }
+    }
+
     pub fn map_color(&mut self, f: impl Fn(f32) -> f32) {
         let format = self.format;
         let color = format.mode.color_channels();

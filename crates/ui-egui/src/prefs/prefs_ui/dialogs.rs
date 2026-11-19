@@ -32,6 +32,7 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
                     }
                 }
                 dm.fields.insert("__note".into(), json!(note));
+                dm.fields.insert("ocioConfig".into(), json!(app.session.prefs().file_handling.ocio_config));
             }
             dialog(d)
         }

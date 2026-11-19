@@ -46,7 +46,7 @@ pub fn tone_luts_q(adj: &Adjustment, quantum: Option<f32>) -> [Vec<f32>; 4] {
             let row = |c: &LevelsChannel| (0..LUT_SIZE).map(|k| levels_q(m, levels_q(c, x(k), quantum), quantum)).collect();
             [row(&per_channel[0]), row(&per_channel[1]), row(&per_channel[2]), row(if *space == ToneSpace::Cmyk { black } else { &ident })]
         }
-        Adjustment::Curves { master, per_channel, space, black, pencil } => {
+        Adjustment::Curves { master, per_channel, space, black, pencil, .. } => {
             let m = if *space == ToneSpace::Lab { curve_lut(&[]) } else { curve_lut_mode(master, *pencil) };
             let row = |c: &[CurvePoint]| curve_lut_mode(c, *pencil).iter().map(|&v| lut(&m, v)).collect();
             [row(&per_channel[0]), row(&per_channel[1]), row(&per_channel[2]), row(if *space == ToneSpace::Cmyk { black } else { &[] })]
@@ -409,19 +409,59 @@ pub fn curve_lut(points: &[CurvePoint]) -> Vec<f32> {
 /// including both endpoints. UI graphs use a smaller table without building the rendering LUT.
 /// Zero samples returns an empty table; one sample evaluates at input zero.
 pub fn curve_samples<const N: usize>(points: &[CurvePoint]) -> Vec<f32> {
-    let last = N.saturating_sub(1).max(1) as f32;
-    let mut pts: Vec<(f32, f32)> = points.iter().map(|p| (p.input, p.output)).collect();
+    spline_samples(points, N, 1.0, true, false)
+}
+
+/// The natural spline through `points`, sampled at `n` evenly spaced inputs over 0..`range`.
+/// Photoshop's Curves is `range` 1, `clamp` (every value in 0..1) and not `extend` (flat before
+/// the first point and past the last). Nuke's ColorLookup doesn't clamp, and `extend`s along the
+/// spline's end slopes outside its points unless its ends are held.
+pub fn spline_samples(points: &[CurvePoint], n_out: usize, range: f32, clamp: bool, extend: bool) -> Vec<f32> {
+    let last = n_out.saturating_sub(1).max(1) as f32;
+    let at = |k: usize| k as f32 / last * range;
+    let mut pts: Vec<(f32, f32)> = points.iter().filter(|p| p.input.is_finite() && p.output.is_finite()).map(|p| (p.input, p.output)).collect();
     pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     pts.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
     if pts.len() < 2 {
-        return (0..N).map(|i| i as f32 / last).collect();
+        return (0..n_out).map(at).collect();
     }
     let n = pts.len();
-    // Second derivatives of the natural spline (tridiagonal solve).
+    let x: Vec<f64> = pts.iter().map(|p| f64::from(p.0)).collect();
+    let y: Vec<f64> = pts.iter().map(|p| f64::from(p.1)).collect();
+    let m2 = natural_second_derivatives(&x, &y);
+    // The natural spline's slopes at its first and last points (its second derivative is 0 there).
+    let h_first = x[1] - x[0];
+    let slope_first = (y[1] - y[0]) / h_first - h_first * m2[1] / 6.0;
+    let h_last = x[n - 1] - x[n - 2];
+    let slope_last = (y[n - 1] - y[n - 2]) / h_last + h_last * m2[n - 2] / 6.0;
+    let finish = |v: f64| if clamp { (v as f32).clamp(0.0, 1.0) } else { v as f32 };
+    (0..n_out)
+        .map(|k| {
+            let xv = at(k);
+            let t = f64::from(xv);
+            if xv <= pts[0].0 {
+                return finish(if extend { y[0] + (t - x[0]) * slope_first } else { y[0] });
+            }
+            if xv >= pts[n - 1].0 {
+                return finish(if extend { y[n - 1] + (t - x[n - 1]) * slope_last } else { y[n - 1] });
+            }
+            let i = pts.windows(2).position(|w| xv <= w[1].0).unwrap_or(n - 2);
+            let (x0, y0) = (x[i], y[i]);
+            let (x1, y1) = (x[i + 1], y[i + 1]);
+            let h = x1 - x0;
+            let a = (x1 - t) / h;
+            let b = (t - x0) / h;
+            finish(a * y0 + b * y1 + ((a * a * a - a) * m2[i] + (b * b * b - b) * m2[i + 1]) * h * h / 6.0)
+        })
+        .collect()
+}
+
+/// The natural spline's second derivative at each knot (0 at both ends): a tridiagonal solve.
+/// `x` is strictly increasing and as long as `y`, with at least two knots.
+fn natural_second_derivatives(x: &[f64], y: &[f64]) -> Vec<f64> {
+    let n = x.len().min(y.len());
     let mut m2 = vec![0.0f64; n];
     if n > 2 {
-        let x: Vec<f64> = pts.iter().map(|p| f64::from(p.0)).collect();
-        let y: Vec<f64> = pts.iter().map(|p| f64::from(p.1)).collect();
         let mut c = vec![0.0f64; n];
         let mut d = vec![0.0f64; n];
         for i in 1..n - 1 {
@@ -438,26 +478,83 @@ pub fn curve_samples<const N: usize>(points: &[CurvePoint]) -> Vec<f32> {
             m2[i] = d[i] - c[i] * m2[i + 1];
         }
     }
-    (0..N)
-        .map(|k| {
-            let xv = k as f32 / last;
-            if xv <= pts[0].0 {
-                return pts[0].1.clamp(0.0, 1.0);
-            }
-            if xv >= pts[n - 1].0 {
-                return pts[n - 1].1.clamp(0.0, 1.0);
-            }
-            let i = pts.windows(2).position(|w| xv <= w[1].0).unwrap_or(n - 2);
-            let (x0, y0) = (f64::from(pts[i].0), f64::from(pts[i].1));
-            let (x1, y1) = (f64::from(pts[i + 1].0), f64::from(pts[i + 1].1));
-            let h = x1 - x0;
-            let t = f64::from(xv);
-            let a = (x1 - t) / h;
-            let b = (t - x0) / h;
-            let y = a * y0 + b * y1 + ((a * a * a - a) * m2[i] + (b * b * b - b) * m2[i + 1]) * h * h / 6.0;
-            (y as f32).clamp(0.0, 1.0)
+    m2
+}
+
+/// The knots of the natural spline [`spline_samples`] draws through `points`, each with the
+/// spline's slope there: `(input, output, slope)`, sorted, finite and without duplicates. Each
+/// span between knots is a cubic, so a cubic Hermite curve through these knots with these slopes
+/// (a Nuke curve with `s` slopes, measured in Nuke 17) is the same spline. Empty when fewer than
+/// two usable points remain (the identity).
+pub fn spline_knots(points: &[CurvePoint]) -> Vec<(f64, f64, f64)> {
+    let mut pts: Vec<(f32, f32)> = points.iter().filter(|p| p.input.is_finite() && p.output.is_finite()).map(|p| (p.input, p.output)).collect();
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    pts.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+    if pts.len() < 2 {
+        return Vec::new();
+    }
+    let x: Vec<f64> = pts.iter().map(|p| f64::from(p.0)).collect();
+    let y: Vec<f64> = pts.iter().map(|p| f64::from(p.1)).collect();
+    let m2 = natural_second_derivatives(&x, &y);
+    let n = x.len();
+    (0..n)
+        .map(|i| {
+            let slope = if i + 1 < n {
+                let h = x[i + 1] - x[i];
+                (y[i + 1] - y[i]) / h - h * (2.0 * m2[i] + m2[i + 1]) / 6.0
+            } else {
+                let h = x[i] - x[i - 1];
+                (y[i] - y[i - 1]) / h + h * (m2[i - 1] + 2.0 * m2[i]) / 6.0
+            };
+            (x[i], y[i], slope)
         })
         .collect()
+}
+
+/// Curves with a non-default [`photocraft_doc::adjust::CurveLookup`] (RGB space, point curves):
+/// per channel, the master and channel curve composed in the lookup's order, tabulated over
+/// 0..`range` ([`LUT_SIZE`] samples), read with [`lookup_sample`].
+pub struct LookupTables {
+    pub rows: [Vec<f32>; 3],
+    pub range: f32,
+    pub hold: bool,
+}
+
+/// The [`LookupTables`] of `adj`, or None for Photoshop Curves (default lookup, pencil-drawn
+/// curves, CMYK or Lab channels) and every other adjustment.
+pub fn lookup_tables(adj: &Adjustment) -> Option<LookupTables> {
+    let Adjustment::Curves { master, per_channel, space: ToneSpace::Rgb, pencil: false, lookup, .. } = adj else { return None };
+    if lookup.is_default() {
+        return None;
+    }
+    let (range, hold) = (lookup.span(), lookup.hold_ends);
+    let table = |pts: &[CurvePoint]| spline_samples(pts, LUT_SIZE, range, false, !hold);
+    let m = table(master);
+    let row = |pts: &[CurvePoint]| -> Vec<f32> {
+        let c = table(pts);
+        (0..LUT_SIZE)
+            .map(|k| {
+                let x = k as f32 / (LUT_SIZE - 1) as f32 * range;
+                let (first, second) = if lookup.master_first { (&m, &c) } else { (&c, &m) };
+                lookup_sample(second, lookup_sample(first, x, range, hold), range, hold)
+            })
+            .collect()
+    };
+    Some(LookupTables { rows: [row(&per_channel[0]), row(&per_channel[1]), row(&per_channel[2])], range, hold })
+}
+
+/// `table` (sampled over 0..`range`) at `v`: interpolated inside; outside, held at the end
+/// values (`hold`) or continued along the end slopes, measured over [`TONE_SLOPE_SPAN`] steps
+/// like [`lut_extended`].
+pub fn lookup_sample(table: &[f32], v: f32, range: f32, hold: bool) -> f32 {
+    let n = table.len();
+    let t = v / range;
+    if hold || n < 2 || !t.is_finite() || (0.0..=1.0).contains(&t) {
+        return lut(table, t);
+    }
+    let k = TONE_SLOPE_SPAN.min(n - 1);
+    let per_unit = (n - 1) as f32 / (k as f32 * range);
+    if t < 0.0 { table[0] + v * (table[k] - table[0]) * per_unit } else { table[n - 1] + (v - range) * (table[n - 1] - table[n - 1 - k]) * per_unit }
 }
 
 /// A layer-style contour curve: [`curve_lut`], except that the curve bends sharply at corner

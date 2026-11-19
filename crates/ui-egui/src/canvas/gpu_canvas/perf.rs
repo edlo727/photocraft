@@ -59,7 +59,7 @@ pub struct Perf {
     /// The Memory Usage allowance and the GPU Memory preference (bytes) `gpu_budget_mb` was
     /// computed from.
     #[serde(skip)]
-    pub gpu_budget_allowance: (u64, u64),
+    pub gpu_budget_allowance: (u64, u64, u32),
     /// The layer pages the last full refresh needed against the part of the budget they may
     /// hold; when they don't fit, edits that redraw the whole document do it on the CPU.
     pub gpu_layer_fit: Option<LayerFit>,
@@ -236,6 +236,12 @@ impl Perf {
     /// Record a canvas refresh and any GPU measurement that came back with it.
     pub fn record_refresh(&mut self, r: &Refresh) {
         self.record(r.kind, r.px, r.composite_ms, r.upload_ms);
+        self.stage.tiles += r.uploads;
+        self.stage.tiles_ready += r.ready;
+        self.stage.evicted += r.evicted;
+        if r.layer_mb > 0 {
+            self.stage.layer_mb = r.layer_mb;
+        }
         self.record_gpu_attempt(r.gpu_attempt_ms);
         if let Some(t) = r.gpu {
             self.record_gpu(t);

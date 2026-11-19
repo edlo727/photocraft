@@ -80,7 +80,7 @@ pub(super) fn rendering_mode_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>
     ui.horizontal(|ui| {
         ui.label(tl!("Rendering Mode"));
         let pairs =
-            vec![("auto".to_string(), tl!("Automatic (recommended)")), ("gpu".to_string(), tl!("GPU")), ("cpu".to_string(), tl!("CPU / Compatibility"))];
+            vec![("auto".to_string(), tl!("Automatic (recommended)")), ("gpu".to_string(), tl!("GPU (always)")), ("cpu".to_string(), tl!("CPU / Compatibility"))];
         let previous = current.clone();
         crate::widgets::dropdown(ui, "rendering-mode", tl!("Rendering Mode"), &mut current, &pairs, 240.0);
         if current != previous {
@@ -89,10 +89,45 @@ pub(super) fn rendering_mode_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>
         }
     });
     ui.label(tl!("Automatic uses GPU acceleration when available and falls back to CPU rendering on errors."));
+    ui.label(tl!("GPU (always) keeps large 32-bit documents and big brushes on the GPU: layers that don't fit are paged in and out on the GPU instead of redrawing on the CPU, within the Performance Mode's budget. CPU rendering is then used only if the device fails."));
     // Next to the setting, as for System Title Bar (#1677): the renderer is picked when the
     // window opens, so a change otherwise looks like it did nothing (#7939).
     ui.label(RichText::new(tl!("Applies at next launch.")).color(Tokens::get(ui.ctx()).text_dim));
     ui.add_space(8.0);
+}
+
+/// Preferences › Performance › Performance Mode: how much of the graphics card the canvas plans
+/// for ([`prefs::PerformanceMode`]). Unset, it follows Rendering Mode (GPU (always) is Maximum).
+pub(super) fn performance_mode_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>) {
+    let t = Tokens::get(ui.ctx());
+    let mut current = performance_mode_value(obj);
+    ui.horizontal(|ui| {
+        ui.label(tl!("Performance Mode"));
+        let pairs = vec![
+            ("efficient".to_string(), tl!("Efficient (8–16 GB cards)")),
+            ("balanced".to_string(), tl!("Balanced (recommended)")),
+            ("maximum".to_string(), tl!("Maximum (24 GB cards and up)")),
+        ];
+        let previous = current.clone();
+        crate::widgets::dropdown(ui, "performance-mode", tl!("Performance Mode"), &mut current, &pairs, 240.0);
+        if current != previous {
+            obj.insert("performanceMode".into(), json!(current));
+        }
+    });
+    let note = match current.as_str() {
+        "efficient" => tl!("Plans for about half of the graphics card's memory, so large 16- and 32-bit documents, depth changes and other apps on the same card don't run it out of memory. Best for 8–16 GB cards."),
+        "maximum" => tl!("Plans for most of the graphics card's memory (a reserve of at least 2.5 GB stays free) and pages layers that don't fit in and out on the GPU instead of redrawing on the CPU. Best for 24 GB cards and up."),
+        _ => tl!("Plans for about three quarters of the graphics card's memory and redraws on the CPU when a document's layers don't fit."),
+    };
+    ui.label(RichText::new(note).color(t.text_dim));
+    ui.label(RichText::new(tl!("After a GPU out-of-memory error the canvas rebuilds itself with a smaller budget.")).color(t.text_dim));
+    ui.add_space(8.0);
+}
+
+pub(super) fn performance_mode_value(obj: &Map<String, Value>) -> String {
+    obj.get("performanceMode").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| {
+        if rendering_mode_value(obj) == "gpu" { "maximum".into() } else { "balanced".into() }
+    })
 }
 
 pub(super) fn rendering_mode_value(obj: &Map<String, Value>) -> String {
@@ -134,8 +169,6 @@ pub(super) fn read_at_launch(path: &str) -> bool {
     match path {
         // Only Windows and Linux draw their own title bar.
         "interface.systemTitleBar" => cfg!(all(not(target_arch = "wasm32"), not(target_os = "macos"))),
-        // The desktop app decides on the control server before its window opens.
-        "integrations.allowAgentControl" | "integrations.controlPort" => cfg!(not(target_arch = "wasm32")),
         // The WinTab context is opened once, when the window starts.
         "tools.tabletInput" => cfg!(target_os = "windows"),
         _ => false,

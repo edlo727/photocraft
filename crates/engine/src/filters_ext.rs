@@ -698,13 +698,16 @@ fn run_relight(s: &mut Session, p: &Value) -> Result<Value> {
 
 macro_rules! cmd {
     ($id:literal, $label:literal, [$($m:literal),*], $params:literal) => {
+        cmd!($id, $label, [$($m),*], $params, crate::filters::has_filterable_layer)
+    };
+    ($id:literal, $label:literal, [$($m:literal),*], $params:literal, $enabled:path) => {
         CommandSpec {
             id: $id,
             label: $label,
             menu: &[$($m),*],
             shortcut: None,
             params: $params,
-            enabled: crate::filters::has_filterable_layer,
+            enabled: $enabled,
             run: |s, p| crate::filters::run_filter(s, $id, p),
             journal: true,
         }
@@ -719,7 +722,8 @@ pub fn specs() -> Vec<CommandSpec> {
             "filter.pixelate.colorHalftone",
             "Color Halftone…",
             ["Filter", "Pixelate"],
-            r##"{"maxRadius":4..127=8,"channel1":-360..360=108,"channel2":-360..360=162,"channel3":-360..360=90,"channel4":-360..360=45}"##
+            r##"{"maxRadius":4..127=8,"channel1":-360..360=108,"channel2":-360..360=162,"channel3":-360..360=90,"channel4":-360..360=45}"##,
+            crate::filters::has_filterable_layer_in_range
         ),
         cmd!("filter.pixelate.crystallize", "Crystallize…", ["Filter", "Pixelate"], r##"{"cellSize":3..300=10,"seed":u32=0}"##),
         cmd!("filter.pixelate.facet", "Facet", ["Filter", "Pixelate"], "{}"),
@@ -728,7 +732,8 @@ pub fn specs() -> Vec<CommandSpec> {
             "filter.pixelate.mezzotint",
             "Mezzotint…",
             ["Filter", "Pixelate"],
-            r##"{"type":"fineDots|mediumDots|grainyDots|coarseDots|shortLines|mediumLines|longLines|shortStrokes|mediumStrokes|longStrokes","seed":u32=0}"##
+            r##"{"type":"fineDots|mediumDots|grainyDots|coarseDots|shortLines|mediumLines|longLines|shortStrokes|mediumStrokes|longStrokes","seed":u32=0}"##,
+            crate::filters::has_filterable_layer_in_range
         ),
         cmd!("filter.pixelate.pointillize", "Pointillize…", ["Filter", "Pixelate"], r##"{"cellSize":3..300=5,"seed":u32=0,"background":json}"##),
         // Stylize
@@ -751,7 +756,7 @@ pub fn specs() -> Vec<CommandSpec> {
             ["Filter", "Stylize"],
             r##"{"count":1..99=10,"maxOffset":1..99=10,"fill":"background|foreground|inverse|unaltered","seed":u32=0,"foreground":json,"background":json}"##
         ),
-        cmd!("filter.stylize.traceContour", "Trace Contour…", ["Filter", "Stylize"], r##"{"level":0..255=128,"edge":"lower|upper"}"##),
+        cmd!("filter.stylize.traceContour", "Trace Contour…", ["Filter", "Stylize"], r##"{"level":0..255=128,"edge":"lower|upper"}"##, crate::filters::has_filterable_layer_in_range),
         cmd!("filter.stylize.wind", "Wind…", ["Filter", "Stylize"], r##"{"method":"wind|blast|stagger","direction":"fromRight|fromLeft","seed":u32=0}"##),
         // Distort
         cmd!(
@@ -857,7 +862,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         // Other
         cmd!("filter.other.custom", "Custom…", ["Filter", "Other"], r##"{"kernel":int[25],"scale":1..9999=1,"offset":-9999..9999=0}"##),
-        cmd!("filter.other.hsbHsl", "HSB/HSL", ["Filter", "Other"], r##"{"inputMode":"rgb|hsb|hsl","rowOrder":"hsb|hsl|rgb"}"##),
+        cmd!("filter.other.hsbHsl", "HSB/HSL", ["Filter", "Other"], r##"{"inputMode":"rgb|hsb|hsl","rowOrder":"hsb|hsl|rgb"}"##, crate::filters::has_filterable_layer_in_range),
         // Video
         cmd!(
             "filter.video.deInterlace",

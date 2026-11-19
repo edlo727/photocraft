@@ -139,8 +139,14 @@ fn format_follows_depth_and_budget() {
     assert_eq!(g.format_for(SampleType::U8, [4000, 4000]), TextureFormat::Rgba8Unorm);
     assert_eq!(g.format_for(SampleType::U16, [7360, 4912]), TextureFormat::Rgba16Float);
     assert_eq!(g.format_for(SampleType::F32, [7360, 4912]), TextureFormat::Rgba16Float);
-    // Over the budget (a 14000² 16-bit document): 8-bit, so it stays on the GPU.
     if std::env::var_os("PHOTOCRAFT_CANVAS_F16").is_none() {
+        // A 16K × 8K 32-bit plate (134 MP, about 1.3 GB as floats) keeps its float canvas when
+        // the card has room: no fixed pixel cap, so values above 1.0 reach the viewer exposure.
+        g.set_canvas_budget(2 << 30);
+        assert_eq!(g.format_for(SampleType::F32, [16384, 8192]), TextureFormat::Rgba16Float);
+        // Over the budget: 8-bit, so it stays on the GPU.
+        g.set_canvas_budget(1 << 30);
+        assert_eq!(g.format_for(SampleType::F32, [16384, 8192]), TextureFormat::Rgba8Unorm);
         assert_eq!(g.format_for(SampleType::U16, [14000, 14000]), TextureFormat::Rgba8Unorm);
     }
 }

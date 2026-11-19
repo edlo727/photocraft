@@ -1,13 +1,13 @@
 //! [`Document`] → PSD/PSB.
 
-use photocraft_color::{ColorMode, PixelFormat, SampleType};
-use photocraft_doc::{Document, Layer, LayerContent, LayerMask, SmartContentsId};
-use photocraft_psd::file::{GlobalLayerMask, LayerInfoPlacement};
-use photocraft_psd::layer::{BlendingRanges, ChannelData, LayerFlags, LayerInfo, LayerMask as PsdMask, MaskData, MaskParameters};
-use photocraft_psd::resources::{ImageResource, ResolutionInfo, ids, version_info_resource};
-use photocraft_psd::{
+use craft_psd::file::{GlobalLayerMask, LayerInfoPlacement};
+use craft_psd::layer::{BlendingRanges, ChannelData, LayerFlags, LayerInfo, LayerMask as PsdMask, MaskData, MaskParameters};
+use craft_psd::resources::{ImageResource, ResolutionInfo, ids, version_info_resource};
+use craft_psd::{
     BlendMode as PsdBlend, ColorMode as PsdMode, Compression, Header, ImageData, LayerRecord, PsdFile, Rect as PsdRect, SectionType, TaggedBlock, Version,
 };
+use photocraft_color::{ColorMode, PixelFormat, SampleType};
+use photocraft_doc::{Document, Layer, LayerContent, LayerMask, SmartContentsId};
 use photocraft_raster::{Interrupt, Surface};
 
 use crate::adjust_map;
@@ -495,6 +495,14 @@ impl Ex<'_> {
                     if w.is_empty() {
                         self.warnings.push(format!("layer \"{}\": {} adjustment is not yet written to PSD", l.name, a.label()));
                     }
+                    // Photoshop's Curves are 0..1 point curves, channels first: a Nuke
+                    // ColorLookup-style range, held ends or master-first order don't carry over.
+                    if matches!(a, photocraft_doc::Adjustment::Curves { lookup, .. } if !lookup.is_default()) {
+                        self.warnings.push(format!(
+                            "layer \"{}\": Curves range, held ends and master-first order are not saved to PSD (points above 1.0 are clipped); save as .pcraft to keep them",
+                            l.name
+                        ));
+                    }
                     // Photoshop's `clrL` descriptor has no interpolation setting, so the
                     // reopened layer renders trilinear.
                     if matches!(a, photocraft_doc::Adjustment::ColorLookup { tetrahedral: true, .. }) {
@@ -628,7 +636,7 @@ impl Ex<'_> {
     fn layer_xmp_block(&mut self, l: &Layer, raw: &mut Vec<([u8; 4], Vec<u8>)>) {
         let Some(xmp) = l.xmp.as_deref() else { return };
         let pos = raw.iter().position(|(k, _)| k == b"shmd");
-        match photocraft_psd::metadata::put_layer_xmp(pos.map(|i| raw[i].1.as_slice()), xmp) {
+        match craft_psd::metadata::put_layer_xmp(pos.map(|i| raw[i].1.as_slice()), xmp) {
             Ok(data) => match pos {
                 Some(i) => raw[i].1 = data,
                 None => raw.push((*b"shmd", data)),

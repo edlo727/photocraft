@@ -155,6 +155,32 @@ fn gpu_budgets_fit_a_discrete_gpus_own_memory() {
     assert_eq!(canvas_budget(ram, Some(G)), MIN_GPU_BUDGET);
 }
 
+/// Performance Mode › Maximum (and Rendering Mode › GPU (always)): the budgets plan for the card
+/// less a reserve of at least 2.5 GB, not Memory Usage or a quarter of RAM, and never the whole
+/// card (a 16 GB card ran out of memory at 5/8 + 3/8); a shared-memory adapter gets half of RAM
+/// in all. A layer fit is forced to fit.
+#[test]
+fn forced_gpu_budgets_use_the_card() {
+    const G: u64 = 1 << 30;
+    let (ram, vram) = (Some(16 * G), Some(16 * G));
+    assert_eq!(vram_reserve(16 * G), 5 * G / 2);
+    assert_eq!(vram_reserve(24 * G), 3 * G);
+    assert_eq!(vram_reserve(4 * G), 2 * G, "at most half a small card");
+    let total = forced_memory_budget(ram, vram, 0) + forced_canvas_budget(ram, vram);
+    assert!(total <= 16 * G - 5 * G / 2, "the reserve stays free: {total}");
+    assert!(total >= 13 * G, "most of the card: {total}");
+    assert!(forced_memory_budget(ram, vram, 0) > memory_budget(8 * G, 0, ram, vram, 0));
+    let big = Some(24 * G);
+    assert!(forced_memory_budget(ram, big, 0) + forced_canvas_budget(ram, big) <= 21 * G);
+    assert!(forced_memory_budget(ram, big, 0) >= 13 * G, "24 GB cards take most of it");
+    assert_eq!(forced_memory_budget(ram, None, 0) + forced_canvas_budget(ram, None), 8 * G, "half of RAM in all");
+    assert_eq!(forced_memory_budget(ram, vram, 6 * G), 6 * G, "GPU Memory still sets it");
+    assert_eq!(forced_memory_budget(ram, vram, 64 * G), 27 * G / 2, "up to the card less its reserve");
+    let over = LayerFit { doc: 1, needed: 9 * G, budget: 2 * G, forced: false };
+    assert!(!over.fits());
+    assert!(LayerFit { forced: true, ..over }.fits());
+}
+
 /// DXGI reports each adapter's dedicated memory, found by the vendor and device ids wgpu gives.
 #[cfg(windows)]
 #[test]
@@ -349,8 +375,8 @@ fn projection_lod_is_sharp_off_centre_and_only_blurs_at_the_poles() {
 
 #[test]
 fn view_uniform_packs_rotation() {
-    assert_eq!(VIEW_FLOATS, 40);
-    assert_eq!(VIEW_UNIFORM_SIZE, 160);
+    assert_eq!(VIEW_FLOATS, 44);
+    assert_eq!(VIEW_UNIFORM_SIZE, 176);
     assert_eq!(VIEW_FLOATS * 4, VIEW_UNIFORM_SIZE as usize);
     assert!(gpu_view_ok(false, 0.0, 1.0));
     assert!(gpu_view_ok(false, 45.0_f32.to_radians(), 1.0));
@@ -409,7 +435,9 @@ fn half_floats() {
 #[test]
 fn shaders_validate() {
     use wgpu::naga;
-    for (name, src) in [("canvas", CANVAS_WGSL), ("mip", MIP_WGSL), ("encode", ENCODE_WGSL)] {
+    for (name, src) in [("canvas", CANVAS_WGSL), ("mip", MIP_WGSL), ("encode", ENCODE_WGSL), ("stroke dabs", super::stroke_overlay::DAB_WGSL),
+        ("exact stroke dabs", super::stroke_overlay::EXACT_DAB_WGSL),
+    ] {
         let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
             .validate(&module)
@@ -417,6 +445,64 @@ fn shaders_validate() {
     }
 }
 
+/// Performance Mode: Efficient leaves half the card free, Balanced is the automatic budget, and
+/// Maximum the most; each out-of-memory error takes a quarter off, down to a quarter.
+#[test]
+fn performance_modes_scale_the_budgets() {
+    use photocraft_engine::prefs::PerformanceMode as M;
+    const G: u64 = 1 << 30;
+    let (ram, vram) = (Some(32 * G), Some(16 * G));
+    let b = |m, oom| profile_budgets(m, 64 * G, 0, ram, vram, 0, oom);
+    let (e, n, x) = (b(M::Efficient, 0), b(M::Balanced, 0), b(M::Maximum, 0));
+    assert_eq!(e, (4 * G, 4 * G));
+    assert_eq!(e, (efficient_memory_budget(64 * G, 0, ram, vram, 0), efficient_canvas_budget(ram, vram)));
+    assert_eq!(n, (memory_budget(64 * G, 0, ram, vram, 0), canvas_budget(ram, vram)));
+    assert!(e.0 + e.1 < n.0 + n.1 && n.0 + n.1 < x.0 + x.1);
+    assert!(x.0 + x.1 <= 16 * G - vram_reserve(16 * G));
+    assert_eq!(b(M::Maximum, 1).0, x.0 / 4 * 3);
+    assert_eq!(b(M::Maximum, 9).0, x.0 / 4);
+    assert_eq!(profile_budgets(M::Efficient, 0, 0, ram, Some(G), 0, 3), (MIN_GPU_BUDGET, MIN_GPU_BUDGET));
+}
+
+/// Performance Mode raises the lower-stack cache cap: Efficient keeps the old 512 MiB.
+#[test]
+fn performance_modes_raise_the_composite_cache() {
+    use photocraft_engine::prefs::PerformanceMode as M;
+    assert_eq!(composite_cache_cap(M::Efficient), 512 << 20);
+    assert!(composite_cache_cap(M::Efficient) < composite_cache_cap(M::Balanced));
+    assert!(composite_cache_cap(M::Balanced) < composite_cache_cap(M::Maximum));
+}
+
+/// Large Brush Mode's coverage texture: full resolution up to 8192 px a side, scaled down to fit
+/// beyond it or the device's limit; paint is sRGB-encoded for linear documents as the display
+/// texture stores them.
+#[test]
+fn stroke_overlay_scale_and_encoding() {
+    use super::stroke_overlay::{coverage_scale, srgb_encode};
+    assert_eq!(coverage_scale(4000, 3000, 16384, 1.0), 1.0);
+    assert_eq!(coverage_scale(16384, 8192, 16384, 1.0), 0.5);
+    assert_eq!(coverage_scale(8000, 8000, 4096, 2.0), 4096.0 / 8000.0);
+    assert_eq!(coverage_scale(16384, 8192, 16384, 0.1), 0.125, "screen resolution, a quarter to spare");
+    assert_eq!(coverage_scale(4000, 3000, 16384, f32::NAN), 1.0);
+    assert!((srgb_encode(0.18) - 0.4613).abs() < 1e-3);
+    assert_eq!(srgb_encode(-1.0), 0.0);
+    assert_eq!(srgb_encode(f32::NAN), 0.0);
+}
+
+/// Large Brush Mode's coverage memory fits the card: at most slots × side² × 4 bytes.
+#[test]
+fn large_brush_buffers_fit_the_card() {
+    use super::stroke_overlay::card_tier;
+    let worst = |v: Option<u64>| {
+        let (slots, side) = card_tier(v);
+        slots as u64 * u64::from(side) * u64::from(side) * 4
+    };
+    assert_eq!(card_tier(Some(24 << 30)), (4, 8192));
+    assert_eq!(card_tier(Some(16 << 30)), (3, 6144));
+    assert_eq!(card_tier(Some(8 << 30)), (2, 4096));
+    assert_eq!(card_tier(None), (2, 4096), "unknown or shared memory: the small tier");
+    assert!(worst(Some(8 << 30)) <= 128 << 20 && worst(Some(16 << 30)) <= 460 << 20);
+}
 #[test]
 fn failed_gpu_attempt_is_recorded_separately_and_counted_in_frame_time() {
     let mut perf = Perf::default();

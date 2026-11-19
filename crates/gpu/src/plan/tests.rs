@@ -377,6 +377,29 @@ fn advanced_blending_falls_back_to_the_cpu() {
     assert!(plan(&d).is_err(), "knockout inside a group");
 }
 
+/// A Large Brush Mode stroke painting an empty layer on the GPU: the layer has no pixels, so
+/// it isn't planned at all, until the stroke's rect is given (`plan_live`); then it is, over
+/// that rect.
+#[test]
+fn a_live_stroke_plans_its_empty_layer_where_it_paints() {
+    let mut doc = Document::new("live", Size::new(4096, 4096), ColorMode::Rgb, SampleType::F32);
+    let mut base = Layer::raster("base", photocraft_color::PixelFormat::RGBA32F);
+    if let Some(s) = base.surface_mut() {
+        s.fill_rect(Rect::new(0, 0, 4096, 4096), &[0.5, 0.5, 0.5, 1.0]);
+    }
+    let empty = Layer::raster("empty", photocraft_color::PixelFormat::RGBA32F);
+    let id = empty.id;
+    doc.layers = vec![base, empty];
+    let uses = |p: &Plan<'_>| p.passes.iter().filter(|p| p.tex.as_ref().is_some_and(|t| t.layer == id)).count();
+    assert_eq!(uses(&plan(&doc).expect("plans")), 0, "an empty layer costs nothing");
+    let at = Rect::new(100, 200, 900, 700);
+    let live = plan_live(&doc, &[(id, at)]).expect("plans");
+    assert!(uses(&live) > 0, "the live layer is planned");
+    assert!(
+        live.passes.iter().filter(|p| p.tex.as_ref().is_some_and(|t| t.layer == id)).all(|p| p.clip.is_none_or(|c| c.contains_rect(&at))),
+        "over the stroke's rect"
+    );
+}
 /// A chunk-sized texture per live slot: nesting isolated groups keeps every ancestor's slot
 /// live, so past a depth the plan is refused and the CPU composites instead.
 #[test]
@@ -430,7 +453,7 @@ fn row_cached_adjustments() -> Vec<Adjustment> {
     let pts = vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 0.4, output: 0.55 }, CurvePoint { input: 1.0, output: 1.0 }];
     vec![
         Adjustment::Levels { master: ch(1.3), per_channel: [ch(0.8), ch(1.0), ch(1.6)], space: ToneSpace::Rgb, black: Default::default() },
-        Adjustment::Curves { master: pts.clone(), per_channel: [pts.clone(), vec![], pts], space: ToneSpace::Rgb, black: vec![], pencil: false },
+        Adjustment::Curves { master: pts.clone(), per_channel: [pts.clone(), vec![], pts], space: ToneSpace::Rgb, black: vec![], pencil: false, lookup: Default::default() },
         Adjustment::HueSaturation { hue: 0.0, saturation: 10.0, lightness: 0.0, colorize: false, ranges },
         Adjustment::ColorBalance { shadows: [10.0, 0.0, -5.0], midtones: [0.0, 5.0, 0.0], highlights: [0.0, 0.0, 10.0], preserve_luminosity: true },
     ]
@@ -496,13 +519,13 @@ fn row_keys_cover_exactly_what_the_rows_are_built_from() {
     assert_ne!(key(&black(0.0), SampleType::U8), key(&black(-0.0), SampleType::U8));
     // Every field the builders read changes the key.
     let Adjustment::Curves { master, per_channel, black, .. } = &curves else { panic!("Curves") };
-    let pencil = Adjustment::Curves { master: master.clone(), per_channel: per_channel.clone(), space: ToneSpace::Rgb, black: black.clone(), pencil: true };
-    let lab = Adjustment::Curves { master: master.clone(), per_channel: per_channel.clone(), space: ToneSpace::Lab, black: black.clone(), pencil: false };
+    let pencil = Adjustment::Curves { master: master.clone(), per_channel: per_channel.clone(), space: ToneSpace::Rgb, black: black.clone(), pencil: true, lookup: Default::default() };
+    let lab = Adjustment::Curves { master: master.clone(), per_channel: per_channel.clone(), space: ToneSpace::Lab, black: black.clone(), pencil: false, lookup: Default::default() };
     assert_ne!(key(&curves, SampleType::U8), key(&pencil, SampleType::U8));
     assert_ne!(key(&curves, SampleType::U8), key(&lab, SampleType::U8));
     let mut nudged = master.clone();
     nudged[1].output += 0.01;
-    let point = Adjustment::Curves { master: nudged, per_channel: per_channel.clone(), space: ToneSpace::Rgb, black: black.clone(), pencil: false };
+    let point = Adjustment::Curves { master: nudged, per_channel: per_channel.clone(), space: ToneSpace::Rgb, black: black.clone(), pencil: false, lookup: Default::default() };
     assert_ne!(key(&curves, SampleType::U8), key(&point, SampleType::U8), "a curve point's value");
     let Adjustment::ColorBalance { shadows, midtones, highlights, .. } = balance.clone() else { panic!("Color Balance") };
     let plain = Adjustment::ColorBalance { shadows, midtones, highlights, preserve_luminosity: false };
@@ -533,8 +556,7 @@ fn planning_reads_cached_rows_instead_of_rebuilding_them() {
             per_channel: Default::default(),
             space: ToneSpace::Rgb,
             black: vec![],
-            pencil: false,
-        },
+            pencil: false, lookup: Default::default() },
         Adjustment::HueSaturation { hue: 0.0, saturation: 0.0, lightness: 0.0, colorize: false, ranges },
         Adjustment::ColorBalance { shadows: [17.0, 0.0, 0.0], midtones: [0.0; 3], highlights: [0.0; 3], preserve_luminosity: true },
     ];

@@ -1,6 +1,6 @@
 use super::batch::{batch_kernel, batch_op_words, op_words, submit_batch};
 use super::consts::{FLUSH_OPS, MAP32, STRIDE};
-use super::convert::{convert_tile, convert_tiles, keep_overlap, put_tiles, words};
+use super::convert::{convert_tile, convert_tiles_ready, keep_overlap, put_tiles, words};
 use super::kit::{Bound, FrameRes, texture_group, uniform_group};
 use super::paging::cell_rect;
 use super::textures::{CachedPattern, Cell, ChunkOut, ResKey, Resident, ResidentRef, Stats, Tex, TexKind};
@@ -72,6 +72,14 @@ impl Compositor {
                         (keys.len() - 1, r)
                     },
                 );
+            // A live Large Brush Mode stroke's layer: its page with the stroke laid in.
+            if let Some((k, _)) = tex
+                && self.live.is_some()
+                && let Some(&key) = keys.get(k)
+                && key.1 == Role::Content
+            {
+                self.paint_resident(device, queue, encoder, key);
+            }
             let mask = p
                 .mask
                 .as_ref()
@@ -120,8 +128,11 @@ impl Compositor {
             return;
         }
         // Chunks may hold different checkpoints: bind from the lowest one any of them resumes at.
+        let limit = self.live_limit.unwrap_or(usize::MAX);
         let first_pass = checkpoint
-            .and_then(|_| chunks.iter().map(|c| self.prefix.restore_point(*c).map(|r| r.pass_end)).try_fold(usize::MAX, |m, p| Some(m.min(p?))))
+            .and_then(|_| {
+                chunks.iter().map(|c| self.prefix.restore_point(*c).map(|r| r.pass_end).filter(|&e| e <= limit)).try_fold(usize::MAX, |m, p| Some(m.min(p?)))
+            })
             .unwrap_or(0);
         let bound = self.bind_cell(device, queue, encoder, doc, plan, paged, cell, fr, first_pass, stats);
         // A page couldn't be created: draw nothing with the pages missing (the caller ends the refresh).
@@ -183,7 +194,8 @@ impl Compositor {
 
         // Per-pass texture bind groups (chunk-independent: pool slots are reused per chunk).
         let dummy = &self.kit.dummy;
-        let resident_views: Vec<&wgpu::TextureView> = bound.keys.iter().map(|k| self.residents.get(k).map_or(dummy, |r| &r.view)).collect();
+        let resident_views: Vec<&wgpu::TextureView> =
+            bound.keys.iter().map(|k| self.residents.get(k).map_or(dummy, |r| r.painted.as_ref().map_or(&r.view, |p| &p.view))).collect();
         let mut bg1 = Vec::with_capacity(plan.passes.len());
         for (i, p) in plan.passes.iter().enumerate() {
             if i < first_pass || p.kernel.entry().is_none() {
@@ -209,7 +221,7 @@ impl Compositor {
 
         for (ci, c) in chunks.iter().enumerate() {
             let mut resume = 0;
-            if let Some(cp) = checkpoint.and_then(|_| self.prefix.restore_point(*c))
+            if let Some(cp) = checkpoint.and_then(|_| self.prefix.restore_point(*c)).filter(|cp| cp.pass_end <= limit)
                 && let Some((dst, _)) = self.pool.get(cp.slot as usize)
                 && self.prefix.copy_out(encoder, *c, dst)
             {
@@ -346,6 +358,29 @@ impl Compositor {
         region: Rect,
         stats: &mut Stats,
     ) -> Option<(ResKey, [i32; 4])> {
+        // Timed for the stroke trace: converting and staging tiles is most of a big edit's refresh.
+        #[cfg(not(target_arch = "wasm32"))]
+        let t0 = std::time::Instant::now();
+        let r = self.sync_tiles(device, queue, encoder, doc, key, surface, region, stats);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            stats.sync_ms += t0.elapsed().as_secs_f64() * 1000.0;
+        }
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sync_tiles(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        doc: DocId,
+        key: ResKey,
+        surface: &Surface,
+        region: Rect,
+        stats: &mut Stats,
+    ) -> Option<(ResKey, [i32; 4])> {
         // An earlier page of this cell didn't fit: the refresh ends after the cell anyway.
         if region.is_empty() || self.layer_alloc.is_some() {
             return None;
@@ -388,6 +423,8 @@ impl Compositor {
                 stamp: 0,
                 cmyk,
                 ordered: false,
+                painted: None,
+                dirty: Rect::EMPTY,
             };
             // Only the region moved (painting past a layer's tiles grows it): keep the texels the
             // old texture already holds instead of converting and uploading every tile again.
@@ -437,7 +474,7 @@ impl Compositor {
                     self.staged += put_tiles(device, queue, encoder, &r, &missing, &bytes);
                 }
                 let staged = &mut self.staged;
-                convert_tiles(surface, present, kind, |t, cs, bytes| {
+                stats.tiles_ready += convert_tiles_ready(surface, present, kind, |t, cs, bytes| {
                     *staged += put_tiles(device, queue, encoder, &r, cs, bytes);
                     for &c in cs {
                         stats.tiles_uploaded += 1;
@@ -457,11 +494,17 @@ impl Compositor {
         r.doc = doc;
         let mut changed = Vec::new();
         let mut gone = Vec::new();
+        let only = self.upload_region;
         for c in region.tiles() {
             match surface.tile(c) {
                 Some(t) => {
                     if !r.tiles.get(&c).is_some_and(|old| Arc::ptr_eq(old, t)) {
-                        changed.push((c, t.clone()));
+                        if only.is_some_and(|o| o.intersect(&c.rect()).is_empty()) {
+                            // Kept as it was: the stale texels stay recorded as the old tile.
+                            stats.tiles_deferred += 1;
+                        } else {
+                            changed.push((c, t.clone()));
+                        }
                     }
                 }
                 None => {
@@ -470,6 +513,9 @@ impl Compositor {
                     }
                 }
             }
+        }
+        if r.painted.is_some() {
+            r.dirty = changed.iter().map(|(c, _)| c.rect()).chain(gone.iter().map(|c| c.rect())).fold(r.dirty, |d, t| d.union(&t));
         }
         if !gone.is_empty() {
             // A tile that went away reads as the default pixel again.
@@ -481,7 +527,7 @@ impl Compositor {
             self.staged += put_tiles(device, queue, encoder, r, &gone, &bytes);
         }
         let staged = &mut self.staged;
-        convert_tiles(surface, changed, kind, |t, cs, bytes| {
+        stats.tiles_ready += convert_tiles_ready(surface, changed, kind, |t, cs, bytes| {
             *staged += put_tiles(device, queue, encoder, r, cs, bytes);
             for &c in cs {
                 stats.tiles_uploaded += 1;

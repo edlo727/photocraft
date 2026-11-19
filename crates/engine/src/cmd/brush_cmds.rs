@@ -12,7 +12,7 @@ use photocraft_paint::mixer::{MixerSettings, MixerState};
 use photocraft_paint::replace::{Limits, ReplaceMode, ReplaceSettings, Sampling, apply_color_replacement, color_replacement_effect};
 use photocraft_paint::tile::PREVIEW_SIDE;
 use photocraft_paint::{
-    BrushPreset, BrushSettings, GrayTile, Pattern, PresetCaptures, StoredTile, Stroke, StrokePoint, StrokeRenderer, TipShape, render_stroke,
+    BrushPreset, BrushSettings, GrayTile, Pattern, PresetCaptures, StoredTile, Stroke, StrokePoint, StrokeRenderer, TipShape, render_stroke_clipped,
 };
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
@@ -88,6 +88,12 @@ pub(crate) fn check_coords(pts: &[StrokePoint], cmd: &str) -> Result<()> {
         return Err(bad(cmd, format!("point coordinates must be finite and within ±{MAX_COORD}")));
     }
     Ok(())
+}
+
+/// Where a stroke can change pixels: the canvas plus any pixels the layer already holds past its
+/// edge (a moved layer keeps them, #5067). Dabs that reach neither are not rasterized.
+fn paintable_area(canvas: Rect, surf: &Surface) -> Rect {
+    canvas.union(&surf.tile_bounds())
 }
 
 /// Deep-merge `patch` into `base` (objects merge key by key; anything else replaces).
@@ -224,6 +230,17 @@ pub fn resolve_brush(s: &Session, p: &Value, cmd: &str) -> Result<BrushSettings>
         b.smoothing.amount = v.clamp(0.0, 1.0);
     }
     b.color = color(p.get("color"), s.tools.foreground);
+    // HDR paint on a 32-bit document: the colour times 2^intensity (stops), as Photoshop's
+    // 32-bit Color Picker's Intensity and Krita's scene-linear painting allow: values above 1.0
+    // for glows and light passes. Other depths can't hold them and ignore it.
+    if let Some(ev) = p.get("intensity").and_then(Value::as_f64).filter(|v| v.is_finite() && *v != 0.0)
+        && s.active().is_some_and(|st| st.doc.depth == photocraft_color::SampleType::F32)
+    {
+        let k = 2f32.powf(ev.clamp(-20.0, 20.0) as f32);
+        for c in &mut b.color[..3] {
+            *c *= k;
+        }
+    }
     b.color_cmyk = s.tools.picked_cmyk([b.color[0], b.color[1], b.color[2]]).map(|k| ([b.color[0], b.color[1], b.color[2]], k));
     b.background = s.tools.background;
     b.erase = flag(p, "erase", false);
@@ -291,7 +308,9 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
             }
             let sel = doc.selection.clone();
             let table = crate::mode_cmds::paint_color_table(doc, p);
+            let canvas = doc.bounds();
             let (surf, lock) = crate::channel_cmds::target_surface(doc, id, p)?;
+            let clip = paintable_area(canvas, surf);
             let mut brush = brush;
             erase_locked(&mut brush, lock, bg);
             if auto_erase {
@@ -307,23 +326,23 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
                     .iter()
                     .filter(|p| crate::symmetry_cmds::SymmetryAxis::has_distinct_mirror(&pts, p))
                     .map(|p| {
-                        let mut renderer = StrokeRenderer::new(&brush, Some(surf.format()), zoom);
+                        let mut renderer = StrokeRenderer::new(&brush, Some(surf.format()), zoom).with_clip(clip);
                         renderer.push(p);
                         renderer.finish();
                         renderer
                     })
                     .collect();
                 if copies.is_empty() {
-                    render_stroke(surf, &brush, &pts, sel.as_ref(), lock, zoom)
+                    render_stroke_clipped(surf, &brush, &pts, sel.as_ref(), lock, zoom, Some(clip))
                 } else {
                     let pre = surf.clone();
-                    let mut original = StrokeRenderer::new(&brush, Some(surf.format()), zoom);
+                    let mut original = StrokeRenderer::new(&brush, Some(surf.format()), zoom).with_clip(clip);
                     original.push(&pts);
                     original.finish();
                     original.composite_union_many(&copies, &pre, surf, sel.as_ref(), lock)
                 }
             } else {
-                render_stroke(surf, &brush, &pts, sel.as_ref(), lock, zoom)
+                render_stroke_clipped(surf, &brush, &pts, sel.as_ref(), lock, zoom, Some(clip))
             };
             if let (Some(table), Some(pre)) = (&table, &unpainted) {
                 crate::mode_cmds::keep_in_color_table(table, pre, surf, damage);
@@ -341,12 +360,23 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
 /// Pencil Auto Erase: a stroke that starts on a pixel of the foreground colour paints the
 /// background colour instead (Photoshop). The match is exact (#11966): the foreground as the
 /// layer would store it (its mode and depth) against the pixel, its alpha aside, so one level
-/// off paints the foreground.
+/// off paints the foreground. In a CMYK layer a foreground picked as CMYK is probed as the inks
+/// the stroke paints (#13060), not as its RGB stand-in converted back.
 fn apply_auto_erase(brush: &mut BrushSettings, surf: &Surface, start: Option<&StrokePoint>, fg: [f32; 4], bg: [f32; 4]) {
     let Some(p0) = start else { return };
     let c = surf.rgba(p0.x.floor() as i32, p0.y.floor() as i32);
-    let mut probe = Surface::new(surf.format());
-    probe.write_pixel(0, 0, &photocraft_raster::from_rgba(&surf.format(), [fg[0], fg[1], fg[2], 1.0]));
+    let format = surf.format();
+    let mut px = photocraft_raster::from_rgba(&format, [fg[0], fg[1], fg[2], 1.0]);
+    // The renderer's condition for painting the picked inks (`StrokeRenderer::composite`), keyed
+    // on the foreground being probed.
+    if let (photocraft_color::ColorMode::Cmyk, Some((rgb, inks))) = (format.mode, brush.color_cmyk)
+        && rgb == [fg[0], fg[1], fg[2]]
+        && let Some(channels) = px.get_mut(..4)
+    {
+        channels.copy_from_slice(&inks);
+    }
+    let mut probe = Surface::new(format);
+    probe.write_pixel(0, 0, &px);
     let stored = probe.rgba(0, 0);
     // Far below one 8-bit level: only the float noise of the conversion.
     if c[3] > 0.0 && (0..3).all(|i| (c[i] - stored[i]).abs() < 1e-5) {
@@ -560,6 +590,8 @@ pub struct LiveStroke {
     points: Vec<StrokePoint>,
     /// The document and revision the stroke started on.
     base: (photocraft_doc::DocId, u64),
+    /// The document itself (see [`LiveCommit::base_doc`]).
+    base_doc: std::sync::Weak<photocraft_doc::Document>,
 }
 
 /// A finished live stroke offered to its own commit ([`Session::offer_live_stroke`],
@@ -571,6 +603,10 @@ pub struct LiveCommit {
     pub(crate) mixer: Option<(MixerState, MixerState)>,
     pub(crate) cmd: String,
     pub(crate) base: (photocraft_doc::DocId, u64),
+    /// The document the stroke started on: when only the revision moved since (selecting a
+    /// layer bumps it without touching the document), the stroke still matches. Empty: the
+    /// revision alone decides.
+    pub(crate) base_doc: std::sync::Weak<photocraft_doc::Document>,
     pub(crate) params: Value,
     /// The Brush's and Pencil's seed; the retouching tools have none.
     pub(crate) seed: Option<u64>,
@@ -592,8 +628,11 @@ impl LiveCommit {
 
     pub(crate) fn matches(&self, s: &Session, cmd: &str, p: &Value, pts: &[StrokePoint]) -> bool {
         let base = s.active().map(|st| (st.doc.id, st.revision));
+        // The same document, though the revision moved on without changing it (a layer
+        // selected while Large Brush Mode's write ran): its pixels still fit.
+        let same_doc = s.active().is_some_and(|st| st.doc.id == self.base.0 && self.base_doc.upgrade().is_some_and(|d| std::sync::Arc::ptr_eq(&d, &st.doc)));
         self.cmd == cmd
-            && base == Some(self.base)
+            && (base == Some(self.base) || same_doc)
             && p.get("seed").and_then(Value::as_u64) == self.seed
             && self.points == pts
             && Self::settings(p) == Self::settings(&self.params)
@@ -609,6 +648,16 @@ impl LiveStroke {
     /// Start a live stroke of `cmd`: `paint.stroke` (the Brush and Eraser) or `paint.pencil`.
     /// Committing `cmd` with the same params and `"seed": live.seed` gives the same pixels.
     pub fn begin_with(s: &Session, cmd: &str, p: &Value) -> Result<Self> {
+        let (mut live, pts) = Self::prepare_with(s, cmd, p)?;
+        live.push(&pts)?;
+        Ok(live)
+    }
+
+    /// [`begin_with`](Self::begin_with) without rendering: the stroke set up on the session,
+    /// and the points of `p` it would render. [`push`](Self::push) them, on another thread if
+    /// need be (Large Brush Mode renders a released stroke off the UI thread), and the result
+    /// is what `begin_with` gives.
+    pub fn prepare_with(s: &Session, cmd: &str, p: &Value) -> Result<(Self, Vec<StrokePoint>)> {
         let captured = crate::channel_cmds::inject_target(s, cmd, p.clone());
         let p = &captured;
         has_paintable(s).map_err(EngineError::Other)?;
@@ -623,22 +672,26 @@ impl LiveStroke {
         let (layer, mut brush, zoom) = stroke_target(s, p, brush)?;
         let st = s.active().ok_or(EngineError::NoDocument)?;
         let base = (st.doc.id, st.revision);
+        let base_doc = std::sync::Arc::downgrade(&st.doc);
         let mut doc = (*st.doc).clone();
         let sel = doc.selection.clone();
         let table = crate::mode_cmds::paint_color_table(&doc, p);
+        let canvas = doc.bounds();
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, layer, p)?;
+        let clip = paintable_area(canvas, surf);
         let bg = crate::color_cmds::swatch_in_doc(s, s.tools.background);
         erase_locked(&mut brush, lock, bg);
         if pencil && flag(p, "autoErase", false) {
             let fg = table.as_ref().map_or(fg, |t| crate::mode_cmds::table_color(t, fg));
             apply_auto_erase(&mut brush, surf, pts.first(), fg, s.tools.background);
         }
-        let renderer = StrokeRenderer::new(&brush, Some(surf.format()), zoom);
+        let renderer = StrokeRenderer::new(&brush, Some(surf.format()), zoom).with_clip(clip);
         let symmetry = s.active().and_then(|st| st.symmetry.clone());
-        let mirrors: Vec<_> = (0..symmetry.as_ref().map_or(0, |s| s.mirror_count())).map(|_| StrokeRenderer::new(&brush, Some(surf.format()), zoom)).collect();
+        let mirrors: Vec<_> =
+            (0..symmetry.as_ref().map_or(0, |s| s.mirror_count())).map(|_| StrokeRenderer::new(&brush, Some(surf.format()), zoom).with_clip(clip)).collect();
         let mirror_distinct = vec![false; mirrors.len()];
         let pre = surf.clone();
-        let mut live = Self {
+        let live = Self {
             doc: std::sync::Arc::new(doc),
             seed,
             cmd: cmd.into(),
@@ -657,9 +710,9 @@ impl LiveStroke {
             cmyk: doc_cmyk_space(s),
             points: Vec::new(),
             base,
+            base_doc,
         };
-        live.push(&pts)?;
-        Ok(live)
+        Ok((live, pts))
     }
 
     /// The stroke as its commit would take it over (see [`LiveCommit`]).
@@ -670,12 +723,21 @@ impl LiveStroke {
             mixer: None,
             cmd: self.cmd,
             base: self.base,
+            base_doc: self.base_doc,
             params: self.params,
             seed: Some(self.seed),
             points: self.points,
             surface: surf.clone(),
             bounds,
         })
+    }
+
+    /// The surface the stroke paints as painted so far, what it held before the stroke, and
+    /// everything the stroke touched. Committing takes this surface's tiles as they are, so
+    /// Large Brush Mode's commit thread converts the changed ones for the canvas ahead of time.
+    pub fn painted(&self) -> Option<(&Surface, &Surface, Rect)> {
+        let surf = crate::channel_cmds::read_target_surface(&self.doc, self.layer, &self.params).ok()?;
+        Some((surf, &self.pre, self.bounds()))
     }
 
     /// Everything the stroke has touched so far.
@@ -724,7 +786,7 @@ impl LiveStroke {
                     None => {
                         // Leaving the single-pass preview: take its smoothing tail back first.
                         if !old.is_empty() {
-                            surf.write_region(old, &self.pre.read_region(old));
+                            surf.copy_region_from(&self.pre, old);
                         }
                         (photocraft_paint::UnionLive::default(), true, old)
                     }
@@ -768,6 +830,7 @@ fn pct(p: &Value, k: &str, d: f32) -> f32 {
     num(p, k).unwrap_or(d).clamp(0.0, 100.0) / 100.0
 }
 
+pub mod gpu_preview;
 pub mod mixer_live;
 fn mixer_brush(s: &mut Session, p: &Value) -> Result<Value> {
     mixer_live::run(s, p)

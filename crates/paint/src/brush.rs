@@ -39,6 +39,10 @@ pub enum Control {
     InitialDirection,
     /// Angle only: the current stroke direction.
     Direction,
+    /// How fast the pen moves, smoothed over a few dabs: slow strokes at full value, fast ones
+    /// down towards the minimum (a quick flick tapers). MyPaint and Krita drive dabs by speed;
+    /// Photoshop has no such control. The response curve shapes (or turns round) it.
+    PenSpeed,
 }
 
 /// One dynamic parameter: random jitter plus a controller with a floor.

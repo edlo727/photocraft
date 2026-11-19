@@ -61,6 +61,7 @@ fn open_exr_parts(s: &mut Session, p: &Value) -> Result<Value> {
     if entries > 1 {
         r.document.file_encoding.source_images = Some(u32::try_from(entries).unwrap_or(u32::MAX));
     }
+    crate::file_cmds::prepare_opened(s, &path, &mut r.document);
     let (i, color) = s.open_document(r.document, Some(path.clone()));
     crate::file_cmds::remember_batch_open(s);
     super::file_cmds::batch_open_notice(s, &path, &r.warnings, &color);
@@ -190,8 +191,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("aov.exr");
         write_multipart(&path);
-        let linear = photocraft_cms::Builtin::LinearSrgb.profile().to_bytes();
-        let aces = photocraft_cms::Builtin::AcesCg.profile().to_bytes();
+        let linear = craft_cms::Builtin::LinearSrgb.profile().to_bytes();
+        let aces = craft_cms::Builtin::AcesCg.profile().to_bytes();
         for (on, want) in [(false, &linear), (true, &aces)] {
             let mut s = session();
             s.prefs.edit(|p| p.file_handling.exr_aces_cg = on);

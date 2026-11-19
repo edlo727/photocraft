@@ -320,6 +320,37 @@ fn convert_tiles_converts_each_distinct_tile_once() {
     assert_eq!((converted, n), (CONVERT_BATCH + 5, CONVERT_BATCH + 5));
 }
 
+/// Tiles converted ahead of time (Large Brush Mode's commit thread) are staged as they are, with
+/// the bytes converting them would give; tiles the layer held before aren't converted, and a
+/// tile edited since (a new tile) is converted again.
+#[test]
+fn preconverted_tiles_are_staged_as_they_are() {
+    let mut before = Surface::new(PixelFormat::RGBA32F);
+    let area = Rect::new(0, 0, TILE_SIZE * 3, TILE_SIZE);
+    before.fill_rect(area, &[0.25, 0.5, 0.75, 1.0]);
+    let mut after = before.clone();
+    // The stroke changes the first two tiles only.
+    after.fill_rect(Rect::new(1, 1, TILE_SIZE + 2, 3), &[2.0, -0.5, 0.125, 0.5]);
+    assert_eq!(preconvert(&after, area, Some(&before)), 2, "the two changed tiles");
+    // A tile changed after it was converted is a new tile: converted again.
+    let mut later = after.clone();
+    later.fill_rect(Rect::new(0, 0, 1, 1), &[1.0, 1.0, 1.0, 1.0]);
+    let tiles: Vec<_> = area.tiles().filter_map(|c| later.tile(c).map(|t| (c, t.clone()))).collect();
+    let ready = convert_tiles_ready(&later, tiles, TexKind::Rgba16F, |t, cs, bytes| {
+        for &c in cs {
+            assert_eq!(bytes, convert_tile(&later, Some(t), TexKind::Rgba16F, c).as_slice(), "{c:?}");
+        }
+    });
+    assert_eq!(ready, 1, "the second tile only: the first changed again, the third never did");
+    // Taken once: the next upload of the same tile converts it.
+    let tiles: Vec<_> = area.tiles().filter_map(|c| later.tile(c).map(|t| (c, t.clone()))).collect();
+    assert_eq!(convert_tiles_ready(&later, tiles, TexKind::Rgba16F, |_, _, _| {}), 0);
+    // 8-bit surfaces upload as they are: nothing to convert ahead.
+    let mut eight = Surface::new(PixelFormat::RGBA8);
+    eight.fill_rect(area, &[0.5, 0.5, 0.5, 1.0]);
+    assert_eq!(preconvert(&eight, area, None), 0);
+}
+
 /// The 16-bit and 32-bit float RGB/gray fast paths give exactly the general path's half
 /// floats (32-bit samples above 1 and below 0 included).
 #[test]
@@ -359,11 +390,12 @@ fn sixteen_and_thirty_two_bit_fast_paths_match_the_general_one() {
 /// the built-in CMYK profile and with a document's own (which the worker threads enter).
 #[test]
 fn colour_managed_tiles_match_the_per_pixel_conversion() {
-    use photocraft_cms::synth::{CmykParams, cmyk_profile};
+    use craft_cms::synth::{CmykParams, cmyk_profile};
     use photocraft_color::ColorMode;
     use photocraft_color::convert::{CmykSpace, with_cmyk_space};
     let icc = Arc::new(
         cmyk_profile(&CmykParams { description: "GPU test CMYK".into(), tvi: [0.26, 0.26, 0.26, 0.3], grid_a2b: 5, grid_b2a: 9, ..Default::default() })
+            .unwrap()
             .to_bytes(),
     );
     let own = CmykSpace::for_profile(Some(&icc));

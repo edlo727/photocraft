@@ -30,6 +30,92 @@ pub fn memory_budget(allowance: u64, pixels: u64, ram: Option<u64>, vram: Option
     allowance.saturating_sub(charged).min(ram / 4).min(card).max(MIN_GPU_BUDGET)
 }
 
+/// GPU memory Performance Mode › Maximum never plans for: an eighth of the card's own memory
+/// (`vram`), at least 2.5 GB, for the window's swapchain, egui, the driver and other
+/// applications, and at most half the card. Planning for all of it let a 16 GB card run out of
+/// memory on a depth change or a large stroke and drop to the CPU.
+pub fn vram_reserve(vram: u64) -> u64 {
+    (vram / 8).max(5 << 29).min(vram / 2)
+}
+
+/// The GPU memory Maximum plans for in all: the card's own memory less [`vram_reserve`], or
+/// half of physical memory (`ram`; 16 GB assumed when unknown) for an adapter that shares the
+/// system's.
+fn maximum_total(ram: Option<u64>, vram: Option<u64>) -> u64 {
+    vram.map_or(ram.unwrap_or(16 << 30) / 2, |v| v - vram_reserve(v))
+}
+
+/// [`memory_budget`] under Performance Mode › Maximum (and Rendering Mode › GPU (always) before
+/// a mode is chosen): five eighths of [`maximum_total`], ignoring Memory Usage. `fixed` (GPU
+/// Memory, bytes) still wins when set, up to the whole of it. Together with
+/// [`forced_canvas_budget`] it plans for the card less its reserve; the layers that still don't
+/// fit are paged in and out on the GPU rather than redrawn on the CPU.
+pub fn forced_memory_budget(ram: Option<u64>, vram: Option<u64>, fixed: u64) -> u64 {
+    let total = maximum_total(ram, vram);
+    if fixed > 0 {
+        return fixed.min(total).max(MIN_GPU_BUDGET);
+    }
+    (total / 8 * 5).max(MIN_GPU_BUDGET)
+}
+
+/// [`canvas_budget`] under Performance Mode › Maximum: three eighths of [`maximum_total`] (no
+/// quarter-of-RAM cap), so a large canvas keeps its GPU display textures.
+pub fn forced_canvas_budget(ram: Option<u64>, vram: Option<u64>) -> u64 {
+    (maximum_total(ram, vram) / 8 * 3).max(MIN_GPU_BUDGET)
+}
+
+/// The share of a card's own memory (`vram`) each of [`efficient_memory_budget`] and
+/// [`efficient_canvas_budget`] may plan for: a quarter, so half the card stays free; an eighth of
+/// physical memory (`ram`) for an adapter that shares the system's.
+fn efficient_share(ram: Option<u64>, vram: Option<u64>) -> u64 {
+    vram.map_or(ram.unwrap_or(16 << 30) / 8, |v| v / 4)
+}
+
+/// [`memory_budget`] under Performance Mode › Efficient: the same rules, within
+/// [`efficient_share`].
+pub fn efficient_memory_budget(allowance: u64, pixels: u64, ram: Option<u64>, vram: Option<u64>, fixed: u64) -> u64 {
+    memory_budget(allowance, pixels, ram, vram, fixed).min(efficient_share(ram, vram)).max(MIN_GPU_BUDGET)
+}
+
+/// [`canvas_budget`] under Performance Mode › Efficient: within [`efficient_share`].
+pub fn efficient_canvas_budget(ram: Option<u64>, vram: Option<u64>) -> u64 {
+    canvas_budget(ram, vram).min(efficient_share(ram, vram)).max(MIN_GPU_BUDGET)
+}
+
+/// The most the compositor's lower-stack cache (everything below the layer being painted,
+/// composited once) may hold under Performance Mode `mode`: 512 MiB (the old fixed cap), 1.5 GiB
+/// or 4 GiB. It takes at most a sixth of the layer budget either way.
+pub fn composite_cache_cap(mode: photocraft_engine::prefs::PerformanceMode) -> u64 {
+    use photocraft_engine::prefs::PerformanceMode as M;
+    match mode {
+        M::Efficient => 512 << 20,
+        M::Balanced => 3 << 29,
+        M::Maximum => 4 << 30,
+    }
+}
+
+/// The layer budget and the canvas texture budget of Performance Mode `mode`, scaled down after
+/// `oom` out-of-memory errors this session (each takes another quarter off, down to a quarter),
+/// never below [`MIN_GPU_BUDGET`].
+pub fn profile_budgets(
+    mode: photocraft_engine::prefs::PerformanceMode,
+    allowance: u64,
+    pixels: u64,
+    ram: Option<u64>,
+    vram: Option<u64>,
+    fixed: u64,
+    oom: u32,
+) -> (u64, u64) {
+    use photocraft_engine::prefs::PerformanceMode as M;
+    let (layers, canvas) = match mode {
+        M::Efficient => (efficient_memory_budget(allowance, pixels, ram, vram, fixed), efficient_canvas_budget(ram, vram)),
+        M::Balanced => (memory_budget(allowance, pixels, ram, vram, fixed), canvas_budget(ram, vram)),
+        M::Maximum => (forced_memory_budget(ram, vram, fixed), forced_canvas_budget(ram, vram)),
+    };
+    let keep = 4 - u64::from(oom.min(3));
+    ((layers / 4 * keep).max(MIN_GPU_BUDGET), (canvas / 4 * keep).max(MIN_GPU_BUDGET))
+}
+
 /// The share of a discrete GPU's memory each of [`memory_budget`] and [`canvas_budget`] may
 /// plan for: three eighths, so the two together leave a quarter of the card to the window's
 /// swapchain, egui and other applications instead of over-committing it and letting the driver

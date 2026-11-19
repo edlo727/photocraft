@@ -37,6 +37,13 @@ pub struct Refresh {
     pub upload_ms: f64,
     /// Layer tiles the wgpu compositor uploaded.
     pub uploads: u64,
+    /// Of those, distinct tiles converted ahead of time (`photocraft_gpu::preconvert`).
+    pub ready: u64,
+    /// Layer pages the compositor evicted to stay in its memory budget (re-uploaded when next
+    /// drawn: on a card short of memory, the stroke trace's `evicted`).
+    pub evicted: u64,
+    /// GPU memory the layer pages and painted copies hold after the refresh (MiB).
+    pub layer_mb: u64,
     /// How long the GPU spent executing a recent wgpu composite, once its timestamps came back
     /// (a frame or two after that refresh, so usually an earlier one than this). It carries its
     /// own pixel count and is never this refresh's unless they match. `None` when the device has

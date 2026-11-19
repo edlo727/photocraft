@@ -27,6 +27,11 @@ pub struct CommandSpec {
     pub journal: bool,
 }
 
+/// Image › Adjustments › Desaturate: Hue/Saturation with saturation at -100.
+pub(crate) fn desaturate_adjustment() -> Adjustment {
+    Adjustment::HueSaturation { hue: 0.0, saturation: -100.0, lightness: 0.0, colorize: false, ranges: photocraft_doc::adjust::HueRange::defaults() }
+}
+
 /// Image › Image Rotation by a right angle or a flip (pixels, vectors, guides, … all move).
 fn turn(s: &mut Session, label: &str, t: crate::canvas_geom::Turn) -> Result<Value> {
     if let Some(d) = s.active() {
@@ -37,7 +42,7 @@ fn turn(s: &mut Session, label: &str, t: crate::canvas_geom::Turn) -> Result<Val
         s.set_canvas_map(a, half.then(&a).then(&photocraft_geom::Affine::translate(-0.5, -0.5)));
     }
     s.edit(label, |doc, _| {
-        crate::canvas_geom::turn_canvas(doc, t);
+        crate::canvas_geom::keeping_count_points(doc, |doc| crate::canvas_geom::turn_canvas(doc, t));
         Ok(())
     })?;
     Ok(Value::Null)
@@ -73,6 +78,8 @@ mod count_delete_group_tests;
 mod count_history_names_tests;
 #[cfg(test)]
 mod count_record_label_tests;
+#[cfg(test)]
+mod count_resize_tests;
 pub mod cutout_cmds;
 pub mod distort_cmds;
 pub mod document_preset_cmds;
@@ -93,6 +100,8 @@ pub mod frame_cmds;
 pub mod fx_view_cmds;
 pub mod fx_visibility_cmds;
 pub mod gallery_cmds;
+#[cfg(test)]
+mod gradient_alpha_method_tests;
 pub mod gradient_fill_cmds;
 pub mod group_view_cmds;
 pub mod history_cmds;
@@ -118,6 +127,8 @@ pub mod mask_view_cmds;
 pub(super) mod migrate_cmds;
 pub mod mode_cmds;
 pub mod multichannel_cmds;
+#[cfg(test)]
+mod new_document_history_name_tests;
 pub mod notes_cmds;
 #[cfg(test)]
 mod notes_stored_values_tests;
@@ -178,7 +189,7 @@ pub(crate) use adjust_params::inject_kind;
 use adjust_params::{adjust_mode, destructive_adjust, doc_mode, new_adjustment};
 pub use adjust_params::{adjustment_from_params, adjustment_kind};
 pub(crate) use enabled::{always, check_all_unlocked, check_pixels_unlocked, has_paintable, is_mask_target, paint_surface};
-use enabled::{can_redo, can_undo, has_doc, has_layer, has_pixel_layer, has_pixel_or_channel, has_selection};
+use enabled::{can_redo, can_undo, has_doc, has_layer, has_pixel_or_channel, has_selection};
 pub use layer_params::blend_from_str;
 pub(crate) use layer_params::{NEW_LAYER_PATH, explicit_layer, layer_listing, layer_panel_option, layer_param, mask_at_depth, mask_new_layer, selection_mask};
 pub(crate) use layer_references::{recorded_drop, recorded_layer};
@@ -324,6 +335,10 @@ fn build() -> Vec<CommandSpec> {
                     doc.icc_profile = Some(prof.to_bytes());
                 }
                 let i = s.add_document(doc, None);
+                // A new document's first History state is "New"; opened files keep "Open" (#14029).
+                if let Some(st) = s.active_mut() {
+                    st.history.set_current_label("New");
+                }
                 Ok(json!({ "document": i }))
             }
         ),
@@ -337,11 +352,10 @@ fn build() -> Vec<CommandSpec> {
             |s, p| {
                 let i = p.get("document").and_then(Value::as_u64).map(|v| v as usize).or(s.active_index()).ok_or(EngineError::NoDocument)?;
                 match p.get("save").filter(|v| !v.is_null()) {
-                    Some(v) if v == "ask" => {
-                        if s.documents().get(i).ok_or(EngineError::NoDocument)?.is_dirty() {
-                            return Err(bad("file.close", "the document has unsaved changes; save it or explicitly discard them"));
-                        }
+                    Some(v) if v == "ask" && s.documents().get(i).ok_or(EngineError::NoDocument)?.is_dirty() => {
+                        return Err(bad("file.close", "the document has unsaved changes; save it or explicitly discard them"));
                     }
+                    Some(v) if v == "ask" => {}
                     // `false` (don't save) is the older spelling of discard.
                     Some(Value::Bool(false)) => {}
                     Some(v) if v != "discard" => return Err(bad("file.close", "`save` must be ask, discard or false")),
@@ -1020,20 +1034,12 @@ fn build() -> Vec<CommandSpec> {
             ["Image", "Adjustments"],
             Some("Cmd+Shift+U"),
             r##"{"target":"pixels"|"mask"|{"color":i}|{"colors":[i,…]}?=Channels panel target,"layer":id|name?=active}"##,
-            has_pixel_layer,
+            crate::adjust_cmds::has_adjustable,
             |s, p| {
-                destructive_adjust(
-                    s,
-                    "Desaturate",
-                    Adjustment::HueSaturation {
-                        hue: 0.0,
-                        saturation: -100.0,
-                        lightness: 0.0,
-                        colorize: false,
-                        ranges: photocraft_doc::adjust::HueRange::defaults(),
-                    },
-                    p,
-                )
+                if crate::adjust_cmds::adjust_as_smart_filter(s, "desaturate", "Desaturate", p)? {
+                    return Ok(Value::Null);
+                }
+                destructive_adjust(s, "Desaturate", desaturate_adjustment(), p)
             }
         ),
         // Paint
@@ -1279,9 +1285,19 @@ fn build() -> Vec<CommandSpec> {
         (
             "curves",
             "Curves…",
-            r##"{"points":json,"red":json,"green":json,"blue":json,"pencil":bool=false,"smooth":0..10=0,"eyedropper":json} (curves as [[in,out],…] in 0..255, 2..19 points: points = composite; red/green/blue, gray, cyan/magenta/yellow/black or lightness/a/b per channel; pencil = drawn curves (Draw to modify the curve): each curve is 256 output levels in 0..255 (point curves given are drawn in, and turning pencil off fits points to the drawing); smooth = Smooth passes over the drawn curves; eyedropper = the dialog's Set Black/Neutral Gray/White Point picker {"point":"black|gray|white","at":[x,y],"size":1..101=1} or {"point",…,"color":[r,g,b] 0..1}, colour composites: RGB and Grayscale (no gray); Image adjustments targeting a mask, alpha or Quick Mask sample that gray plane in any document mode, applied over the given curves)"##,
+            r##"{"points":json,"red":json,"green":json,"blue":json,"pencil":bool=false,"smooth":0..10=0,"eyedropper":json} (curves as [[in,out],…] in 0..255, 2..19 points: points = composite; red/green/blue, gray, cyan/magenta/yellow/black or lightness/a/b per channel; pencil = drawn curves (Draw to modify the curve): each curve is 256 output levels in 0..255 (point curves given are drawn in, and turning pencil off fits points to the drawing); smooth = Smooth passes over the drawn curves; eyedropper = the dialog's Set Black/Neutral Gray/White Point picker {"point":"black|gray|white","at":[x,y],"size":1..101=1} or {"point",…,"color":[r,g,b] 0..1}, colour composites: RGB and Grayscale (no gray); Image adjustments targeting a mask, alpha or Quick Mask sample that gray plane in any document mode, applied over the given curves; Nuke ColorLookup style, RGB point curves: "range":1..64=1 (points and graph span 0..range: levels 0..255 × range, so 510 is 2.0; straight curves follow a range change), "holdEnds":bool=false (hold the end values past the first and last points; off: continue along the end slopes), "masterFirst":bool=false (master curve before the channel curves, as Nuke; off: after, as Photoshop); exported to the Nuke script as a ColorLookup node)"##,
         ),
         ("exposure", "Exposure…", r##"{"exposure":-20..20=0,"offset":-0.5..0.5=0,"gamma":0.01..9.99=1}"##),
+        (
+            "ocioColorspace",
+            "OCIO Colorspace…",
+            r##"{"in":str="scene_linear role","out":str="scene_linear role"} (Nuke's OCIOColorSpace: converts from colour space `in` to `out` of the OpenColorIO config, unclamped float; names (or roles) from the config, e.g. "ACEScg", "ACEScct", "ARRI LogC3 (EI800)", "sRGB - Texture"; exported to the Nuke script as an OCIOColorSpace node)"##,
+        ),
+        (
+            "grade",
+            "Grade…",
+            r##"{"blackpoint":num|[r,g,b]=0,"whitepoint":num|[r,g,b]=1,"lift":num|[r,g,b]=0,"gain":num|[r,g,b]=1,"multiply":num|[r,g,b]=1,"offset":num|[r,g,b]=0,"gamma":0.01..100|[r,g,b]=1,"blackClamp":bool=true,"whiteClamp":bool=false} (Nuke's Grade node on linear values, unclamped above 1: out = (A·in + B)^(1/gamma) with A = multiply·(gain − lift)/(whitepoint − blackpoint), B = offset + lift − A·blackpoint; integer documents are graded in linear light; exported to the Nuke script as a Grade node)"##,
+        ),
         ("vibrance", "Vibrance…", r##"{"vibrance":-100..100=0,"saturation":-100..100=0}"##),
         (
             "hueSaturation",
@@ -1491,6 +1507,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::history_source_cmds::specs());
     v.extend(crate::history_select_cmds::specs());
     v.extend(crate::proof_sim::specs());
+    v.extend(crate::ocio_viewer::specs());
     v.extend(crate::presets::specs());
     v.extend(crate::document_preset_cmds::specs());
     v.extend(crate::export_preset_cmds::specs());

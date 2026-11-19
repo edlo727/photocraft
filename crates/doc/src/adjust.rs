@@ -9,6 +9,41 @@ pub struct CurvePoint {
     pub output: f32,
 }
 
+/// How a Curves adjustment reaches past Photoshop's 0..1 box, as Nuke's ColorLookup does, for
+/// 32-bit linear documents. [`Default`] is Photoshop's Curves exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CurveLookup {
+    /// The curves' points, and the graph, span 0..`range` on both axes (1: Photoshop's box).
+    pub range: f32,
+    /// Before the first point and past the last, hold its value. Off: continue along the end
+    /// slope (Photoshop's 32-bit Curves, Nuke's linear extrapolation).
+    pub hold_ends: bool,
+    /// The master curve runs first, then the channel curves (Nuke's ColorLookup). Off: channels
+    /// first, then master (Photoshop).
+    pub master_first: bool,
+}
+
+impl Default for CurveLookup {
+    fn default() -> Self {
+        CurveLookup { range: 1.0, hold_ends: false, master_first: false }
+    }
+}
+
+impl CurveLookup {
+    /// Largest range offered (the graph's input and output span).
+    pub const MAX_RANGE: f32 = 64.0;
+
+    pub fn is_default(&self) -> bool {
+        *self == CurveLookup::default()
+    }
+
+    /// The range, kept finite and within 1..=[`Self::MAX_RANGE`].
+    pub fn span(&self) -> f32 {
+        if self.range.is_finite() { self.range.clamp(1.0, Self::MAX_RANGE) } else { 1.0 }
+    }
+}
+
 /// Whether `points` is the straight 0→0, 1→1 line (or too short to be a curve).
 pub fn is_identity_curve(points: &[CurvePoint]) -> bool {
     match points {
@@ -190,6 +225,10 @@ impl HueRange {
     }
 }
 
+fn yes() -> bool {
+    true
+}
+
 fn default_hue_ranges() -> [HueRange; 6] {
     HueRange::defaults()
 }
@@ -244,6 +283,10 @@ pub enum Adjustment {
         /// piecewise-linearly instead of a spline through its points.
         #[serde(default)]
         pencil: bool,
+        /// Nuke ColorLookup-style range, ends and channel order (RGB space, point curves). The
+        /// default is Photoshop's Curves, which is also all a PSD can store.
+        #[serde(default, skip_serializing_if = "CurveLookup::is_default")]
+        lookup: CurveLookup,
     },
     Exposure {
         exposure: f32,
@@ -326,6 +369,32 @@ pub enum Adjustment {
         relative: bool,
         adjustments: [[f32; 4]; 9],
     },
+    /// Nuke's Grade node, per R/G/B channel, on linear float values without clamping (unless the
+    /// clamps are on): `A = multiply · (gain − lift) / (whitepoint − blackpoint)`,
+    /// `B = offset + lift − A · blackpoint`, `out = (A · in + B)^(1/gamma)` (gamma only on positive
+    /// values), then the black clamp (`max 0`, on by default as in Nuke) and white clamp (`min 1`).
+    /// Integer documents are graded in linear light through their tone curve. PhotoCraft-only:
+    /// PSD export has no equivalent block; `.pcraft` and the Nuke script keep it.
+    Grade {
+        blackpoint: [f32; 3],
+        whitepoint: [f32; 3],
+        lift: [f32; 3],
+        gain: [f32; 3],
+        multiply: [f32; 3],
+        offset: [f32; 3],
+        gamma: [f32; 3],
+        #[serde(default = "yes")]
+        black_clamp: bool,
+        #[serde(default)]
+        white_clamp: bool,
+    },
+    /// Nuke's OCIOColorSpace: converts the composite from colour space `input` to `output` of
+    /// the process-wide OpenColorIO config (`photocraft_ocio::current`), unclamped float.
+    /// PhotoCraft-only: PSD export has no equivalent; `.pcraft` and the Nuke script keep it.
+    OcioColorSpace {
+        input: String,
+        output: String,
+    },
     /// A PSD adjustment we can't evaluate yet; preserved raw for round-trip, shared between
     /// document snapshots (#4535).
     Unsupported {
@@ -353,6 +422,8 @@ impl Adjustment {
             Adjustment::Threshold { .. } => "Threshold",
             Adjustment::GradientMap { .. } => "Gradient Map",
             Adjustment::SelectiveColor { .. } => "Selective Color",
+            Adjustment::Grade { .. } => "Grade",
+            Adjustment::OcioColorSpace { .. } => "OCIO Colorspace",
             Adjustment::Unsupported { .. } => "Adjustment",
         }
     }
@@ -363,7 +434,7 @@ impl Adjustment {
 
     pub fn identity_curves() -> Self {
         let line = || vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 1.0 }];
-        Adjustment::Curves { master: line(), per_channel: [line(), line(), line()], space: ToneSpace::Rgb, black: Vec::new(), pencil: false }
+        Adjustment::Curves { master: line(), per_channel: [line(), line(), line()], space: ToneSpace::Rgb, black: Vec::new(), pencil: false, lookup: Default::default() }
     }
 
     pub fn identity_levels() -> Self {

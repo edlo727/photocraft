@@ -9,5 +9,6 @@ target/
 /temp
 /book/output
 /craft-fonts
+/vcpkg_installed
 *.log
 __pycache__/

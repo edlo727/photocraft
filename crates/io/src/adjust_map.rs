@@ -10,9 +10,9 @@
 //! that cannot be read (noise gradients, profile lookups, CMYK channel mixers, unknown versions)
 //! stay [`Adjustment::Unsupported`] and are written back verbatim.
 
+use craft_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
 use photocraft_doc::Adjustment;
 use photocraft_doc::adjust::{CURVE_MAP_LEN, CurvePoint, HueRange, LevelsChannel, LutFormat, LutSource, ToneSpace, curve_map};
-use photocraft_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
 
 mod encode;
 
@@ -84,7 +84,7 @@ fn parse_curves(d: &[u8]) -> Option<Adjustment> {
     let mut it = curves.into_iter();
     let master = it.next()?;
     let (r, g, b, k) = (it.next()?, it.next()?, it.next()?, it.next()?);
-    Some(Adjustment::Curves { master, per_channel: [r, g, b], space: ToneSpace::Rgb, black: k, pencil })
+    Some(Adjustment::Curves { master, per_channel: [r, g, b], space: ToneSpace::Rgb, black: k, pencil, lookup: Default::default() })
 }
 
 fn desc_num(d: &Descriptor, key: &str) -> Option<f32> {
@@ -509,13 +509,13 @@ fn read_lookup(d: &[u8]) -> Result<Adjustment, String> {
 }
 
 /// A LUT file's table, read the way a PSD read does (an XML file tagged `.cube` is sniffed as `.look`).
-fn parse_lut_source(format: LutFormat, bytes: &[u8]) -> Result<photocraft_cms::lutfile::LutFile, photocraft_cms::lutfile::LutError> {
+fn parse_lut_source(format: LutFormat, bytes: &[u8]) -> Result<craft_cms::lutfile::LutFile, craft_cms::lutfile::LutError> {
     let format = match format {
-        LutFormat::Cube => photocraft_cms::lutfile::Format::Cube,
-        LutFormat::ThreeDl => photocraft_cms::lutfile::Format::ThreeDl,
-        LutFormat::Look => photocraft_cms::lutfile::Format::Look,
+        LutFormat::Cube => craft_cms::lutfile::Format::Cube,
+        LutFormat::ThreeDl => craft_cms::lutfile::Format::ThreeDl,
+        LutFormat::Look => craft_cms::lutfile::Format::Look,
     };
-    photocraft_cms::lutfile::parse(&format!("x.{}", format.extension()), bytes)
+    craft_cms::lutfile::parse(&format!("x.{}", format.extension()), bytes)
 }
 
 /// Photoshop's `LUTFormatType` value for a format.
@@ -704,7 +704,7 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
         }
         Adjustment::Exposure { exposure, offset, gamma } => return block(b"expA", encode::exposure(*exposure, *offset, *gamma)),
         Adjustment::Levels { master, per_channel, space, black } => return block(b"levl", encode::levels(master, per_channel, *space, black)),
-        Adjustment::Curves { master, per_channel, space, black, pencil } => {
+        Adjustment::Curves { master, per_channel, space, black, pencil, .. } => {
             return block(b"curv", encode::curves(master, per_channel, *space, black, *pencil));
         }
         Adjustment::SelectiveColor { relative, adjustments } => return block(b"selc", encode::selective_color(*relative, adjustments)),
@@ -732,6 +732,9 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
         Adjustment::ChannelMixer { matrix, monochrome } => {
             return block(b"mixr", encode::channel_mixer(matrix, *monochrome));
         }
+        // Nuke's Grade has no Photoshop adjustment: nothing is written and PSD export warns
+        // (`.pcraft` and the EXR/Nuke script keep it).
+        Adjustment::Grade { .. } | Adjustment::OcioColorSpace { .. } => {}
         Adjustment::Unsupported { psd_key, raw } => {
             let k = psd_key.as_bytes();
             if k.len() == 4 {

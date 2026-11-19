@@ -213,7 +213,7 @@ pub(crate) fn apply_filter_to_surface_in(
     }
     // Image › Adjustments recorded as smart filters (Levels, Curves, Shadows/Highlights… from PSD).
     if let Some(kind) = id.strip_prefix("image.adjustments.") {
-        return crate::adjust_cmds::adjust_as_filter(kind, params, surf);
+        return crate::adjust_cmds::adjust_as_filter(kind, params, surf, None);
     }
     // WebAssembly plug-in smart filters (plugin_cmds).
     if id == crate::plugin_cmds::RUN {
@@ -240,6 +240,20 @@ pub(crate) fn apply_filter_to_surface_in(
 /// Preserve checked native diagnostics; legacy kernels retain their working-data failure.
 fn filter_error(error: algo::ApplyError) -> EngineError {
     if error.is_cancelled() { EngineError::Cancelled } else { EngineError::Other(error.to_string()) }
+}
+
+/// [`has_filterable_layer`], and the document must not be 32-bit float: these filters work on
+/// 0..1 values and clip everything outside, so on a scene-linear plate they would quietly throw
+/// the highlights and the wide-gamut negatives away (measured by the `hdr_filter_matrix` report).
+/// Generators that overwrite the layer anyway (Clouds, Fibers) are not in this group, and neither
+/// is a filter that only reads the range differently, such as Solarize.
+pub(crate) fn has_filterable_layer_in_range(s: &Session) -> std::result::Result<(), String> {
+    has_filterable_layer(s)?;
+    let d = s.active().ok_or("no document open")?;
+    if d.doc.depth == photocraft_color::SampleType::F32 {
+        return Err("this filter works on 0-1 values; the document is 32-bit float, where it would clip the highlights".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn has_filterable_layer(s: &Session) -> std::result::Result<(), String> {
@@ -457,13 +471,16 @@ pub(crate) fn keep_alpha(old: &photocraft_raster::Surface, new: &mut photocraft_
 
 macro_rules! filter_cmd {
     ($id:literal, $label:literal, [$($m:literal),*], $params:literal) => {
+        filter_cmd!($id, $label, [$($m),*], $params, has_filterable_layer)
+    };
+    ($id:literal, $label:literal, [$($m:literal),*], $params:literal, $enabled:path) => {
         CommandSpec {
             id: $id,
             label: $label,
             menu: &[$($m),*],
             shortcut: None,
             params: $params,
-            enabled: has_filterable_layer,
+            enabled: $enabled,
             run: |s, p| run_filter(s, $id, p),
             journal: true,
         }
@@ -512,7 +529,7 @@ pub fn specs() -> Vec<CommandSpec> {
         filter_cmd!("filter.noise.dustAndScratches", "Dust & Scratches…", ["Filter", "Noise"], r##"{"radius":1..500=1,"threshold":0..255=0}"##),
         filter_cmd!("filter.pixelate.mosaic", "Mosaic…", ["Filter", "Pixelate"], r##"{"cellSize":2..200=10}"##),
         filter_cmd!("filter.stylize.emboss", "Emboss…", ["Filter", "Stylize"], r##"{"angle":-180..180=135,"height":1..100=3,"amount":1..500=100}"##),
-        filter_cmd!("filter.stylize.findEdges", "Find Edges", ["Filter", "Stylize"], "{}"),
+        filter_cmd!("filter.stylize.findEdges", "Find Edges", ["Filter", "Stylize"], "{}", has_filterable_layer_in_range),
         filter_cmd!("filter.stylize.solarize", "Solarize", ["Filter", "Stylize"], "{}"),
         filter_cmd!("filter.distort.twirl", "Twirl…", ["Filter", "Distort"], r##"{"angle":-999..999=50}"##),
         filter_cmd!("filter.distort.pinch", "Pinch…", ["Filter", "Distort"], r##"{"amount":-100..100=50}"##),

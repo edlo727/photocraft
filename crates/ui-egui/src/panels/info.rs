@@ -40,6 +40,9 @@ pub(super) fn info_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         return;
     };
     let (size, origin) = (st.doc.size, st.doc.ruler_origin);
+    // 32-bit documents read out the stored float values (linear light, above 1.0 and below 0
+    // kept), as a compositor does, instead of 0–255 levels.
+    let float = st.doc.depth == photocraft_color::SampleType::F32;
     let cmyk_space = photocraft_compose::cmyk_space(&st.doc);
     // Positions and sizes in the ruler unit (Preferences › Units & Rulers).
     let units = app.session.prefs().units_and_rulers.clone();
@@ -69,11 +72,14 @@ pub(super) fn info_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         });
     };
     ui.columns(2, |cols| {
-        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as i32;
+        let q = |v: f32| if float { format!("{v:.4}") } else { ((v.clamp(0.0, 1.0) * 255.0).round() as i32).to_string() };
         let dash = || "—".to_string();
-        row(&mut cols[0], "R:", rgba.map_or_else(dash, |c| q(c[0]).to_string()));
-        row(&mut cols[0], "G:", rgba.map_or_else(dash, |c| q(c[1]).to_string()));
-        row(&mut cols[0], "B:", rgba.map_or_else(dash, |c| q(c[2]).to_string()));
+        row(&mut cols[0], "R:", rgba.map_or_else(dash, |c| q(c[0])));
+        row(&mut cols[0], "G:", rgba.map_or_else(dash, |c| q(c[1])));
+        row(&mut cols[0], "B:", rgba.map_or_else(dash, |c| q(c[2])));
+        if float {
+            row(&mut cols[0], "A:", rgba.map_or_else(dash, |c| q(c[3])));
+        }
         // Colour-managed CMYK in percent like Photoshop's readout, through the same conversion as
         // the Color Picker (#8101) and the Color Sampler readout (`sampler_cmds::device_cmyk`).
         let cmyk =

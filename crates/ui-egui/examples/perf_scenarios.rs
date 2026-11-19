@@ -1178,7 +1178,7 @@ fn background_job_scenarios(b: &mut Bench, sz: &Sizes) {
     }
     let brushes = "import 500 brushes: longest UI-thread step";
     if b.wanted(brushes) {
-        use photocraft_psd::abr::{AbrSample, LegacyBrush, LegacyTip, write_v12};
+        use craft_psd::abr::{AbrSample, LegacyBrush, LegacyTip, write_v12};
         let list: Vec<LegacyBrush> = (0..500)
             .map(|i| {
                 let side = 40 + (i % 60) as u32;
@@ -1488,9 +1488,9 @@ fn liquify_preview_scenario(b: &mut Bench) {
         let t = Instant::now();
         let dirty = field.stroke_segment(&stroke, [1470.0, 1100.0, 1.0], [1530.0, 1100.0, 1.0]);
         let ok = if full_res {
-            ProxyImage::render_full_resolution(&source, field, view, dirty, out, scratch)
+            ProxyImage::render_full_resolution(&source, field, view, dirty, out, scratch, photocraft_algo::liquify::NO_ENCODE)
         } else {
-            proxy.render(field, proxy.proxy_rect(dirty), out);
+            proxy.render(field, proxy.proxy_rect(dirty), out, photocraft_algo::liquify::NO_ENCODE);
             true
         };
         if !ok {

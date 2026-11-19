@@ -262,6 +262,18 @@ impl Session {
         let filter_mask_layer = self.filter_mask_layer;
         let sampler_map = self.sampler_map.take();
         let symmetry_map = self.symmetry_map.take();
+        #[cfg(not(target_arch = "wasm32"))]
+        let clock = std::time::Instant::now();
+        let ms = || -> f64 {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                clock.elapsed().as_secs_f64() * 1000.0
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                0.0
+            }
+        };
         let st = self.active_mut().ok_or(EngineError::NoDocument)?;
         let before = st.doc.clone();
         // Only this document's pixels gate its edits: an unreadable tile elsewhere (another
@@ -320,8 +332,10 @@ impl Session {
         // document, seconds on the CPU path, #1773), a new or deleted layer's bounds (a
         // duplicate or a paste), and everything when that can't be bounded. A command may still
         // report its own, tighter damage after this.
+        let applied = ms();
         let damage = layer_multi_cmds::step_damage(&before, &st.doc);
         let keep_clean = st.keeps_clean(&before);
+        let compared = ms();
         #[cfg(any(test, debug_assertions))]
         let hint_before = before.clone();
         let key = self.coalesce_request.clone();
@@ -343,6 +357,8 @@ impl Session {
         }
         st.bump_revision(keep_clean);
         st.last_damage = damage;
+        let recorded = ms();
+        self.edit_timing = [applied, compared - applied, recorded - compared, recorded];
         self.samplers_removed += samplers_removed;
         #[cfg(any(test, debug_assertions))]
         {

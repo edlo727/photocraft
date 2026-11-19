@@ -1,11 +1,18 @@
-//! Photoshop and Paint.NET blend modes (scalar reference implementation).
+//! Photoshop and Paint.NET blend modes, plus Nuke Merge operations (scalar reference
+//! implementation).
 //!
-//! Formulas follow the public PDF / ISO 32000-2 and W3C Compositing definitions,
-//! with Photoshop's variants where they differ (Hard Mix, Darker/Lighter Color,
-//! Linear Burn/Dodge, Vivid/Linear/Pin Light, Subtract, Divide). This is the CPU reference
-//! that the GPU kernels must match.
+//! The Photoshop and Paint.NET modes follow the public PDF / ISO 32000-2 and W3C Compositing
+//! definitions, with Photoshop's variants where they differ (Hard Mix, Darker/Lighter Color,
+//! Linear Burn/Dodge, Vivid/Linear/Pin Light, Subtract, Divide). They are what layers get by
+//! default, and what PSD and the other layered formats read and write.
+//!
+//! The `Nuke*` modes are Nuke Merge operations with Nuke's own 32-bit maths (premultiplied, no
+//! clamping). Blend menus list them only when "Nuke blend modes" is turned on in the Layers panel
+//! ([`set_nuke_modes_in_menus`]); a layer keeps its mode either way, so a document renders the
+//! same whatever the switch says. This is the CPU reference the GPU kernels must match.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BlendMode {
@@ -16,24 +23,34 @@ pub enum BlendMode {
     Darken,
     Multiply,
     ColorBurn,
+    // The aliases read documents saved while these Photoshop modes were called `Ps…`.
+    #[serde(alias = "PsLinearBurn")]
     LinearBurn,
+    #[serde(alias = "PsDarkerColor")]
     DarkerColor,
     Lighten,
     Screen,
     ColorDodge,
     LinearDodge,
+    #[serde(alias = "PsLighterColor")]
     LighterColor,
     Overlay,
     SoftLight,
     HardLight,
+    #[serde(alias = "PsVividLight")]
     VividLight,
+    #[serde(alias = "PsLinearLight")]
     LinearLight,
+    #[serde(alias = "PsPinLight")]
     PinLight,
+    #[serde(alias = "PsHardMix")]
     HardMix,
     Difference,
     Exclusion,
     Subtract,
+    #[serde(alias = "PsDivide")]
     Divide,
+    #[serde(alias = "PsHue")]
     Hue,
     Saturation,
     Color,
@@ -44,20 +61,92 @@ pub enum BlendMode {
     Xor,
     PaintNetColorBurn,
     PaintNetColorDodge,
+    // ---- Nuke Merge operations (`over` is Normal) ----
+    NukeMin,
+    NukeMultiply,
+    NukeColorBurn,
+    NukeUnder,
+    NukeIn,
+    NukeMax,
+    NukeScreen,
+    NukeColorDodge,
+    NukePlus,
+    NukeOut,
+    NukeOverlay,
+    NukeSoftLight,
+    NukeHardLight,
+    NukeGeometric,
+    NukeHypot,
+    NukeMask,
+    NukeStencil,
+    NukeDifference,
+    NukeExclusion,
+    NukeMinus,
+    NukeDivide,
+    NukeMatte,
+    NukeAverage,
+    NukeConjointOver,
+    NukeDisjointOver,
+    NukeXor,
+    NukeFrom,
+    NukeAtop,
+}
+
+/// Whether blend menus list the Nuke Merge operations ([`BlendMode::NUKE_MODES`]) after
+/// Photoshop's modes. The Layers panel's "Nuke blend modes" switch; off by default.
+static NUKE_MENU: AtomicBool = AtomicBool::new(false);
+
+/// Show (or hide) the Nuke Merge operations in blend menus ([`BlendMode::menu_modes`]).
+pub fn set_nuke_modes_in_menus(on: bool) {
+    NUKE_MENU.store(on, Ordering::Relaxed);
+}
+
+/// Whether blend menus list the Nuke Merge operations.
+pub fn nuke_modes_in_menus() -> bool {
+    NUKE_MENU.load(Ordering::Relaxed)
 }
 
 impl BlendMode {
     /// Paint.NET modes without an exact Photoshop equivalent.
     pub const PAINT_NET_MODES: [BlendMode; 6] = [Self::Reflect, Self::Glow, Self::Negation, Self::Xor, Self::PaintNetColorBurn, Self::PaintNetColorDodge];
 
-    /// All editable layer modes, with Paint.NET modes after Photoshop's menu order.
+    /// The Photoshop and Paint.NET modes, with Paint.NET modes after Photoshop's menu order.
     pub fn layer_modes() -> impl Iterator<Item = Self> {
         Self::LAYER_MODES.into_iter().chain(Self::PAINT_NET_MODES)
     }
 
-    pub fn has_psd_equivalent(self) -> bool {
-        !Self::PAINT_NET_MODES.contains(&self)
+    /// Every mode a layer can have but Pass Through: [`Self::layer_modes`], then the Nuke Merge
+    /// operations ([`Self::NUKE_MODES`], [`Self::NUKE_HIDDEN_MODES`]).
+    pub fn all_modes() -> impl Iterator<Item = Self> {
+        Self::layer_modes().chain(Self::NUKE_MODES).chain(Self::NUKE_HIDDEN_MODES)
     }
+
+    /// The modes blend menus list, in menu order: Photoshop's ([`Self::LAYER_MODES`]), then the
+    /// Nuke Merge colour operations ([`Self::NUKE_MODES`]) when they are turned on.
+    pub fn menu_modes() -> impl Iterator<Item = Self> {
+        let nuke: &'static [BlendMode] = if nuke_modes_in_menus() { &Self::NUKE_MODES } else { &[] };
+        Self::LAYER_MODES.into_iter().chain(nuke.iter().copied())
+    }
+
+    /// Whether blend menus list this mode ([`Self::menu_modes`]).
+    pub fn is_menu_mode(self) -> bool {
+        Self::LAYER_MODES.contains(&self) || (nuke_modes_in_menus() && Self::NUKE_MODES.contains(&self))
+    }
+
+    /// One of the Nuke Merge operations (a `Nuke…` mode).
+    pub fn is_nuke(self) -> bool {
+        Self::NUKE_MODES.contains(&self) || Self::NUKE_HIDDEN_MODES.contains(&self)
+    }
+
+    /// Kept for older call sites: a mode that is not a Nuke Merge operation (or Normal, `over`).
+    pub fn is_photoshop_only(self) -> bool {
+        self.nuke_op().is_none() && self != BlendMode::PassThrough
+    }
+
+    pub fn has_psd_equivalent(self) -> bool {
+        !Self::PAINT_NET_MODES.contains(&self) && !self.is_nuke()
+    }
+
     /// Photoshop modes except PassThrough, in Photoshop menu order.
     pub const LAYER_MODES: [BlendMode; 27] = [
         BlendMode::Normal,
@@ -88,6 +177,112 @@ impl BlendMode {
         BlendMode::Color,
         BlendMode::Luminosity,
     ];
+
+    /// The Nuke Merge colour operations blend menus list when they are turned on, grouped like
+    /// Photoshop's menu (darken, lighten, contrast, comparative, Nuke-only). `over` is Normal.
+    pub const NUKE_MODES: [BlendMode; 18] = [
+        BlendMode::NukeMin,
+        BlendMode::NukeMultiply,
+        BlendMode::NukeColorBurn,
+        BlendMode::NukeMax,
+        BlendMode::NukeScreen,
+        BlendMode::NukeColorDodge,
+        BlendMode::NukePlus,
+        BlendMode::NukeOverlay,
+        BlendMode::NukeSoftLight,
+        BlendMode::NukeHardLight,
+        BlendMode::NukeDifference,
+        BlendMode::NukeExclusion,
+        BlendMode::NukeFrom,
+        BlendMode::NukeMinus,
+        BlendMode::NukeDivide,
+        BlendMode::NukeAverage,
+        BlendMode::NukeGeometric,
+        BlendMode::NukeHypot,
+    ];
+
+    /// Nuke Merge operations that are compositing (Porter-Duff / matte) ops rather than colour
+    /// blends: in a layer stack B is everything below, so they act on the whole stack (mask,
+    /// stencil, in, out, xor), reorder it (under), duplicate clipping masks (atop) or equal over
+    /// for straight-alpha layers (matte, conjoint-over, disjoint-over). They still render, so
+    /// scripts and documents that use them work, but menus list one only on a layer that has it.
+    pub const NUKE_HIDDEN_MODES: [BlendMode; 10] = [
+        BlendMode::NukeAtop,
+        BlendMode::NukeConjointOver,
+        BlendMode::NukeDisjointOver,
+        BlendMode::NukeIn,
+        BlendMode::NukeMask,
+        BlendMode::NukeMatte,
+        BlendMode::NukeOut,
+        BlendMode::NukeStencil,
+        BlendMode::NukeUnder,
+        BlendMode::NukeXor,
+    ];
+
+    /// Kept for older call sites: [`Self::NUKE_HIDDEN_MODES`].
+    pub const HIDDEN_MODES: [BlendMode; 10] = Self::NUKE_HIDDEN_MODES;
+
+    /// The Nuke Merge2 `operation` this mode is: Normal / Pass Through are `over`, a `Nuke…` mode
+    /// its own operation; `None` for the Photoshop and Paint.NET modes.
+    pub fn nuke_op(self) -> Option<&'static str> {
+        Some(match self {
+            BlendMode::Normal | BlendMode::PassThrough => "over",
+            BlendMode::NukeMin => "min",
+            BlendMode::NukeMultiply => "multiply",
+            BlendMode::NukeColorBurn => "color-burn",
+            BlendMode::NukeUnder => "under",
+            BlendMode::NukeIn => "in",
+            BlendMode::NukeMax => "max",
+            BlendMode::NukeScreen => "screen",
+            BlendMode::NukeColorDodge => "color-dodge",
+            BlendMode::NukePlus => "plus",
+            BlendMode::NukeOut => "out",
+            BlendMode::NukeOverlay => "overlay",
+            BlendMode::NukeSoftLight => "soft-light",
+            BlendMode::NukeHardLight => "hard-light",
+            BlendMode::NukeGeometric => "geometric",
+            BlendMode::NukeHypot => "hypot",
+            BlendMode::NukeMask => "mask",
+            BlendMode::NukeStencil => "stencil",
+            BlendMode::NukeDifference => "difference",
+            BlendMode::NukeExclusion => "exclusion",
+            BlendMode::NukeMinus => "minus",
+            BlendMode::NukeDivide => "divide",
+            BlendMode::NukeMatte => "matte",
+            BlendMode::NukeAverage => "average",
+            BlendMode::NukeConjointOver => "conjoint-over",
+            BlendMode::NukeDisjointOver => "disjoint-over",
+            BlendMode::NukeXor => "xor",
+            BlendMode::NukeFrom => "from",
+            BlendMode::NukeAtop => "atop",
+            _ => return None,
+        })
+    }
+
+    /// The Nuke Merge operation closest to a Photoshop mode, for scripts written for Nuke:
+    /// (operation, exact). `over` (inexact) where Nuke has nothing close.
+    pub fn nearest_nuke_op(self) -> (&'static str, bool) {
+        if let Some(op) = self.nuke_op() {
+            return (op, true);
+        }
+        let op = match self {
+            BlendMode::Darken => "min",
+            BlendMode::Multiply => "multiply",
+            BlendMode::ColorBurn => "color-burn",
+            BlendMode::Lighten => "max",
+            BlendMode::Screen => "screen",
+            BlendMode::ColorDodge => "color-dodge",
+            BlendMode::LinearDodge => "plus",
+            BlendMode::Overlay => "overlay",
+            BlendMode::SoftLight => "soft-light",
+            BlendMode::HardLight => "hard-light",
+            BlendMode::Difference => "difference",
+            BlendMode::Exclusion => "exclusion",
+            BlendMode::Subtract => "from",
+            _ => "over",
+        };
+        (op, false)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -125,36 +320,65 @@ impl BlendMode {
             BlendMode::Xor => "XOR",
             BlendMode::PaintNetColorBurn => "Color Burn (Paint.NET)",
             BlendMode::PaintNetColorDodge => "Color Dodge (Paint.NET)",
+            BlendMode::NukeMin => "min (Nuke)",
+            BlendMode::NukeMultiply => "multiply (Nuke)",
+            BlendMode::NukeColorBurn => "color-burn (Nuke)",
+            BlendMode::NukeUnder => "under (Nuke)",
+            BlendMode::NukeIn => "in (Nuke)",
+            BlendMode::NukeMax => "max (Nuke)",
+            BlendMode::NukeScreen => "screen (Nuke)",
+            BlendMode::NukeColorDodge => "color-dodge (Nuke)",
+            BlendMode::NukePlus => "plus (Nuke)",
+            BlendMode::NukeOut => "out (Nuke)",
+            BlendMode::NukeOverlay => "overlay (Nuke)",
+            BlendMode::NukeSoftLight => "soft-light (Nuke)",
+            BlendMode::NukeHardLight => "hard-light (Nuke)",
+            BlendMode::NukeGeometric => "geometric (Nuke)",
+            BlendMode::NukeHypot => "hypot (Nuke)",
+            BlendMode::NukeMask => "mask (Nuke)",
+            BlendMode::NukeStencil => "stencil (Nuke)",
+            BlendMode::NukeDifference => "difference (Nuke)",
+            BlendMode::NukeExclusion => "exclusion (Nuke)",
+            BlendMode::NukeMinus => "minus (Nuke)",
+            BlendMode::NukeDivide => "divide (Nuke)",
+            BlendMode::NukeMatte => "matte (Nuke)",
+            BlendMode::NukeAverage => "average (Nuke)",
+            BlendMode::NukeConjointOver => "conjoint-over (Nuke)",
+            BlendMode::NukeDisjointOver => "disjoint-over (Nuke)",
+            BlendMode::NukeXor => "xor (Nuke)",
+            BlendMode::NukeFrom => "from (Nuke)",
+            BlendMode::NukeAtop => "atop (Nuke)",
         }
     }
 
-    /// PSD 4-character blend key. Modes without an equivalent fall back to Normal;
-    /// exporters must report that loss using [`Self::has_psd_equivalent`].
+    /// PSD 4-character blend key. Modes without an equivalent fall back to Normal, except the
+    /// Nuke colour operations, written as the Photoshop mode closest to them; exporters must
+    /// report the loss using [`Self::has_psd_equivalent`].
     pub fn psd_key(self) -> [u8; 4] {
         *match self {
             BlendMode::PassThrough => b"pass",
             BlendMode::Normal => b"norm",
             BlendMode::Dissolve => b"diss",
-            BlendMode::Darken => b"dark",
-            BlendMode::Multiply => b"mul ",
-            BlendMode::ColorBurn => b"idiv",
+            BlendMode::Darken | BlendMode::NukeMin => b"dark",
+            BlendMode::Multiply | BlendMode::NukeMultiply => b"mul ",
+            BlendMode::ColorBurn | BlendMode::NukeColorBurn => b"idiv",
             BlendMode::LinearBurn => b"lbrn",
             BlendMode::DarkerColor => b"dkCl",
-            BlendMode::Lighten => b"lite",
-            BlendMode::Screen => b"scrn",
-            BlendMode::ColorDodge => b"div ",
-            BlendMode::LinearDodge => b"lddg",
+            BlendMode::Lighten | BlendMode::NukeMax => b"lite",
+            BlendMode::Screen | BlendMode::NukeScreen => b"scrn",
+            BlendMode::ColorDodge | BlendMode::NukeColorDodge => b"div ",
+            BlendMode::LinearDodge | BlendMode::NukePlus => b"lddg",
             BlendMode::LighterColor => b"lgCl",
-            BlendMode::Overlay => b"over",
-            BlendMode::SoftLight => b"sLit",
-            BlendMode::HardLight => b"hLit",
+            BlendMode::Overlay | BlendMode::NukeOverlay => b"over",
+            BlendMode::SoftLight | BlendMode::NukeSoftLight => b"sLit",
+            BlendMode::HardLight | BlendMode::NukeHardLight => b"hLit",
             BlendMode::VividLight => b"vLit",
             BlendMode::LinearLight => b"lLit",
             BlendMode::PinLight => b"pLit",
             BlendMode::HardMix => b"hMix",
-            BlendMode::Difference => b"diff",
-            BlendMode::Exclusion => b"smud",
-            BlendMode::Subtract => b"fsub",
+            BlendMode::Difference | BlendMode::NukeDifference => b"diff",
+            BlendMode::Exclusion | BlendMode::NukeExclusion => b"smud",
+            BlendMode::Subtract | BlendMode::NukeFrom => b"fsub",
             BlendMode::Divide => b"fdiv",
             BlendMode::Hue => b"hue ",
             BlendMode::Saturation => b"sat ",
@@ -163,9 +387,25 @@ impl BlendMode {
             BlendMode::Reflect | BlendMode::Glow | BlendMode::Negation | BlendMode::Xor | BlendMode::PaintNetColorBurn | BlendMode::PaintNetColorDodge => {
                 b"norm"
             }
+            BlendMode::NukeUnder
+            | BlendMode::NukeIn
+            | BlendMode::NukeOut
+            | BlendMode::NukeGeometric
+            | BlendMode::NukeHypot
+            | BlendMode::NukeMask
+            | BlendMode::NukeStencil
+            | BlendMode::NukeMinus
+            | BlendMode::NukeDivide
+            | BlendMode::NukeMatte
+            | BlendMode::NukeAverage
+            | BlendMode::NukeConjointOver
+            | BlendMode::NukeDisjointOver
+            | BlendMode::NukeXor
+            | BlendMode::NukeAtop => b"norm",
         }
     }
 
+    /// The mode a Photoshop key reads as: always Photoshop's own (never a Nuke operation).
     pub fn from_psd_key(key: [u8; 4]) -> Option<BlendMode> {
         std::iter::once(BlendMode::PassThrough).chain(Self::LAYER_MODES).find(|m| m.psd_key() == key)
     }
@@ -260,9 +500,33 @@ fn channel_hdr_wide(mode: BlendMode, cb: f32, cs: f32) -> f32 {
     out.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32
 }
 
+/// The Photoshop modes whose formula is defined on 0..1 only (see [`channel`]).
+fn range_bound(mode: BlendMode) -> bool {
+    matches!(
+        mode,
+        BlendMode::Screen
+            | BlendMode::ColorDodge
+            | BlendMode::Overlay
+            | BlendMode::SoftLight
+            | BlendMode::HardLight
+            | BlendMode::VividLight
+            | BlendMode::LinearLight
+            | BlendMode::Exclusion
+            | BlendMode::Reflect
+            | BlendMode::Glow
+            | BlendMode::Negation
+    )
+}
+
 /// `B(cb, cs)` with Linear Dodge and Divide clipped at `hi` (1 at integer depths).
 #[inline]
 fn channel(mode: BlendMode, cb: f32, cs: f32, hi: f32) -> f32 {
+    // 32-bit float: these formulas only mean something on 0..1. Fed a highlight they go negative
+    // (Screen of two suns is black) or clip it to 1, so outside that range the brighter input
+    // stands, which is the rule Nuke's own screen follows.
+    if hi > 1.0 && range_bound(mode) && !((0.0..=1.0).contains(&cb) && (0.0..=1.0).contains(&cs)) {
+        return cb.max(cs);
+    }
     match mode {
         BlendMode::Normal | BlendMode::Dissolve | BlendMode::PassThrough => cs,
         BlendMode::Darken => cb.min(cs),
@@ -335,6 +599,34 @@ fn channel(mode: BlendMode, cb: f32, cs: f32, hi: f32) -> f32 {
         }
         // Non-separable modes are handled by `blend_rgb`; fall back to source.
         BlendMode::DarkerColor | BlendMode::LighterColor | BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => cs,
+        BlendMode::NukeMin
+        | BlendMode::NukeMultiply
+        | BlendMode::NukeColorBurn
+        | BlendMode::NukeUnder
+        | BlendMode::NukeIn
+        | BlendMode::NukeMax
+        | BlendMode::NukeScreen
+        | BlendMode::NukeColorDodge
+        | BlendMode::NukePlus
+        | BlendMode::NukeOut
+        | BlendMode::NukeOverlay
+        | BlendMode::NukeSoftLight
+        | BlendMode::NukeHardLight
+        | BlendMode::NukeGeometric
+        | BlendMode::NukeHypot
+        | BlendMode::NukeMask
+        | BlendMode::NukeStencil
+        | BlendMode::NukeDifference
+        | BlendMode::NukeExclusion
+        | BlendMode::NukeMinus
+        | BlendMode::NukeDivide
+        | BlendMode::NukeMatte
+        | BlendMode::NukeAverage
+        | BlendMode::NukeConjointOver
+        | BlendMode::NukeDisjointOver
+        | BlendMode::NukeXor
+        | BlendMode::NukeFrom
+        | BlendMode::NukeAtop => nuke_channel(mode, cb, cs),
     }
 }
 
@@ -577,6 +869,137 @@ fn nonseparable_hdr_wide(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3
     out.map(|v| v.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32)
 }
 
+
+// ---- Nuke Merge operations (the `Nuke…` modes): Nuke's 32-bit maths, A = source, B = backdrop ----
+//
+// Every formula here was measured in Nuke 17 (`scripts/nuke_merge_truth.py`: Constant → Premult →
+// Merge2 over colours -0.25, 0.2, 0.8, 2 and alphas 0, 0.3, 1), not taken from the documentation,
+// which is wrong in places: screen, divide, exclusion and geometric switch on negative inputs, and
+// overlay, hard-light, soft-light, color-dodge and color-burn clamp theirs.
+
+#[inline]
+/// Nuke's screen: `A + B - AB` where both are within 0..1, else `max(A, B)`. Light above 1 and
+/// negative ACEScg values both take the max.
+pub fn nuke_screen(a: f32, b: f32) -> f32 {
+    if (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b) { a + b - a * b } else { a.max(b) }
+}
+
+/// Nuke's multiply: `AB`, or `A` where both are negative, which stops two negatives making a
+/// positive.
+#[inline]
+pub fn nuke_multiply(a: f32, b: f32) -> f32 {
+    if a < 0.0 && b < 0.0 { a } else { a * b }
+}
+
+/// Shared core of Nuke's `overlay` and `hard-light`, `x` the deciding input: `2xy` where
+/// `x ≤ 0.5`, else `1 − 2(1−x)(1−y)`. Nuke clamps `x` to 0..1 and `y` to 0 and above, and the
+/// result to 1 and below: these two are the display-range operations of Merge.
+#[inline]
+pub fn nuke_light(x: f32, y: f32) -> f32 {
+    let (x, y) = (x.clamp(0.0, 1.0), y.max(0.0));
+    let v = if x <= 0.5 { 2.0 * x * y } else { 1.0 - 2.0 * (1.0 - x) * (1.0 - y) };
+    v.min(1.0)
+}
+
+/// Nuke `overlay` (A = `a`, B = `b`): multiply if B < 0.5, screen if B > 0.5.
+#[inline]
+pub fn nuke_overlay(a: f32, b: f32) -> f32 {
+    nuke_light(b, a)
+}
+
+/// Nuke `hard-light` (A = `a`, B = `b`): multiply if A < 0.5, screen if A > 0.5.
+#[inline]
+pub fn nuke_hard_light(a: f32, b: f32) -> f32 {
+    nuke_light(a, b)
+}
+
+/// Nuke's soft-light core: `B(2A + B(1 − p))` where `p < 1`, else `2AB`, inputs clamped to 0 and
+/// above. Unmasked, Nuke runs it on the premultiplied values with `p = AB`; with alpha masking,
+/// on the straight colours with `p` = straight A times premultiplied B ([`nuke_composite`]).
+#[inline]
+fn nuke_soft_light_p(a: f32, b: f32, p: f32) -> f32 {
+    if p < 1.0 { b * (2.0 * a + b * (1.0 - p)) } else { 2.0 * a * b }
+}
+
+/// Nuke's soft-light on one pair of values (A = `a`, B = `b`), as an unmasked Merge applies it.
+#[inline]
+pub fn nuke_soft_light(a: f32, b: f32) -> f32 {
+    let (a, b) = (a.max(0.0), b.max(0.0));
+    nuke_soft_light_p(a, b, a * b)
+}
+
+#[inline]
+/// Nuke's divide: `A / B` where B is positive, else `A` (B at or below 0 leaves A as it is).
+pub fn nuke_divide(a: f32, b: f32) -> f32 {
+    if b > 0.0 { a / b } else { a }
+}
+
+/// Nuke's exclusion: `A + B − 2AB` where both are at least 0, else `A + B`.
+#[inline]
+pub fn nuke_exclusion(a: f32, b: f32) -> f32 {
+    if a < 0.0 || b < 0.0 { a + b } else { a + b - 2.0 * a * b }
+}
+
+/// Nuke's geometric: `2AB / (A + B)`, or 0 where either is negative (or both are 0).
+#[inline]
+pub fn nuke_geometric(a: f32, b: f32) -> f32 {
+    let sum = a + b;
+    if a < 0.0 || b < 0.0 || sum == 0.0 { 0.0 } else { 2.0 * a * b / sum }
+}
+
+/// Nuke's color-dodge: `B / (1 − A)`, inputs clamped to 0 and above and the result to 1 and below
+/// (1 where A ≥ 1).
+#[inline]
+pub fn nuke_color_dodge(a: f32, b: f32) -> f32 {
+    let (a, b) = (a.max(0.0), b.max(0.0));
+    if a >= 1.0 { 1.0 } else { (b / (1.0 - a)).min(1.0) }
+}
+
+/// Nuke's color-burn: `1 − (1 − B) / A`, B clamped to 0 and above and the result to 0 and above;
+/// 0 where A ≤ 0.
+#[inline]
+pub fn nuke_color_burn(a: f32, b: f32) -> f32 {
+    if a <= 0.0 { 0.0 } else { (1.0 - (1.0 - b.max(0.0)) / a).max(0.0) }
+}
+
+/// The operations Nuke runs on inputs clamped to 0 and above, the comp's colour included.
+#[inline]
+fn nuke_clamps_inputs(mode: BlendMode) -> bool {
+    matches!(
+        mode,
+        BlendMode::NukeOverlay | BlendMode::NukeHardLight | BlendMode::NukeSoftLight | BlendMode::NukeColorDodge | BlendMode::NukeColorBurn
+    )
+}
+
+/// `B(cb, cs)` of a Nuke colour operation (A = `cs`, B = `cb`); the compositing ones (in, out,
+/// mask, stencil, atop, matte, xor, conjoint / disjoint over, under) are composited whole in
+/// [`composite`], and give the source here.
+#[inline]
+fn nuke_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
+    match mode {
+        BlendMode::NukeUnder | BlendMode::NukeAtop => cb,
+        BlendMode::NukePlus => cs + cb,
+        BlendMode::NukeMultiply => nuke_multiply(cs, cb),
+        BlendMode::NukeScreen => nuke_screen(cs, cb),
+        BlendMode::NukeMinus => cs - cb,
+        BlendMode::NukeFrom => cb - cs,
+        BlendMode::NukeDivide => nuke_divide(cs, cb),
+        BlendMode::NukeMin | BlendMode::NukeIn => cs.min(cb),
+        BlendMode::NukeMax | BlendMode::NukeOut => cs.max(cb),
+        BlendMode::NukeHypot => (cs * cs + cb * cb).sqrt(),
+        BlendMode::NukeGeometric => nuke_geometric(cs, cb),
+        BlendMode::NukeDifference => (cs - cb).abs(),
+        BlendMode::NukeExclusion => nuke_exclusion(cs, cb),
+        BlendMode::NukeOverlay => nuke_overlay(cs, cb),
+        BlendMode::NukeHardLight => nuke_hard_light(cs, cb),
+        BlendMode::NukeSoftLight => nuke_soft_light(cs, cb),
+        BlendMode::NukeAverage => 0.5 * (cs + cb),
+        BlendMode::NukeColorDodge => nuke_color_dodge(cs, cb),
+        BlendMode::NukeColorBurn => nuke_color_burn(cs, cb),
+        _ => cs,
+    }
+}
+
 /// Composite a straight-alpha source over a straight-alpha backdrop with blend mode and opacity.
 ///
 /// Uses the W3C/PDF general formula:
@@ -584,6 +1007,28 @@ fn nonseparable_hdr_wide(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3
 /// `αo·Co = (1−αs)·αb·Cb + (1−αb)·αs·Cs + αs·αb·B(Cb,Cs)`.
 /// Dissolve must be resolved by the caller (per-pixel coverage decision) before calling.
 pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    composite_with_blend(mode, backdrop, source, opacity, blend_rgb)
+}
+
+/// [`composite`] for 32-bit float documents, whose gamut has no upper bound: the blend keeps
+/// values above 1 instead of clipping them, as the GPU compositor does.
+pub fn composite_hdr(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    composite_with_blend(mode, backdrop, source, opacity, blend_rgb_hdr)
+}
+
+/// [`composite`] with the blend function supplied: `photocraft_compose::psblend` passes its own,
+/// which reproduces Photoshop's edge behaviour for the four modes the W3C formulas here do not.
+/// Nuke operations never reach it — they return through [`nuke_composite`] first.
+pub fn composite_with_blend(
+    mode: BlendMode,
+    backdrop: [f32; 4],
+    source: [f32; 4],
+    opacity: f32,
+    blend: fn(BlendMode, [f32; 3], [f32; 3]) -> [f32; 3],
+) -> [f32; 4] {
+    if mode.is_nuke() {
+        return nuke_composite(mode, backdrop, source, opacity);
+    }
     let ab = backdrop[3];
     let as_ = source[3] * opacity;
     if as_ <= 0.0 {
@@ -591,7 +1036,7 @@ pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity:
     }
     let cb = [backdrop[0], backdrop[1], backdrop[2]];
     let cs = [source[0], source[1], source[2]];
-    let b = blend_rgb(mode, cb, cs);
+    let b = blend(mode, cb, cs);
     let ao = as_ + ab * (1.0 - as_);
     if ao <= 0.0 {
         return [0.0; 4];
@@ -609,11 +1054,40 @@ pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity:
 /// Transparency): "source atop", `Co = (1−αs)·Cb + αs·B(Cb,Cs)`, `αo = αb`. Unlike source-over
 /// followed by restoring the alpha, a half-transparent backdrop takes the new colour by `αs` alone.
 pub fn composite_atop(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    composite_atop_with_blend(mode, backdrop, source, opacity, blend_rgb)
+}
+
+/// [`composite`] or [`composite_hdr`] by the surface's depth: a 32-bit float document keeps
+/// values above 1 (Add is how light adds in HDR, and Nuke's operations work the same way), while
+/// the integer depths clip as Photoshop does. Editing and painting commands choose with this, the
+/// way the compositor chooses from the document.
+pub fn composite_for(sample: crate::SampleType, mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    if sample == crate::SampleType::F32 { composite_hdr(mode, backdrop, source, opacity) } else { composite(mode, backdrop, source, opacity) }
+}
+
+/// [`composite_atop`] or [`composite_atop_hdr`] by the surface's depth (see [`composite_for`]).
+pub fn composite_atop_for(sample: crate::SampleType, mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    if sample == crate::SampleType::F32 { composite_atop_hdr(mode, backdrop, source, opacity) } else { composite_atop(mode, backdrop, source, opacity) }
+}
+
+/// [`composite_atop`] for 32-bit float documents: the blend keeps values above 1.
+pub fn composite_atop_hdr(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    composite_atop_with_blend(mode, backdrop, source, opacity, blend_rgb_hdr)
+}
+
+/// [`composite_atop`] with the blend function supplied (see [`composite_with_blend`]).
+pub fn composite_atop_with_blend(
+    mode: BlendMode,
+    backdrop: [f32; 4],
+    source: [f32; 4],
+    opacity: f32,
+    blend: fn(BlendMode, [f32; 3], [f32; 3]) -> [f32; 3],
+) -> [f32; 4] {
     let as_ = source[3] * opacity;
     if as_ <= 0.0 {
         return backdrop;
     }
-    let b = blend_rgb(mode, [backdrop[0], backdrop[1], backdrop[2]], [source[0], source[1], source[2]]);
+    let b = blend(mode, [backdrop[0], backdrop[1], backdrop[2]], [source[0], source[1], source[2]]);
     let mut out = backdrop;
     for i in 0..3 {
         out[i] = (1.0 - as_) * backdrop[i] + as_ * b[i];
@@ -621,5 +1095,177 @@ pub fn composite_atop(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opa
     out
 }
 
+/// [`composite`] for the Nuke Merge operations: Nuke's premultiplied maths, then mixed by
+/// `opacity` (Merge's `mix`). The compositing operations are composited whole here; the colour
+/// ones use the general formula with [`nuke_channel`].
+fn nuke_composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    let mix = opacity.clamp(0.0, 1.0);
+    if mix <= 0.0 {
+        return backdrop;
+    }
+
+    let ba = backdrop[3];
+    let b = [backdrop[0] * ba, backdrop[1] * ba, backdrop[2] * ba, ba];
+
+    let sa = source[3];
+    let a = [source[0] * sa, source[1] * sa, source[2] * sa, sa];
+
+    // An empty source leaves the backdrop as it was for most operations. Not for these: in, mask
+    // and out give nothing there (Ab, Ba, A(1-b) with A or a zero), and min, max and hypot treat
+    // the empty A as a value, which differs from B where B is negative.
+    if sa <= 0.0
+        && !matches!(
+            mode,
+            BlendMode::NukeIn | BlendMode::NukeMask | BlendMode::NukeOut | BlendMode::NukeMin | BlendMode::NukeMax | BlendMode::NukeHypot
+        )
+    {
+        return backdrop;
+    }
+
+    let m: [f32; 4] = match mode {
+        BlendMode::NukeMatte => [ // matte
+            a[0] + b[0] * (1.0 - sa),
+            a[1] + b[1] * (1.0 - sa),
+            a[2] + b[2] * (1.0 - sa),
+            sa + ba * (1.0 - sa),
+        ],
+        BlendMode::NukeUnder => [ // under
+            a[0] * (1.0 - ba) + b[0],
+            a[1] * (1.0 - ba) + b[1],
+            a[2] * (1.0 - ba) + b[2],
+            sa * (1.0 - ba) + ba,
+        ],
+        BlendMode::NukePlus => [ // plus
+            a[0] + b[0],
+            a[1] + b[1],
+            a[2] + b[2],
+            (sa + ba).min(1.0),
+        ],
+        BlendMode::NukeScreen => [ // screen
+            nuke_screen(a[0], b[0]),
+            nuke_screen(a[1], b[1]),
+            nuke_screen(a[2], b[2]),
+            nuke_screen(sa, ba),
+        ],
+        BlendMode::NukeMin => [ // min
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].min(b[2]),
+            sa.min(ba),
+        ],
+        BlendMode::NukeMax => [ // max
+            a[0].max(b[0]),
+            a[1].max(b[1]),
+            a[2].max(b[2]),
+            sa.max(ba),
+        ],
+        BlendMode::NukeHypot => [ // hypot
+            (a[0] * a[0] + b[0] * b[0]).sqrt(),
+            (a[1] * a[1] + b[1] * b[1]).sqrt(),
+            (a[2] * a[2] + b[2] * b[2]).sqrt(),
+            (sa * sa + ba * ba).sqrt().min(1.0),
+        ],
+        BlendMode::NukeIn => [a[0] * ba, a[1] * ba, a[2] * ba, sa * ba], // in
+        BlendMode::NukeOut => [ // out
+            a[0] * (1.0 - ba),
+            a[1] * (1.0 - ba),
+            a[2] * (1.0 - ba),
+            sa * (1.0 - ba),
+        ],
+        BlendMode::NukeMask => [b[0] * sa, b[1] * sa, b[2] * sa, ba * sa], // mask
+        BlendMode::NukeStencil => [ // stencil
+            b[0] * (1.0 - sa),
+            b[1] * (1.0 - sa),
+            b[2] * (1.0 - sa),
+            ba * (1.0 - sa),
+        ],
+        BlendMode::NukeAtop => [ // atop
+            a[0] * ba + b[0] * (1.0 - sa),
+            a[1] * ba + b[1] * (1.0 - sa),
+            a[2] * ba + b[2] * (1.0 - sa),
+            ba,
+        ],
+        BlendMode::NukeXor => [ // xor
+            a[0] * (1.0 - ba) + b[0] * (1.0 - sa),
+            a[1] * (1.0 - ba) + b[1] * (1.0 - sa),
+            a[2] * (1.0 - ba) + b[2] * (1.0 - sa),
+            (sa * (1.0 - ba) + ba * (1.0 - sa)).clamp(0.0, 1.0),
+        ],
+        BlendMode::NukeConjointOver => { // conjoint-over
+            if sa > ba || ba <= 1e-7 {
+                a
+            } else {
+                let k = 1.0 - sa / ba;
+                [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k, sa + ba * k]
+            }
+        }
+        BlendMode::NukeDisjointOver => { // disjoint-over
+            if sa + ba < 1.0 || ba <= 1e-7 {
+                [a[0] + b[0], a[1] + b[1], a[2] + b[2], (sa + ba).min(1.0)]
+            } else {
+                let k = (1.0 - sa) / ba;
+                [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k, 1.0]
+            }
+        }
+        // Every other operation runs as the export writes it, with Merge's alpha masking
+        // (`screen_alpha`): the alpha is a + b - ab, each input passes through where the other
+        // doesn't cover, `(1-b)A + (1-a)B` premultiplied, and the operation adds its share where
+        // both do. Nuke's share differs by operation (measured in Nuke 17): most take `ab·f` of
+        // the straight colours, minus and from `ab·f` of the premultiplied ones, divide and
+        // geometric `f` of the premultiplied ones, and the clamping ones clamp both colours first,
+        // in the pass-through terms too. Applying the formula to the alpha instead, as a plain
+        // Merge does, gives difference, minus and from an alpha of 0 over an opaque comp.
+        other => {
+            let clamp = nuke_clamps_inputs(other);
+            let (cs, cb) = if clamp {
+                ([source[0].max(0.0), source[1].max(0.0), source[2].max(0.0)], [backdrop[0].max(0.0), backdrop[1].max(0.0), backdrop[2].max(0.0)])
+            } else {
+                ([source[0], source[1], source[2]], [backdrop[0], backdrop[1], backdrop[2]])
+            };
+            let (ap, bp) = ([cs[0] * sa, cs[1] * sa, cs[2] * sa], [cb[0] * ba, cb[1] * ba, cb[2] * ba]);
+            let both = sa * ba;
+            let share = |i: usize| -> f32 {
+                match other {
+                    BlendMode::NukeMinus => both * (ap[i] - bp[i]),
+                    BlendMode::NukeFrom => both * (bp[i] - ap[i]),
+                    BlendMode::NukeDivide => {
+                        if bp[i] > 0.0 { ap[i] / bp[i] } else { both * cs[i] }
+                    }
+                    BlendMode::NukeGeometric => nuke_geometric(ap[i], bp[i]),
+                    BlendMode::NukeSoftLight => both * nuke_soft_light_p(cs[i], cb[i], cs[i] * bp[i]),
+                    _ => both * nuke_channel(other, cb[i], cs[i]),
+                }
+            };
+            let ao = sa + ba * (1.0 - sa);
+            [
+                (1.0 - sa) * bp[0] + (1.0 - ba) * ap[0] + share(0),
+                (1.0 - sa) * bp[1] + (1.0 - ba) * ap[1] + share(1),
+                (1.0 - sa) * bp[2] + (1.0 - ba) * ap[2] + share(2),
+                ao,
+            ]
+        }
+    };
+
+    let out_pm = [
+        b[0] + (m[0] - b[0]) * mix,
+        b[1] + (m[1] - b[1]) * mix,
+        b[2] + (m[2] - b[2]) * mix,
+        (b[3] + (m[3] - b[3]) * mix).clamp(0.0, 1.0),
+    ];
+
+    let ao = out_pm[3];
+    if ao <= 1e-7 {
+        [0.0; 4]
+    } else {
+        let inv_a = 1.0 / ao;
+        [out_pm[0] * inv_a, out_pm[1] * inv_a, out_pm[2] * inv_a, ao]
+    }
+}
+
+
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod nuke_tests;

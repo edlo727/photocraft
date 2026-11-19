@@ -66,7 +66,7 @@ pub(crate) fn pen_axes(xf: &crate::canvas::ViewXform, brush: &BrushSettings, pen
         photocraft_paint::StrokePoint { pressure: pen.pressure, tilt_x: pen.tilt_x, tilt_y: pen.tilt_y, rotation: pen.rotation, ..Default::default() },
     );
     let sd = &brush.shape_dynamics;
-    let step = StepInput { point, direction: 0.0, initial_direction: 0.0, step: 0 };
+    let step = StepInput { point, direction: 0.0, initial_direction: 0.0, step: 0, speed: 0.0 };
     let mut angle = match sd.angle.control {
         Control::PenTilt | Control::Rotation => control_angle(sd.angle.control, sd.angle.fade_steps, &step),
         _ => 0.0,

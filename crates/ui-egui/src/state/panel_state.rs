@@ -34,6 +34,10 @@ pub struct LayersPanelOptions {
     pub add_copy_to_copied_layers_and_groups: bool,
     pub preview_on_canvas_when_reordering_layers: bool,
     pub show_layer_mask_badges: bool,
+    /// The Layers panel's "Nuke blend modes" switch: blend menus list the Nuke Merge operations
+    /// after Photoshop's modes (`photocraft_color::blend::set_nuke_modes_in_menus`). Off: only
+    /// Photoshop's. Layers keep their mode either way.
+    pub show_nuke_blend_modes: bool,
 }
 
 impl LayersPanelOptions {
@@ -48,6 +52,7 @@ impl LayersPanelOptions {
             add_copy_to_copied_layers_and_groups: true,
             preview_on_canvas_when_reordering_layers: true,
             show_layer_mask_badges: false,
+            show_nuke_blend_modes: false,
         }
     }
 }

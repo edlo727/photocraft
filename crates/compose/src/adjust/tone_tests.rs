@@ -416,6 +416,7 @@ fn levels_and_curves_apply_each_channel_before_the_master() {
         space: ToneSpace::Rgb,
         black: Vec::new(),
         pencil: false,
+        lookup: Default::default(),
     };
     for depth in [None, Some(SampleType::U8), Some(SampleType::U16), Some(SampleType::F32)] {
         let ll = tone_luts_depth(&levels, depth);
@@ -482,6 +483,7 @@ fn cmyk_black_curve_darkens_and_lab_lightness_lifts() {
         space: ToneSpace::Cmyk,
         black: line(0.0, 0.5),
         pencil: false,
+        lookup: Default::default(),
     };
     let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[0.8, 0.8, 0.8, 1.0]] };
     apply(&a, &mut b);
@@ -493,6 +495,7 @@ fn cmyk_black_curve_darkens_and_lab_lightness_lifts() {
         space: ToneSpace::Lab,
         black: Vec::new(),
         pencil: false,
+        lookup: Default::default(),
     };
     let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[0.2, 0.2, 0.2, 1.0]] };
     apply(&a, &mut b);

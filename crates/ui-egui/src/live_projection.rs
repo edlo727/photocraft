@@ -266,6 +266,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect
             output: output.unwrap_or(0),
             hdr: crate::canvas::hdr_preview(app, &doc),
             offset: [0.0, 0.0],
+            channel: app.session.color.viewer_channel(doc.id).code(),
             projection: Some([cam.yaw, cam.pitch, cam.fov]),
         };
         crate::gpu_canvas::GpuCanvas::paint(&painter, rect, params);

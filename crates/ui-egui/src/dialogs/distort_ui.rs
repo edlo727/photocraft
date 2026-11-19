@@ -181,20 +181,62 @@ pub(crate) fn without_layer(doc: &Document, id: LayerId) -> Arc<Document> {
     Arc::new(d)
 }
 
-/// A texture image of `surf` over `r`, downsampled so the longer side is at most `max_side`.
-pub(crate) fn surface_image(surf: &Surface, r: Rect, max_side: usize) -> ColorImage {
+/// How a dialog preview puts the document's pixels on screen: the canvas's own display chain
+/// ([`photocraft_engine::preview_display`]), so a preview shows what the canvas shows — the
+/// 32-bit preview's exposure and gamma, then either View › OCIO Viewer's display / view or
+/// colour management. An integer document on a matching monitor needs nothing and this is then
+/// the identity, which costs nothing per pixel.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PreviewDisplay(Option<std::sync::Arc<photocraft_engine::preview_display::CanvasPreview>>);
+
+impl PreviewDisplay {
+    /// What `doc` needs, from the same state the canvas reads.
+    pub(crate) fn for_doc(app: &PhotocraftApp, doc: &Document) -> Self {
+        let path = app.session.prefs().file_handling.ocio_config.clone();
+        let p = photocraft_engine::preview_display::canvas_preview(&app.session.color, doc, &path);
+        Self((!p.is_identity()).then_some(p))
+    }
+
+    /// Leaves every value alone (an integer document with nothing to convert).
+    pub(crate) fn identity() -> Self {
+        Self(None)
+    }
+
+    /// One straight RGBA pixel; alpha is coverage and passes through.
+    pub(crate) fn apply(&self, p: [f32; 4]) -> [f32; 4] {
+        match &self.0 {
+            Some(d) => d.pixel(p),
+            None => p,
+        }
+    }
+
+    /// One straight RGBA pixel as 8-bit, premultiplied for egui.
+    pub(crate) fn premultiplied(&self, p: [f32; 4]) -> Color32 {
+        let d = self.apply(p);
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        let a = d[3].clamp(0.0, 1.0);
+        Color32::from_rgba_premultiplied(q(d[0] * a), q(d[1] * a), q(d[2] * a), q(a))
+    }
+}
+
+/// A texture image of `surf` over `r`, downsampled so the longer side is at most `max_side` and
+/// shown through `display`.
+pub(crate) fn surface_image(surf: &Surface, r: Rect, max_side: usize, display: &PreviewDisplay) -> ColorImage {
     let (w, h) = (r.width().max(1) as usize, r.height().max(1) as usize);
     let k = w.max(h).div_ceil(max_side).max(1);
     let (tw, th) = (w.div_ceil(k), h.div_ceil(k));
     let mut px = vec![Color32::TRANSPARENT; tw * th];
-    let mut row = vec![[0u8; 4]; w];
+    let mut row = vec![[0.0f32; 4]; w];
+    let opaque = !surf.format().alpha;
     for ty in 0..th {
         let y = r.y0 + (ty * k) as i32;
-        surf.read_rgba8_into(Rect::new(r.x0, y, r.x1, y + 1), &mut row);
+        surf.read_rgba_into(Rect::new(r.x0, y, r.x1, y + 1), &mut row);
         for tx in 0..tw {
-            let p = row[(tx * k).min(w - 1)];
-            let a = if surf.format().alpha { p[3] } else { 255 };
-            px[ty * tw + tx] = Color32::from_rgba_unmultiplied(p[0], p[1], p[2], a);
+            let mut p = row[(tx * k).min(w - 1)];
+            if opaque {
+                p[3] = 1.0;
+            }
+            px[ty * tw + tx] = display.premultiplied(p);
         }
     }
     ColorImage::new([tw, th], px)

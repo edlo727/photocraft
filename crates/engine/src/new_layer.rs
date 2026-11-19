@@ -20,6 +20,11 @@ pub fn neutral_color(mode: BlendMode) -> Option<([f32; 3], &'static str)> {
         Darken | Multiply | ColorBurn | LinearBurn | DarkerColor | Divide => Some(([1.0; 3], "white")),
         Lighten | Screen | ColorDodge | LinearDodge | LighterColor | Difference | Exclusion | Subtract => Some(([0.0; 3], "black")),
         Overlay | SoftLight | HardLight | VividLight | LinearLight | PinLight => Some(([0.5; 3], "50% gray")),
+        // Nuke Merge operations with a neutral colour.
+        NukeMin | NukeMultiply | NukeColorBurn => Some(([1.0; 3], "white")),
+        NukeMax | NukeScreen | NukeColorDodge | NukePlus | NukeDifference | NukeExclusion | NukeFrom => Some(([0.0; 3], "black")),
+        // Not soft-light: Nuke's lightens at 50% gray too (B(1 + B(1 - B/2)) at A = 0.5).
+        NukeOverlay | NukeHardLight => Some(([0.5; 3], "50% gray")),
         _ => None,
     }
 }

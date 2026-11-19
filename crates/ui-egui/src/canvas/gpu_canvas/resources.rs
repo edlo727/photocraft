@@ -1,10 +1,13 @@
 use super::budget::{canvas_budget, physical_memory};
 use super::doc_textures::init_buffer;
 use super::shaders::{CANVAS_WGSL, ENCODE_WGSL, MIP_WGSL};
+use super::stroke_overlay::StrokeGpu;
 use super::texels::LayerFit;
 use super::{FORMAT, FORMAT_HIGH, HashMap, NonZeroU64, TILE_UNIFORM_SIZE, VIEW_FLOATS, VIEW_UNIFORM_SIZE, wgpu};
 
 pub(super) struct Resources {
+    /// Large Brush Mode's stroke overlay (bind group 3 of the canvas pipeline).
+    pub(super) stroke: StrokeGpu,
     pub(super) view_bgl: wgpu::BindGroupLayout,
     pub(super) tile_bgl: wgpu::BindGroupLayout,
     pub(super) shadow_pipeline: wgpu::RenderPipeline,
@@ -33,11 +36,18 @@ pub(super) struct Resources {
     /// GPU memory the compositor may hold (`None`: its default), and the document area the
     /// view shows; applied before every composite.
     pub(super) compositor_budget: Option<u64>,
+    /// Rendering Mode › GPU (always): full and large refreshes stay on the GPU over budget.
+    pub(super) force_gpu: bool,
     /// The layer pages the last full (or large) refresh needed and the budget they had to fit
     /// (bytes): when they don't fit, full refreshes go to the CPU ([`OVER_BUDGET`]).
     pub(super) layer_fit: Option<LayerFit>,
     pub(super) compositor_cache_budget: Option<u64>,
+    /// Performance Mode's lower-stack cache cap (`GpuCanvas::set_composite_cache_cap`).
+    pub(super) compositor_cache_cap: Option<u64>,
     pub(super) compositor_focus: Option<photocraft_geom::Rect>,
+    /// While a band of a landing stroke refreshes: the only rect whose changed layer tiles
+    /// upload ([`GpuCanvas::refresh_band`]).
+    pub(super) upload_region: Option<photocraft_geom::Rect>,
     /// GPU bytes the documents' display textures may take together (see [`canvas_budget`]).
     pub(super) canvas_budget: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// How that budget is split between the open documents (see [`super::residency`]).
@@ -81,7 +91,7 @@ pub(super) fn lut_bind_group(
     bgl: &wgpu::BindGroupLayout,
     size: u32,
     bytes: &[u8],
-    shaper: Option<&photocraft_cms::GpuMatrixShaper>,
+    shaper: Option<&craft_cms::GpuMatrixShaper>,
 ) -> wgpu::BindGroup {
     let extent = wgpu::Extent3d { width: size, height: size, depth_or_array_layers: size };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -239,7 +249,7 @@ fn pipeline(
 
 impl Resources {
     /// Create the shared canvas pipelines, layouts and display resources.
-    pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, target: wgpu::TextureFormat, high: bool) -> Self {
+    pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, target: wgpu::TextureFormat, high: bool, exact_dabs: bool) -> Self {
         let module =
             device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("pc_canvas"), source: wgpu::ShaderSource::Wgsl(CANVAS_WGSL.into()) });
         let vis = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT;
@@ -278,9 +288,10 @@ impl Resources {
             label: Some("pc_display_lut"),
             entries: &[lut_entry, curves_entry, uniform_entry(2, 48, wgpu::ShaderStages::FRAGMENT, false)],
         });
+        let stroke = StrokeGpu::new(device, queue, exact_dabs);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pc_canvas"),
-            bind_group_layouts: &[Some(&view_bgl), Some(&tile_bgl), Some(&lut_bgl)],
+            bind_group_layouts: &[Some(&view_bgl), Some(&tile_bgl), Some(&lut_bgl), Some(&stroke.bgl)],
             immediate_size: 0,
         });
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -351,6 +362,7 @@ impl Resources {
         let encode_pipeline_high = high.then(|| pipeline(device, "pc_encode_16f", &encode_layout, &encode_module, ("vs", "fs"), FORMAT_HIGH, None));
         let identity_lut = lut_bind_group(device, queue, &lut_bgl, 2, &identity_lut_bytes(), None);
         Self {
+            stroke,
             lut_bgl,
             luts: HashMap::new(),
             display_lut_signatures: HashMap::new(),
@@ -375,8 +387,11 @@ impl Resources {
             compositor_failed: None,
             health: photocraft_gpu::DeviceHealth::new(),
             compositor_budget: None,
+            force_gpu: false,
             layer_fit: None,
             compositor_cache_budget: None,
+            compositor_cache_cap: None,
+            upload_region: None,
             compositor_focus: None,
             canvas_budget: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(canvas_budget(physical_memory(), None))),
             residency: Default::default(),

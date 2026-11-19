@@ -99,12 +99,38 @@ pub(crate) fn keep_overlap(device: &wgpu::Device, queue: &wgpu::Queue, old: &Res
 /// one `Arc` across every coordinate it covers), in parallel batches. Converting every tile one
 /// after another on the UI thread froze a 50 MP 16-bit document for about 1.4 s after a
 /// full-canvas fill (#1774). Returns how many tiles were converted.
+#[cfg(test)]
 pub(crate) fn convert_tiles(
     surface: &Surface,
     tiles: Vec<(TileCoord, Arc<Tile>)>,
     kind: TexKind,
-    mut put: impl FnMut(&Arc<Tile>, &[TileCoord], &[u8]),
+    put: impl FnMut(&Arc<Tile>, &[TileCoord], &[u8]),
 ) -> usize {
+    let mut put = put;
+    let mut groups = group_tiles(tiles);
+    let n = groups.len();
+    take_ready(&mut groups, kind, &mut put);
+    convert_groups(surface, &groups, kind, put);
+    n
+}
+
+/// [`convert_tiles`], returning how many distinct tiles [`preconvert`] had converted already
+/// (staged as they were).
+pub(crate) fn convert_tiles_ready(
+    surface: &Surface,
+    tiles: Vec<(TileCoord, Arc<Tile>)>,
+    kind: TexKind,
+    put: impl FnMut(&Arc<Tile>, &[TileCoord], &[u8]),
+) -> usize {
+    let mut put = put;
+    let mut groups = group_tiles(tiles);
+    let ready = take_ready(&mut groups, kind, &mut put);
+    convert_groups(surface, &groups, kind, put);
+    ready
+}
+
+/// Each distinct tile (by identity) with the coordinates sharing it.
+fn group_tiles(tiles: Vec<(TileCoord, Arc<Tile>)>) -> Vec<(Arc<Tile>, Vec<TileCoord>)> {
     let mut groups: Vec<(Arc<Tile>, Vec<TileCoord>)> = Vec::new();
     let mut index: HashMap<*const Tile, usize> = HashMap::new();
     for (c, t) in tiles {
@@ -115,6 +141,103 @@ pub(crate) fn convert_tiles(
                 groups.push((t, vec![c]));
             }
         }
+    }
+    groups
+}
+
+/// Texels converted ahead of the upload that needs them ([`preconvert`]), by tile identity.
+/// Each entry holds its tile weakly: a tile that is gone (an undone or replaced stroke) can't
+/// be mistaken for a new tile at the same address.
+#[derive(Default)]
+struct Ready {
+    tiles: HashMap<usize, (std::sync::Weak<Tile>, Vec<u8>)>,
+    bytes: usize,
+}
+
+/// The most converted bytes [`preconvert`] keeps waiting for their upload (a 4000 px square
+/// stroke on a 32-bit layer is about 128 MiB of RGBA16F).
+const READY_CAP: usize = 1 << 30;
+
+fn ready() -> std::sync::MutexGuard<'static, Ready> {
+    static READY: std::sync::OnceLock<std::sync::Mutex<Ready>> = std::sync::OnceLock::new();
+    READY.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Hand groups whose tiles [`preconvert`] converted to `put` as they are and drop them from
+/// `groups`; returns how many went.
+fn take_ready(groups: &mut Vec<(Arc<Tile>, Vec<TileCoord>)>, kind: TexKind, put: &mut impl FnMut(&Arc<Tile>, &[TileCoord], &[u8])) -> usize {
+    if kind != TexKind::Rgba16F || groups.is_empty() {
+        return 0;
+    }
+    let mut cache = ready();
+    if cache.tiles.is_empty() {
+        return 0;
+    }
+    let mut n = 0;
+    groups.retain(|(t, cs)| {
+        let key = Arc::as_ptr(t) as usize;
+        let hit = cache.tiles.get(&key).is_some_and(|(w, _)| w.upgrade().is_some_and(|w| Arc::ptr_eq(&w, t)));
+        if !hit {
+            return true;
+        }
+        if let Some((_, bytes)) = cache.tiles.remove(&key) {
+            cache.bytes = cache.bytes.saturating_sub(bytes.len());
+            put(t, cs, &bytes);
+            n += 1;
+        }
+        false
+    });
+    n
+}
+
+/// Convert the RGBA16F texels of `surface`'s tiles inside `rect` ahead of their upload, on the
+/// calling thread's pool: the next refresh that uploads one of these tiles (by identity) stages
+/// them as they are. Large Brush Mode does this on its commit thread, so the frame that lands a
+/// big stroke on a 16- or 32-bit layer doesn't convert it. Tiles `unchanged` holds too (the
+/// layer before the stroke) are skipped: they are on the GPU already. Only RGB and grayscale
+/// 16/32-bit surfaces; returns how many tiles were converted.
+pub fn preconvert(surface: &Surface, rect: Rect, unchanged: Option<&Surface>) -> usize {
+    let fmt = surface.format();
+    if !matches!(fmt.sample, SampleType::U16 | SampleType::F32) || rect.is_empty() {
+        return 0;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let tiles: Vec<Arc<Tile>> = rect
+        .tiles()
+        .filter_map(|c| surface.tile(c).filter(|t| !unchanged.and_then(|u| u.tile(c)).is_some_and(|o| Arc::ptr_eq(o, *t))).cloned())
+        .filter(|t| seen.insert(Arc::as_ptr(t) as usize))
+        .collect();
+    if tiles.is_empty() {
+        return 0;
+    }
+    let converted = fx::par_map(tiles, |t| {
+        let bytes = rgb_gray16_to_f16(&fmt, &t.bytes()).or_else(|| rgb_gray32_to_f16(&fmt, &t.bytes()));
+        bytes.map(|b| (t, b))
+    });
+    let mut cache = ready();
+    // Entries whose tiles are gone never upload.
+    if !cache.tiles.is_empty() {
+        cache.tiles.retain(|_, (w, _)| w.strong_count() > 0);
+        cache.bytes = cache.tiles.values().map(|(_, b)| b.len()).sum();
+    }
+    let mut n = 0;
+    for (t, bytes) in converted.into_iter().flatten() {
+        if cache.bytes + bytes.len() > READY_CAP {
+            break;
+        }
+        cache.bytes += bytes.len();
+        if let Some((_, old)) = cache.tiles.insert(Arc::as_ptr(&t) as usize, (Arc::downgrade(&t), bytes)) {
+            cache.bytes = cache.bytes.saturating_sub(old.len());
+        }
+        n += 1;
+    }
+    n
+}
+
+/// Convert and `put` each group (see [`convert_tiles`]).
+fn convert_groups(surface: &Surface, groups: &[(Arc<Tile>, Vec<TileCoord>)], kind: TexKind, mut put: impl FnMut(&Arc<Tile>, &[TileCoord], &[u8])) {
+    if groups.is_empty() {
+        return;
     }
     // CMYK and Lab tiles convert pixel by pixel through a colour transform (a CMYK tile took
     // ~5 ms on one thread, the whole of a brush dab's refresh on an A4 CMYK page, #5108): those
@@ -145,7 +268,6 @@ pub(crate) fn convert_tiles(
         // The texels are on their way to the GPU: the buffers serve the next batch.
         parts.into_iter().for_each(scratch::give);
     }
-    groups.len()
 }
 
 /// Rows per parallel band of a colour-managed (CMYK, Lab) tile conversion.

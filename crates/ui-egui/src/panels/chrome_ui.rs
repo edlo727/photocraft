@@ -361,7 +361,7 @@ mod tests {
             h.run_steps(4);
             let doc = h.state().session.active().unwrap().doc.id.0;
             assert!(h.query_by_label("GPU Memory Full").is_none(), "{theme:?}: nothing measured yet");
-            let over = crate::gpu_canvas::LayerFit { doc, needed: 3 << 30, budget: 2 << 30 };
+            let over = crate::gpu_canvas::LayerFit { doc, needed: 3 << 30, budget: 2 << 30, forced: false };
             h.state_mut().perf.gpu_layer_fit = Some(crate::gpu_canvas::LayerFit { doc: doc + 1, ..over });
             h.run_steps(2);
             assert!(h.query_by_label("GPU Memory Full").is_none(), "{theme:?}: another document's layers");
@@ -390,7 +390,7 @@ mod tests {
         h.state_mut().sync_views();
         h.run_steps(4);
         let doc = h.state().session.active().unwrap().doc.id.0;
-        h.state_mut().perf.gpu_layer_fit = Some(crate::gpu_canvas::LayerFit { doc, needed: 3 << 30, budget: 2 << 30 });
+        h.state_mut().perf.gpu_layer_fit = Some(crate::gpu_canvas::LayerFit { doc, needed: 3 << 30, budget: 2 << 30, forced: false });
         let reason = CpuReason::Unsupported("Advanced Blending on `Layer 1`".into());
         crate::render_path::note(h.state_mut(), doc, crate::render_path::Path::Cpu(reason));
         h.run_steps(2);
@@ -413,7 +413,7 @@ mod tests {
         h.state_mut().sync_views();
         h.run_steps(4);
         let doc = h.state().session.active().unwrap().doc.id.0;
-        let over = crate::gpu_canvas::LayerFit { doc, needed: 3 << 30, budget: 2 << 30 };
+        let over = crate::gpu_canvas::LayerFit { doc, needed: 3 << 30, budget: 2 << 30, forced: false };
         h.state_mut().perf.gpu_layer_fit = Some(over);
         let reason = CpuReason::OverBudget { needed: over.needed, budget: over.budget };
         crate::render_path::note(h.state_mut(), doc, crate::render_path::Path::Cpu(reason));

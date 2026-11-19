@@ -106,7 +106,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let mut m = mode(f);
     ui.horizontal(|ui| {
         row_label(ui, tl!("Mode:"));
-        let options: Vec<(BlendMode, &str)> = BlendMode::LAYER_MODES.into_iter().map(|m| (m, m.label())).collect();
+        let options: Vec<(BlendMode, &str)> = BlendMode::menu_modes().map(|m| (m, m.label())).collect();
         if crate::widgets::dropdown(ui, "new-layer-mode", tl!("Mode"), &mut m, &options, 140.0) {
             f.insert("mode".into(), json!(m.label()));
         }

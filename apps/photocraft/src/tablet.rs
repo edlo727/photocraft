@@ -87,6 +87,19 @@ pub fn right_button_service() -> Option<photocraft_ui_egui::RightButtonDownFn> {
     Some(Box::new(photocraft_tablet::windows::is_barrel_button_down))
 }
 
+/// Barrel presses counter (Windows), and wake the UI when the barrel button changes.
+#[cfg(target_os = "windows")]
+pub fn barrel_presses_service(ctx: &egui::Context) -> Option<photocraft_ui_egui::BarrelPressesFn> {
+    let ctx = ctx.clone();
+    photocraft_tablet::windows::set_waker(move || ctx.request_repaint());
+    Some(Box::new(photocraft_tablet::windows::barrel_presses))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn barrel_presses_service(_ctx: &egui::Context) -> Option<photocraft_ui_egui::BarrelPressesFn> {
+    None
+}
+
 #[cfg(not(target_os = "windows"))]
 pub fn right_button_service() -> Option<photocraft_ui_egui::RightButtonDownFn> {
     None

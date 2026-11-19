@@ -136,19 +136,23 @@ const CURVE_SAMPLES: usize = 256;
 struct CurvePolyline {
     points: Vec<[f32; 2]>,
     graph: Option<Rect>,
+    /// Drawn as a Nuke ColorLookup curve (unclamped): Some(hold ends), None for Photoshop's.
+    lookup: Option<bool>,
     line: Vec<Pos2>,
 }
 
 impl CurvePolyline {
     /// Returns whether the screen geometry changed. Moving the graph also invalidates screen
     /// coordinates (for example when scrolling the Properties panel or moving the dialog).
-    fn update(&mut self, points: &[[f32; 2]], graph: Rect) -> bool {
-        if self.points == points && self.graph == Some(graph) {
+    fn update(&mut self, points: &[[f32; 2]], graph: Rect, lookup: Option<bool>) -> bool {
+        if self.points == points && self.graph == Some(graph) && self.lookup == lookup {
             return false;
         }
+        self.lookup = lookup;
         let cp: Vec<photocraft_doc::adjust::CurvePoint> =
             points.iter().map(|q| photocraft_doc::adjust::CurvePoint { input: q[0] / 255.0, output: q[1] / 255.0 }).collect();
-        self.line = photocraft_compose::adjust::curve_samples::<CURVE_SAMPLES>(&cp)
+        // Graph units (0..1 across the graph): the spline is the same at any uniform scale.
+        self.line = photocraft_compose::adjust::spline_samples(&cp, CURVE_SAMPLES, 1.0, lookup.is_none(), lookup == Some(false))
             .into_iter()
             .enumerate()
             .map(|(i, y)| pos2(graph.left() + i as f32 / (CURVE_SAMPLES - 1) as f32 * graph.width(), graph.bottom() - y * graph.height()))
@@ -160,10 +164,10 @@ impl CurvePolyline {
     }
 }
 
-fn cached_curve_line(ctx: &egui::Context, id: egui::Id, points: &[[f32; 2]], graph: Rect) -> Vec<Pos2> {
+fn cached_curve_line(ctx: &egui::Context, id: egui::Id, points: &[[f32; 2]], graph: Rect, lookup: Option<bool>) -> Vec<Pos2> {
     ctx.data_mut(|d| {
         let cache = d.get_temp_mut_or_default::<CurvePolyline>(id);
-        cache.update(points, graph);
+        cache.update(points, graph, lookup);
         // egui owns the submitted path. Only this small copy is needed on a cache hit;
         // normalization, spline solving, sampling and screen mapping are all skipped.
         cache.line.clone()
@@ -292,10 +296,318 @@ fn curves_mode_row(ui: &mut egui::Ui, v: &mut Value, key: &str, cx: &EditorCx) -
             write_map(v, key, &map);
             e.add(Edit::discrete(true));
         }
+        // Nuke ColorLookup settings (range, ends, order) open on demand, so Photoshop's Curves
+        // keep their layout; a curve already using them shows them anyway.
+        if !pencil && space_of(v) == ToneSpace::Rgb && cx.isolated_curve.is_none() {
+            let open_id = cx.mem.with("curves-lookup-open");
+            let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+            if ui.selectable_label(open, "Range…").on_hover_text("Nuke ColorLookup: range, held ends and channel order").clicked() {
+                open = !open;
+                ui.data_mut(|d| d.insert_temp(open_id, open));
+            }
+        }
     });
     e
 }
 
+/// The Nuke ColorLookup settings of a Curves adjustment as its params hold them: (range, hold
+/// ends, master first), Photoshop's (1, false, false) when absent.
+fn lookup_of(v: &Value) -> (f32, bool, bool) {
+    let range = v.get("range").and_then(Value::as_f64).map_or(1.0, |r| r as f32);
+    let range = if range.is_finite() { range.clamp(1.0, photocraft_doc::adjust::CurveLookup::MAX_RANGE) } else { 1.0 };
+    let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    (range, flag("holdEnds"), flag("masterFirst"))
+}
+
+/// Range, ends and channel order (Nuke's ColorLookup) for point curves in RGB.
+fn lookup_row(ui: &mut egui::Ui, v: &mut Value) -> Edit {
+    let (mut range, mut hold, mut master_first) = lookup_of(v);
+    let mut e = Edit::default();
+    ui.horizontal(|ui| {
+        ui.label("Range:");
+        let opts: Vec<(f32, &str)> =
+            vec![(1.0, "0–1"), (2.0, "0–2"), (4.0, "0–4"), (8.0, "0–8"), (16.0, "0–16"), (32.0, "0–32"), (64.0, "0–64")];
+        let old = range;
+        if widgets::dropdown_literal(ui, "curves-lookup-range", "Range", &mut range, &opts, 70.0) {
+            // Straight curves follow the range (the engine does the same); edited curves keep
+            // their values, and the graph frames them (see `CurveView`).
+            for key in ["points", "red", "green", "blue"] {
+                let pts = read_curve(v, key);
+                let top = 255.0 * old;
+                if pts.len() == 2 && pts[0] == [0.0, 0.0] && (pts[1][0] - top).abs() < 0.01 && (pts[1][1] - top).abs() < 0.01 {
+                    v[key] = json!([[0.0, 0.0], [255.0 * range, 255.0 * range]]);
+                }
+            }
+            v["range"] = json!(range);
+            e.add(Edit::discrete(true));
+        }
+        if ui.checkbox(&mut hold, "Hold ends").on_hover_text("Past the first and last points, hold their values (off: continue along the end slopes)").changed() {
+            v["holdEnds"] = json!(hold);
+            e.add(Edit::discrete(true));
+        }
+        if ui.checkbox(&mut master_first, "Master first").on_hover_text("Apply the RGB curve before the channel curves, as Nuke's ColorLookup (off: after, as Photoshop)").changed() {
+            v["masterFirst"] = json!(master_first);
+            e.add(Edit::discrete(true));
+        }
+    });
+    e
+}
+
+/// The part of a lookup range the Curves graph shows, in linear values (Nuke's curve editor
+/// zoom): input `x0..x0 + sx`, output `y0..y0 + sy`. Display only; the curve is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CurveView {
+    range: f32,
+    x0: f32,
+    y0: f32,
+    sx: f32,
+    sy: f32,
+}
+
+impl CurveView {
+    fn full(range: f32) -> Self {
+        CurveView { range, x0: 0.0, y0: 0.0, sx: range, sy: range }
+    }
+
+    /// Frames the points (levels: 255 = 1.0) and the origin, with a margin.
+    fn fit(range: f32, pts: &[[f32; 2]]) -> Self {
+        let mut lo = [0.0f32; 2];
+        let mut hi = [f32::MIN; 2];
+        for q in pts.iter().filter(|q| q.iter().all(|x| x.is_finite())) {
+            for a in 0..2 {
+                lo[a] = lo[a].min(q[a] / 255.0);
+                hi[a] = hi[a].max(q[a] / 255.0);
+            }
+        }
+        if hi[0] <= lo[0] || hi[1] <= lo[1] {
+            return Self::full(range);
+        }
+        let frame = |a: usize| {
+            let span = (hi[a] - lo[a]).max(0.05);
+            let m = span * 0.05;
+            (lo[a] - m, span + 2.0 * m)
+        };
+        let ((x0, sx), (y0, sy)) = (frame(0), frame(1));
+        CurveView { range, x0, y0, sx, sy }
+    }
+
+    fn load(a: [f32; 5]) -> Self {
+        CurveView { range: a[0], x0: a[1], y0: a[2], sx: a[3], sy: a[4] }
+    }
+
+    fn store(&self) -> [f32; 5] {
+        [self.range, self.x0, self.y0, self.sx, self.sy]
+    }
+
+    /// Levels (255 = 1.0) → graph units (0..255 across the shown window).
+    fn to_g(self, q: [f32; 2]) -> [f32; 2] {
+        [(q[0] / 255.0 - self.x0) / self.sx * 255.0, (q[1] / 255.0 - self.y0) / self.sy * 255.0]
+    }
+
+    /// Graph units → levels.
+    fn levels_from_g(self, g: [f32; 2]) -> [f32; 2] {
+        [(self.x0 + g[0] / 255.0 * self.sx) * 255.0, (self.y0 + g[1] / 255.0 * self.sy) * 255.0]
+    }
+
+    /// Zooms by `factor` (< 1: in) about `at`, a point of the graph as fractions (0..1, y up).
+    fn zoom(&mut self, factor: f32, at: [f32; 2]) {
+        let (min, max) = ((self.range / 4000.0).max(0.001), self.range * 4.0);
+        let (ax, ay) = (self.x0 + at[0] * self.sx, self.y0 + at[1] * self.sy);
+        self.sx = (self.sx * factor).clamp(min, max);
+        self.sy = (self.sy * factor).clamp(min, max);
+        self.x0 = ax - at[0] * self.sx;
+        self.y0 = ay - at[1] * self.sy;
+    }
+
+    /// Pans by a screen drag of `d` graph fractions (y down).
+    fn pan(&mut self, d: [f32; 2]) {
+        self.x0 -= d[0] * self.sx;
+        self.y0 += d[1] * self.sy;
+    }
+}
+
+/// A round grid step showing about four lines over `span` (1, 2 or 5 × a power of ten).
+fn grid_step(span: f32) -> f32 {
+    let raw = (span / 4.0).max(1e-6);
+    let p = 10f32.powf(raw.log10().floor());
+    [1.0, 2.0, 5.0, 10.0].into_iter().map(|m| m * p).find(|s| *s >= raw).unwrap_or(10.0 * p)
+}
+
+/// Nuke-style navigation for a lookup curve: the wheel zooms about the pointer and Alt- or
+/// middle-drag pans. Returns whether this drag is a pan, which must not move any point.
+fn zoom_and_pan(ui: &mut egui::Ui, resp: &egui::Response, graph: Rect, view: &mut CurveView, view_id: egui::Id) -> bool {
+    if resp.hovered()
+        && let Some(pos) = resp.hover_pos()
+    {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            let at = [(pos.x - graph.left()) / graph.width().max(1.0), (graph.bottom() - pos.y) / graph.height().max(1.0)];
+            view.zoom((-scroll / 300.0).exp(), at);
+            // The wheel zooms the graph, not the panel around it.
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        }
+    }
+    let alt = ui.input(|i| i.modifiers.alt);
+    if resp.dragged_by(egui::PointerButton::Middle) || (alt && resp.dragged_by(egui::PointerButton::Primary)) {
+        let d = resp.drag_delta();
+        view.pan([d.x / graph.width().max(1.0), d.y / graph.height().max(1.0)]);
+    }
+    ui.data_mut(|d| d.insert_temp(view_id, view.store()));
+    alt || resp.dragged_by(egui::PointerButton::Middle)
+}
+
+/// The Pencil's freehand stroke: it draws while the button is down and commits on release, and
+/// Shift carries on from the last stroke's end in a straight line. Returns whether the map
+/// changed, and whether the stroke has just ended (which commits the edit).
+fn pencil_stroke(ui: &mut egui::Ui, resp: &egui::Response, graph: Rect, mem: egui::Id, map: &mut [f32]) -> (bool, bool) {
+    let stroke_id = mem.with("curves-pencil");
+    let (mut active, mut last): (bool, Option<[f32; 2]>) = ui.data(|d| d.get_temp(stroke_id)).unwrap_or_default();
+    let (mut drawn, mut commit) = (false, false);
+    if resp.is_pointer_button_down_on()
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let q = [
+            ((pos.x - graph.left()) / graph.width().max(1.0) * 255.0).clamp(0.0, 255.0),
+            ((graph.bottom() - pos.y) / graph.height().max(1.0) * 255.0).clamp(0.0, 255.0),
+        ];
+        let from = if active || ui.input(|i| i.modifiers.shift) { last.unwrap_or(q) } else { q };
+        drawn = curve_edit::pencil_line(map, from, q);
+        active = true;
+        last = Some(q);
+    } else if active {
+        active = false;
+        commit = true;
+    }
+    ui.data_mut(|d| d.insert_temp(stroke_id, (active, last)));
+    (drawn, commit)
+}
+
+/// The graph's grid. A lookup curve gets lines at round values for its zoom, labelled along the
+/// bottom and left, marks at display white, and the unchanged line y = x across the window; a
+/// Photoshop curve gets quarters and a corner-to-corner diagonal.
+fn draw_grid(p: &egui::Painter, pg: &egui::Painter, graph: Rect, view: &CurveView, lookup: bool, t: &Tokens) {
+    let sx = |x: f32| graph.left() + (x - view.x0) / view.sx * graph.width();
+    let sy = |y: f32| graph.bottom() - (y - view.y0) / view.sy * graph.height();
+    if !lookup {
+        for i in 1..4 {
+            let f = i as f32 / 4.0;
+            let g = Stroke::new(1.0, t.separator);
+            p.line_segment([pos2(graph.left() + f * graph.width(), graph.top()), pos2(graph.left() + f * graph.width(), graph.bottom())], g);
+            p.line_segment([pos2(graph.left(), graph.top() + f * graph.height()), pos2(graph.right(), graph.top() + f * graph.height())], g);
+        }
+        p.line_segment([graph.left_bottom(), graph.right_top()], Stroke::new(1.0, t.separator.gamma_multiply(1.6)));
+        return;
+    }
+    let g = Stroke::new(1.0, t.separator);
+    let label = |v: f32, step: f32| if step >= 1.0 { format!("{v:.0}") } else { format!("{:.*}", (-step.log10()).ceil() as usize, v) };
+    let font = egui::FontId::proportional(9.0);
+    let step = grid_step(view.sx);
+    let mut k = (view.x0 / step).ceil();
+    while k * step <= view.x0 + view.sx && k.is_finite() {
+        let x = sx(k * step);
+        pg.line_segment([pos2(x, graph.top()), pos2(x, graph.bottom())], g);
+        pg.text(pos2(x + 2.0, graph.bottom() - 1.0), egui::Align2::LEFT_BOTTOM, label(k * step, step), font.clone(), t.text_faint);
+        k += 1.0;
+    }
+    let step = grid_step(view.sy);
+    let mut k = (view.y0 / step).ceil();
+    while k * step <= view.y0 + view.sy && k.is_finite() {
+        let y = sy(k * step);
+        pg.line_segment([pos2(graph.left(), y), pos2(graph.right(), y)], g);
+        pg.text(pos2(graph.left() + 2.0, y - 1.0), egui::Align2::LEFT_BOTTOM, label(k * step, step), font.clone(), t.text_faint);
+        k += 1.0;
+    }
+    // Display white (1.0).
+    let w = Stroke::new(1.0, t.accent.gamma_multiply(0.6));
+    pg.line_segment([pos2(sx(1.0), graph.top()), pos2(sx(1.0), graph.bottom())], w);
+    pg.line_segment([pos2(graph.left(), sy(1.0)), pos2(graph.right(), sy(1.0))], w);
+    // The unchanged line y = x across the window.
+    let (a, b) = (view.x0.max(view.y0), (view.x0 + view.sx).min(view.y0 + view.sy));
+    if b > a {
+        pg.line_segment([pos2(sx(a), sy(a)), pos2(sx(b), sy(b))], Stroke::new(1.0, t.separator.gamma_multiply(1.6)));
+    }
+}
+
+/// The curve's points as square handles, the selected one filled.
+fn draw_handles(pg: &egui::Painter, pts: &[[f32; 2]], selected: Option<usize>, graph: Rect, t: &Tokens) {
+    for (i, q) in pts.iter().enumerate() {
+        let at = pos2(graph.left() + q[0] / 255.0 * graph.width(), graph.bottom() - q[1] / 255.0 * graph.height());
+        let r = Rect::from_center_size(at, vec2(CURVE_HANDLE_SIZE, CURVE_HANDLE_SIZE));
+        if Some(i) == selected {
+            pg.rect_filled(r, 0.0, t.text);
+            pg.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
+        } else {
+            pg.rect_filled(r, 0.0, t.field);
+            pg.rect_stroke(r, 0.0, Stroke::new(1.0, t.text), StrokeKind::Inside);
+        }
+    }
+}
+
+/// Moves point `i` of a lookup curve to the typed linear `[input, output]`. Typed values are
+/// exact, inside the view or not; the input stays between the neighbouring points'. Returns
+/// whether the point moved.
+fn move_typed(view: CurveView, pts: &mut [[f32; 2]], i: usize, typed: [f32; 2]) -> bool {
+    let g = view.to_g([typed[0] * 255.0, typed[1] * 255.0]);
+    let gap = 0.01;
+    let lo = i.checked_sub(1).and_then(|j| pts.get(j)).map_or(f32::MIN, |q| q[0] + gap);
+    let hi = i.checked_add(1).and_then(|j| pts.get(j)).map_or(f32::MAX, |q| q[0] - gap);
+    let new = [g[0].clamp(lo, hi.max(lo)), g[1]];
+    let moved = pts[i] != new;
+    pts[i] = new;
+    moved
+}
+
+/// The Input / Output fields for the selected point. Returns whether the point moved and
+/// whether the edit should commit (a typed value commits at once, a drag on release).
+fn point_fields(ui: &mut egui::Ui, pts: &mut [[f32; 2]], selected: Option<usize>, view: CurveView, lookup: bool, range: f32) -> (bool, bool) {
+    let (mut changed, mut commit) = (false, false);
+    ui.horizontal(|ui| {
+        // Lookup curves show linear values (0..range); Photoshop's show levels (0..255).
+        let shown = |g: [f32; 2]| if lookup { view.levels_from_g(g).map(|l| l / 255.0) } else { g };
+        let (mut vi, mut vo) = selected.map_or((0.0, 0.0), |i| {
+            let s = shown(pts[i]);
+            (s[0], s[1])
+        });
+        let field = |ui: &mut egui::Ui, x: &mut f32, name: &str| {
+            ui.add_enabled_ui(selected.is_some(), |ui| {
+                let r = if lookup { widgets::value_field_prec(ui, x, 0.0..=range, "", 52.0, 3) } else { widgets::value_field(ui, x, 0.0..=255.0, "", 52.0) };
+                r.accessible_name(name)
+            })
+            .inner
+        };
+        label(ui, tl!("Input:"));
+        let ri = field(ui, &mut vi, tl!("Input:"));
+        label(ui, tl!("Output:"));
+        let ro = field(ui, &mut vo, tl!("Output:"));
+        if let Some(i) = selected
+            && (ri.changed() || ro.changed())
+            && (if lookup { move_typed(view, pts, i, [vi, vo]) } else { curve_edit::move_to(pts, i, [vi, vo]) })
+        {
+            changed = true;
+            commit |= !(ri.dragged() || ro.dragged());
+        }
+        commit |= ri.drag_stopped() || ro.drag_stopped();
+    });
+    (changed, commit)
+}
+
+/// Drops the composite curve from the params (see the call site: Lab has no composite).
+fn strip_composite(v: &mut Value, strip: bool) {
+    if strip && let Some(o) = v.as_object_mut() {
+        o.remove("points");
+    }
+}
+
+/// The edited points back into the params as levels: hundredths of a level for a lookup curve,
+/// which is the params' precision, and whole levels for Photoshop's.
+fn write_points(v: &mut Value, key: &str, pts: &[[f32; 2]], view: CurveView, lookup: bool, range: f32) {
+    let out: Vec<[f32; 2]> = if lookup {
+        pts.iter().map(|q| view.levels_from_g(*q).map(|l| (l.clamp(0.0, 255.0 * range) * 100.0).round() / 100.0)).collect()
+    } else {
+        pts.iter().map(|q| [q[0].round(), q[1].round()]).collect()
+    };
+    v[key] = json!(out);
+}
 /// The channel position an Alt/Option+digit selects: 2 is the first channel (the composite),
 /// 3 the next, and so on (#7325). Reads the physical key, which Option changes on macOS.
 fn channel_for_key(event: &egui::Event) -> Option<usize> {
@@ -364,38 +676,57 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     let key = curve_key(&chan);
     let mut e = curves_mode_row(ui, v, key, cx);
     let pencil = v.get("pencil").and_then(Value::as_bool).unwrap_or(false);
-    let mut pts = read_curve(v, key);
+    // Nuke ColorLookup settings: point curves in RGB only (pencil maps stay 0..1).
+    let lookup_ok = !pencil && space == ToneSpace::Rgb && isolated.is_none();
+    let lookup_open = ui.data(|d| d.get_temp::<bool>(cx.mem.with("curves-lookup-open"))).unwrap_or(false);
+    if lookup_ok && (lookup_open || lookup_of(v) != (1.0, false, false)) {
+        e.add(lookup_row(ui, v));
+    }
+    let settings = if lookup_ok { lookup_of(v) } else { (1.0, false, false) };
+    let (range, lookup) = (settings.0, settings != (1.0, false, false));
+    // The shown window (lookup curves zoom and pan like Nuke's curve editor; Photoshop's
+    // always show 0..1). A new range frames the curve's points.
+    let levels = read_curve(v, key);
+    let view_id = cx.mem.with("curves-view");
+    let mut view = if lookup {
+        match ui.data(|d| d.get_temp::<[f32; 5]>(view_id)).map(CurveView::load) {
+            Some(view) if view.range == range => view,
+            _ => CurveView::fit(range, &levels),
+        }
+    } else {
+        CurveView::full(1.0)
+    };
+    if lookup {
+        ui.horizontal(|ui| {
+            ui.label("View:");
+            if ui.small_button("Fit").on_hover_text("Frame the curve's points").clicked() {
+                view = CurveView::fit(range, &levels);
+            }
+            if ui.small_button("Full").on_hover_text("Show the whole range").clicked() {
+                view = CurveView::full(range);
+            }
+            let t = Tokens::get(ui.ctx());
+            ui.label(RichText::new("wheel: zoom · Alt- or middle-drag: pan").color(t.text_faint).size(11.0));
+        });
+    }
     let mut map = read_map(v, key);
     let side = curve_side(ui);
     ui.add_space(4.0);
     let (full, resp) = ui.allocate_exact_size(vec2(side, side + 14.0), Sense::click_and_drag());
     let graph = curve_graph(full, side);
+    // Zoom (wheel, about the pointer) and pan (Alt or middle drag) before the points are placed.
+    let panning = lookup && zoom_and_pan(ui, &resp, graph, &mut view, view_id);
+    // Points in graph units (0..255 across the shown window); the params hold levels (255 = 1.0).
+    let mut pts: Vec<[f32; 2]> = levels.iter().map(|q| view.to_g(*q)).collect();
     ui.data_mut(|d| d.insert_temp(cx.mem.with("curves-graph"), graph));
     let to_scr = |q: [f32; 2]| pos2(graph.left() + q[0] / 255.0 * graph.width(), graph.bottom() - q[1] / 255.0 * graph.height());
     let mut changed = false;
     let mut drawn = false;
     if pencil {
-        // Pencil: a stroke draws while the button is down and commits on release; Shift
-        // continues from the previous stroke's end in a straight line.
-        let stroke_id = cx.mem.with("curves-pencil");
-        let (mut active, mut last): (bool, Option<[f32; 2]>) = ui.data(|d| d.get_temp(stroke_id)).unwrap_or_default();
-        if resp.is_pointer_button_down_on()
-            && let Some(pos) = resp.interact_pointer_pos()
-        {
-            let q = [
-                ((pos.x - graph.left()) / graph.width().max(1.0) * 255.0).clamp(0.0, 255.0),
-                ((graph.bottom() - pos.y) / graph.height().max(1.0) * 255.0).clamp(0.0, 255.0),
-            ];
-            let from = if active || ui.input(|i| i.modifiers.shift) { last.unwrap_or(q) } else { q };
-            drawn = curve_edit::pencil_line(&mut map, from, q);
-            active = true;
-            last = Some(q);
-        } else if active {
-            active = false;
-            e.commit = true;
-        }
-        ui.data_mut(|d| d.insert_temp(stroke_id, (active, last)));
-    } else {
+        let (stroked, commit) = pencil_stroke(ui, &resp, graph, cx.mem, &mut map);
+        drawn = stroked;
+        e.commit |= commit;
+    } else if !panning {
         let interaction = crate::point_curve::interact(ui, &resp, graph, &mut pts, &mut st.gesture);
         changed = interaction.changed;
         e.commit |= interaction.commit;
@@ -404,16 +735,18 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     // Draw: histogram, quarter grid, baseline, gradient bars, other channels, the curve, points.
     let p = ui.painter_at(full.expand(2.0));
     p.rect_filled(graph, 0.0, t.field);
+    // Linear values → screen (x only: the grid draws its own, from the same window).
+    let sx = |x: f32| graph.left() + (x - view.x0) / view.sx * graph.width();
+    // Lookup curves are drawn clipped to the graph (with room for handles on its edges).
+    let pg = if lookup { ui.painter_at(graph.expand(CURVE_HANDLE_SIZE)) } else { p.clone() };
     if let Some(h) = &cx.hist {
-        tone::draw_histogram(&p, graph, &h[hist_i], Color32::from_gray(if t.pro { 88 } else { 190 }).gamma_multiply(0.75));
+        // The histogram covers 0..1.
+        let hist_rect = Rect::from_min_max(pos2(sx(0.0), graph.top()), pos2(sx(1.0), graph.bottom())).intersect(graph);
+        if hist_rect.width() > 0.0 {
+            tone::draw_histogram(&p, hist_rect, &h[hist_i], Color32::from_gray(if t.pro { 88 } else { 190 }).gamma_multiply(0.75));
+        }
     }
-    for i in 1..4 {
-        let f = i as f32 / 4.0;
-        let g = Stroke::new(1.0, t.separator);
-        p.line_segment([pos2(graph.left() + f * graph.width(), graph.top()), pos2(graph.left() + f * graph.width(), graph.bottom())], g);
-        p.line_segment([pos2(graph.left(), graph.top() + f * graph.height()), pos2(graph.right(), graph.top() + f * graph.height())], g);
-    }
-    p.line_segment([graph.left_bottom(), graph.right_top()], Stroke::new(1.0, t.separator.gamma_multiply(1.6)));
+    draw_grid(&p, &pg, graph, &view, lookup, &t);
     p.rect_stroke(
         graph,
         0.0,
@@ -425,8 +758,8 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     gradient_bar(&p, hbar, Color32::BLACK, bar_color(&chan, &t), false);
     gradient_bar(&p, vbar, Color32::BLACK, bar_color(&chan, &t), true);
     let draw_curve = |key: &str, pts: &[[f32; 2]], color: Color32, width: f32| {
-        let line = cached_curve_line(ui.ctx(), cx.mem.with(("curves-polyline", key)), pts, graph);
-        p.add(egui::Shape::line(line, Stroke::new(width, color)));
+        let line = cached_curve_line(ui.ctx(), cx.mem.with(("curves-polyline", key)), pts, graph, lookup.then_some(settings.1));
+        pg.add(egui::Shape::line(line, Stroke::new(width, color)));
     };
     let draw_map = |map: &[f32], color: Color32, width: f32| {
         let last = map.len().saturating_sub(1).max(1) as f32;
@@ -443,8 +776,9 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
                 }
                 continue;
             }
-            let cp = read_curve(v, c.key);
-            if cp.len() > 2 || cp.first().is_some_and(|q| q[1] != 0.0) || cp.last().is_some_and(|q| q[1] != 255.0) {
+            let lv = read_curve(v, c.key);
+            let cp: Vec<[f32; 2]> = lv.iter().map(|q| view.to_g(*q)).collect();
+            if lv.len() > 2 || lv.first().is_some_and(|q| q[1] != 0.0) || lv.last().is_some_and(|q| q[1] != 255.0 * range) {
                 draw_curve(c.key, &cp, bar_color(c, &t).gamma_multiply(0.8), 1.0);
             }
         }
@@ -455,37 +789,16 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     } else {
         draw_curve(key, &pts, color, 1.5);
     }
-    for (i, q) in pts.iter().enumerate().filter(|_| !pencil) {
-        let r = Rect::from_center_size(to_scr(*q), vec2(CURVE_HANDLE_SIZE, CURVE_HANDLE_SIZE));
-        if Some(i) == st.gesture.selected {
-            p.rect_filled(r, 0.0, t.text);
-            p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
-        } else {
-            p.rect_filled(r, 0.0, t.field);
-            p.rect_stroke(r, 0.0, Stroke::new(1.0, t.text), StrokeKind::Inside);
-        }
+    if !pencil {
+        draw_handles(&pg, &pts, st.gesture.selected, graph, &t);
     }
 
     // Input / Output of the selected point.
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let i = st.gesture.selected.filter(|i| *i < pts.len() && !pencil);
-        let (mut vi, mut vo) = i.map_or((0.0, 0.0), |i| (pts[i][0], pts[i][1]));
-        label(ui, tl!("Input:"));
-        let ri = ui.add_enabled_ui(i.is_some(), |ui| widgets::value_field(ui, &mut vi, 0.0..=255.0, "", 52.0).accessible_name(tl!("Input:"))).inner;
-        label(ui, tl!("Output:"));
-        let ro = ui.add_enabled_ui(i.is_some(), |ui| widgets::value_field(ui, &mut vo, 0.0..=255.0, "", 52.0).accessible_name(tl!("Output:"))).inner;
-        if let Some(i) = i
-            && (ri.changed() || ro.changed())
-            && curve_edit::move_to(&mut pts, i, [vi, vo])
-        {
-            changed = true;
-            e.commit |= !(ri.dragged() || ro.dragged());
-        }
-        if ri.drag_stopped() || ro.drag_stopped() {
-            e.commit = true;
-        }
-    });
+    let selected = st.gesture.selected.filter(|i| *i < pts.len() && !pencil);
+    let moved = point_fields(ui, &mut pts, selected, view, lookup, range);
+    changed |= moved.0;
+    e.commit |= moved.1;
     let t2 = Tokens::get(ui.ctx());
     let hint = if pencil {
         crate::i18n::fmt(tl!("Drag to draw the curve · {key}-click draws a straight line"), &[("key", &crate::shortcuts::pretty("Shift"))])
@@ -494,24 +807,16 @@ pub(super) fn curves(ui: &mut egui::Ui, v: &mut Value, cx: &EditorCx) -> Edit {
     };
     ui.label(RichText::new(hint).color(t2.text_faint).size(11.0));
     ui.data_mut(|d| d.insert_temp(state_id, st));
+    // Lab has no composite, so a "points" key there would alias lightness.
+    let strip_points = space == ToneSpace::Lab && isolated.is_none_or(|c| c.components.is_none());
     if drawn {
         write_map(v, key, &map);
-        if space == ToneSpace::Lab
-            && isolated.is_none_or(|c| c.components.is_none())
-            && let Some(o) = v.as_object_mut()
-        {
-            o.remove("points");
-        }
+        strip_composite(v, strip_points);
         e.changed = true;
     }
     if changed && !pencil {
-        v[key] = json!(pts.iter().map(|q| [q[0].round(), q[1].round()]).collect::<Vec<_>>());
-        if space == ToneSpace::Lab && isolated.is_none_or(|c| c.components.is_none()) {
-            // Lab has no composite: "points" would alias lightness.
-            if let Some(o) = v.as_object_mut() {
-                o.remove("points");
-            }
-        }
+        write_points(v, key, &pts, view, lookup, range);
+        strip_composite(v, strip_points);
         e.changed = true;
     }
     e
@@ -699,30 +1004,30 @@ mod polyline_tests {
         let mut cache = CurvePolyline::default();
         let mut points = [[0.0, 0.0], [128.0, 180.0], [255.0, 255.0]];
         let graph = Rect::from_min_size(pos2(20.0, 30.0), vec2(256.0, 256.0));
-        assert!(cache.update(&points, graph));
+        assert!(cache.update(&points, graph, None));
         assert_eq!(cache.line.len(), CURVE_SAMPLES);
         assert_eq!(cache.line.first(), Some(&graph.left_bottom()));
         assert_eq!(cache.line.last(), Some(&graph.right_top()));
         let line = cache.line.clone();
-        assert!(!cache.update(&points, graph));
+        assert!(!cache.update(&points, graph, None));
         assert_eq!(cache.line, line);
 
         points[1][1] = 80.0;
-        assert!(cache.update(&points, graph));
+        assert!(cache.update(&points, graph, None));
         assert_ne!(cache.line, line);
         points[1][1] = 180.0; // Undo/preset restore must also invalidate.
-        assert!(cache.update(&points, graph));
+        assert!(cache.update(&points, graph, None));
         assert_eq!(cache.line, line);
 
         let moved = graph.translate(vec2(13.0, 25.0));
-        assert!(cache.update(&points, moved));
+        assert!(cache.update(&points, moved, None));
         for (before, after) in line.iter().zip(&cache.line) {
             assert!((*after - (*before + vec2(13.0, 25.0))).length() < 1e-4);
         }
         let resized = Rect::from_min_size(moved.min, vec2(128.0, 180.0));
-        assert!(cache.update(&points, resized));
+        assert!(cache.update(&points, resized, None));
         assert_eq!(cache.line.last(), Some(&resized.right_top()));
-        assert!(!cache.update(&points, resized));
+        assert!(!cache.update(&points, resized, None));
     }
 
     #[test]
@@ -735,16 +1040,16 @@ mod polyline_tests {
         let master = editor.with(("curves-polyline", "points"));
         let red = editor.with(("curves-polyline", "red"));
         let other_editor = egui::Id::unique("properties").with(("curves-polyline", "points"));
-        let line = cached_curve_line(&ctx, master, &identity, graph);
-        assert_ne!(cached_curve_line(&ctx, red, &inverted, graph), line);
-        assert_ne!(cached_curve_line(&ctx, other_editor, &inverted, graph), line);
-        assert_eq!(cached_curve_line(&ctx, master, &identity, graph), line);
+        let line = cached_curve_line(&ctx, master, &identity, graph, None);
+        assert_ne!(cached_curve_line(&ctx, red, &inverted, graph, None), line);
+        assert_ne!(cached_curve_line(&ctx, other_editor, &inverted, graph, None), line);
+        assert_eq!(cached_curve_line(&ctx, master, &identity, graph, None), line);
         ctx.data_mut(|d| {
-            assert!(!d.get_temp_mut_or_default::<CurvePolyline>(master).update(&identity, graph));
-            assert!(!d.get_temp_mut_or_default::<CurvePolyline>(red).update(&inverted, graph));
-            assert!(!d.get_temp_mut_or_default::<CurvePolyline>(other_editor).update(&inverted, graph));
+            assert!(!d.get_temp_mut_or_default::<CurvePolyline>(master).update(&identity, graph, None));
+            assert!(!d.get_temp_mut_or_default::<CurvePolyline>(red).update(&inverted, graph, None));
+            assert!(!d.get_temp_mut_or_default::<CurvePolyline>(other_editor).update(&inverted, graph, None));
         });
-        assert_ne!(cached_curve_line(&ctx, master, &inverted, graph), line);
+        assert_ne!(cached_curve_line(&ctx, master, &inverted, graph, None), line);
     }
 
     #[test]
@@ -770,19 +1075,52 @@ mod polyline_tests {
         let start = Instant::now();
         for _ in 0..iterations {
             let mut cache = CurvePolyline::default();
-            cache.update(black_box(&points), graph);
+            cache.update(black_box(&points), graph, None);
             black_box(cache.line.clone());
         }
         let miss = start.elapsed();
         let ctx = egui::Context::default();
         let id = egui::Id::unique("curve-perf");
-        cached_curve_line(&ctx, id, &points, graph);
+        cached_curve_line(&ctx, id, &points, graph, None);
         let start = Instant::now();
         for _ in 0..iterations {
-            black_box(cached_curve_line(&ctx, id, black_box(&points), graph));
+            black_box(cached_curve_line(&ctx, id, black_box(&points), graph, None));
         }
         let hit = start.elapsed();
         println!("{iterations} polylines: old 4096 samples {old:?}; direct 256 samples {miss:?}; cached screen line {hit:?}");
+    }
+}
+
+#[cfg(test)]
+mod curve_view_tests {
+    use super::*;
+
+    #[test]
+    fn view_maps_levels_both_ways_and_full_is_the_old_scale() {
+        let full = CurveView::full(4.0);
+        // Full range: graph units are levels / range, as before zooming existed.
+        assert_eq!(full.to_g([510.0, 255.0]), [127.5, 63.75]);
+        let v = CurveView { range: 4.0, x0: 0.5, y0: -0.25, sx: 2.0, sy: 1.5 };
+        for q in [[0.0, 0.0], [255.0, 127.5], [1020.0, 900.0]] {
+            let back = v.levels_from_g(v.to_g(q));
+            assert!((back[0] - q[0]).abs() < 1e-3 && (back[1] - q[1]).abs() < 1e-3, "{q:?} → {back:?}");
+        }
+    }
+
+    #[test]
+    fn fit_frames_the_points_and_zoom_keeps_the_pointer_still() {
+        // A curve living in 0..1 of a 0..64 range is framed around 0..1, not 0..64.
+        let v = CurveView::fit(64.0, &[[0.0, 0.0], [128.0, 200.0], [255.0, 255.0]]);
+        assert!(v.sx < 1.2 && v.sy < 1.2 && v.x0 <= 0.0 && v.y0 <= 0.0, "{v:?}");
+        let mut z = CurveView::full(8.0);
+        let at = [0.25, 0.5];
+        let before = [z.x0 + at[0] * z.sx, z.y0 + at[1] * z.sy];
+        z.zoom(0.5, at);
+        let after = [z.x0 + at[0] * z.sx, z.y0 + at[1] * z.sy];
+        assert!((before[0] - after[0]).abs() < 1e-5 && (before[1] - after[1]).abs() < 1e-5);
+        assert_eq!((z.sx, z.sy), (4.0, 4.0));
+        assert!((grid_step(1.1) - 0.5).abs() < 1e-6);
+        assert!((grid_step(64.0) - 20.0).abs() < 1e-4);
     }
 }
 

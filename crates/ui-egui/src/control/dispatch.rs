@@ -477,7 +477,7 @@ fn gradient_blend_param(p: &Value) -> std::result::Result<Option<photocraft_colo
     let Some(value) = p.get("gradientBlendMode") else { return Ok(None) };
     let Some(name) = value.as_str() else { return Err("gradientBlendMode must be a blend mode name".into()) };
     photocraft_engine::commands::blend_from_str(name)
-        .filter(|m| photocraft_color::BlendMode::LAYER_MODES.contains(m))
+        .filter(|m| m.is_menu_mode())
         .map(Some)
         .ok_or_else(|| format!("unknown gradient blend mode `{name}`"))
 }
@@ -1273,6 +1273,9 @@ fn pointer(app: &mut PhotocraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     };
     if let Some(t) = parsed.tool {
         crate::tool_memory::select(app, t);
+        // The tool's own brush now, not at the next frame, so a paint command right after uses
+        // it (the Pencil's 1 px tip, #12200; any tool's remembered brush).
+        crate::paint_mouse::sync_tool_brush(app);
     }
     // Space held: the Crop tool moves the frame being drawn, a marquee, lasso or shape
     // being drawn moves instead of growing (hold_keys.rs). Like a modifier flag, it may be

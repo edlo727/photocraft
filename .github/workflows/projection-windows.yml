@@ -1,0 +1,49 @@
+# PhotoCraft Projection Edition (unofficial): Windows x64 build with OpenColorIO.
+# Run by hand (Actions › Projection Edition Windows build › Run workflow) on a projection branch.
+# OpenColorIO 2.4.2 is built once by vcpkg (vcpkg.json) and cached; the exe is uploaded as an artifact.
+name: Projection Edition Windows build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      CARGO_TERM_COLOR: always
+      PHOTOCRAFT_REQUIRE_WINRES: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: vcpkg location
+        shell: pwsh
+        run: |
+          git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --unshallow 2>$null; git -C "$env:VCPKG_INSTALLATION_ROOT" fetch origin
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Cache OpenColorIO (vcpkg_installed)
+        uses: actions/cache@v4
+        with:
+          path: vcpkg_installed
+          key: vcpkg-ocio-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-win-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-win-
+      - name: Build
+        run: cargo build --release -p photocraft
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: photocraft-projection-windows-x64
+          path: target/release/photocraft.exe
+          if-no-files-found: error

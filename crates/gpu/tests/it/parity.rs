@@ -49,6 +49,7 @@ fn hdr_adjustments_preserve_range_and_cpu_parity() {
             space: Default::default(),
             black: Vec::new(),
             pencil: false,
+            lookup: Default::default(),
         },
         Adjustment::Curves {
             master: Vec::new(),
@@ -56,6 +57,7 @@ fn hdr_adjustments_preserve_range_and_cpu_parity() {
             space: Default::default(),
             black: Vec::new(),
             pencil: false,
+            lookup: Default::default(),
         },
         // #7157: an edited curve continues past 0..1 along its end segments (Photoshop's `[[0,0],[255,128]]`).
         Adjustment::Curves {
@@ -64,6 +66,7 @@ fn hdr_adjustments_preserve_range_and_cpu_parity() {
             space: Default::default(),
             black: Vec::new(),
             pencil: false,
+            lookup: Default::default(),
         },
         // 32-bit Photoshop rules: unclipped, legacy pivot 127, the mixer's 1/1024 steps and halved constant.
         Adjustment::BrightnessContrast { brightness: 25.0, contrast: 30.0, legacy: true },
@@ -728,6 +731,7 @@ fn adjustments() -> Vec<Adjustment> {
             space: Default::default(),
             black: Vec::new(),
             pencil: false,
+            lookup: Default::default(),
         },
         Adjustment::HueSaturation { hue: 40.0, saturation: 30.0, lightness: -10.0, colorize: false, ranges: HueRange::defaults() },
         Adjustment::HueSaturation { hue: 200.0, saturation: 50.0, lightness: 20.0, colorize: true, ranges: HueRange::defaults() },

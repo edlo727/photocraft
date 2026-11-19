@@ -1,0 +1,14 @@
+[package]
+name = "photocraft-ocio"
+description = "OpenColorIO for PhotoCraft VFX (Nuke-matched colour spaces)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+links = "photocraft_ocio"
+
+# No `[lints] workspace = true`: this crate holds PhotoCraft's only `unsafe` code (the FFI to
+# OpenColorIO), which the workspace forbids everywhere else.
+
+[build-dependencies]
+cc = "1"

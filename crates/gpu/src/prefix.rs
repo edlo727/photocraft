@@ -22,6 +22,9 @@ use crate::plan::Checkpoint;
 
 pub(crate) const MAX_BYTES: u64 = 512 << 20;
 
+/// The most a [`Prefix::set_cap`] may raise the cap to: 8 GiB.
+pub(crate) const MAX_CAP: u64 = 8 << 30;
+
 /// One whole grid chunk, with the document rectangles that hold valid pixels: a whole-chunk
 /// capture covers the cell in one entry, partial captures accumulate alongside each other.
 /// The texture is only copied to and from, so it has no view: Vulkan rejects a view on an image
@@ -44,12 +47,15 @@ pub(crate) struct Prefix {
     chunks: HashMap<Rect, Chunk>,
     bytes: u64,
     budget: u64,
+    /// The most [`Prefix::set_budget`] grants: [`MAX_BYTES`] unless Performance Mode raised it
+    /// (a 16K 32-bit lower stack is several GiB; 512 MiB holds an eighth of it).
+    cap: u64,
     step: i32,
 }
 
 impl Default for Prefix {
     fn default() -> Self {
-        Self { context: None, layers: Vec::new(), checkpoint: None, chunks: HashMap::new(), bytes: 0, budget: MAX_BYTES, step: 512 }
+        Self { context: None, layers: Vec::new(), checkpoint: None, chunks: HashMap::new(), bytes: 0, budget: MAX_BYTES, cap: MAX_BYTES, step: 512 }
     }
 }
 
@@ -84,9 +90,21 @@ impl Prefix {
     }
 
     pub(crate) fn set_budget(&mut self, bytes: u64) {
-        self.budget = bytes.min(MAX_BYTES);
+        self.budget = bytes.min(self.cap);
         if self.bytes > self.budget || self.budget == 0 {
             self.clear();
+        }
+    }
+
+    pub(crate) fn cap(&self) -> u64 {
+        self.cap
+    }
+
+    /// Raise (or lower) the most the cache may hold, up to [`MAX_CAP`]; at least [`MAX_BYTES`].
+    pub(crate) fn set_cap(&mut self, bytes: u64) {
+        self.cap = bytes.clamp(MAX_BYTES, MAX_CAP);
+        if self.budget > self.cap {
+            self.set_budget(self.cap);
         }
     }
 
@@ -243,5 +261,26 @@ impl Prefix {
         if chunk.covered.iter().any(|c| c == &cell) {
             chunk.covered = vec![cell];
         }
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    /// The cap starts at the old fixed 512 MiB, Performance Mode can raise it (to 8 GiB at most)
+    /// and lowering it shrinks the budget with it.
+    #[test]
+    fn the_cap_bounds_the_budget() {
+        let mut p = Prefix::default();
+        p.set_budget(4 << 30);
+        assert_eq!(p.budget(), MAX_BYTES);
+        p.set_cap(4 << 30);
+        p.set_budget(3 << 30);
+        assert_eq!(p.budget(), 3 << 30);
+        p.set_cap(64 << 30);
+        assert_eq!(p.cap(), MAX_CAP);
+        p.set_cap(0);
+        assert_eq!((p.cap(), p.budget()), (MAX_BYTES, MAX_BYTES));
     }
 }

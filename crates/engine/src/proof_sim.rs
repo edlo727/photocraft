@@ -16,7 +16,7 @@
 //!   display unchanged: the canvas texture is clamped to 0–1, so there is nothing above white
 //!   to compress.
 
-use photocraft_cms::{Builtin, Intent, Lut3d, Transform};
+use craft_cms::{Builtin, Intent, Lut3d, Transform};
 use photocraft_color::SampleType;
 use photocraft_color::convert::{linear_to_srgb, srgb_to_linear};
 use photocraft_doc::Document;
@@ -106,6 +106,102 @@ impl HdrPreview {
     }
 }
 
+/// View › Viewer Channel: which channel the canvas shows, as Nuke's viewer does (R, G, B, A and
+/// luminance, each as grey). Display only: editing still works on the whole image, unlike the
+/// Channels panel's ⌘3/4/5 targets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ViewerChannel {
+    #[default]
+    Rgb,
+    Red,
+    Green,
+    Blue,
+    Alpha,
+    Luminance,
+}
+
+impl ViewerChannel {
+    pub const ALL: [ViewerChannel; 6] =
+        [ViewerChannel::Rgb, ViewerChannel::Red, ViewerChannel::Green, ViewerChannel::Blue, ViewerChannel::Alpha, ViewerChannel::Luminance];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            ViewerChannel::Rgb => "rgb",
+            ViewerChannel::Red => "red",
+            ViewerChannel::Green => "green",
+            ViewerChannel::Blue => "blue",
+            ViewerChannel::Alpha => "alpha",
+            ViewerChannel::Luminance => "luminance",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.id() == s)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewerChannel::Rgb => "RGB",
+            ViewerChannel::Red => "Red",
+            ViewerChannel::Green => "Green",
+            ViewerChannel::Blue => "Blue",
+            ViewerChannel::Alpha => "Alpha",
+            ViewerChannel::Luminance => "Luminance",
+        }
+    }
+
+    /// The canvas shader's channel code: 0 RGB, 1 R, 2 G, 3 B, 4 A, 5 luminance.
+    pub fn code(self) -> u8 {
+        match self {
+            ViewerChannel::Rgb => 0,
+            ViewerChannel::Red => 1,
+            ViewerChannel::Green => 2,
+            ViewerChannel::Blue => 3,
+            ViewerChannel::Alpha => 4,
+            ViewerChannel::Luminance => 5,
+        }
+    }
+}
+
+impl ColorState {
+    /// The viewer channel `doc` is shown in (RGB unless View › Viewer Channel chose another).
+    pub fn viewer_channel(&self, doc: photocraft_doc::DocId) -> ViewerChannel {
+        self.viewer_channel.get(&doc).copied().unwrap_or_default()
+    }
+}
+
+/// View › Viewer Channel › <channel>: show that channel; choosing the shown one again goes back
+/// to RGB, as Nuke's R/G/B/A keys toggle. `{"channel": id}` sets it outright.
+fn viewer_channel_cmd(s: &mut Session, id: &str, p: &Value) -> Result<Value> {
+    let doc = s.active().ok_or(EngineError::NoDocument)?.doc.id;
+    let named = p.get("channel").and_then(Value::as_str);
+    let wanted = match named.or_else(|| id.strip_prefix("view.viewerChannel.")) {
+        Some(c) => ViewerChannel::from_id(c)
+            .ok_or_else(|| EngineError::BadParams { cmd: id.into(), msg: format!("channel `{c}` (rgb|red|green|blue|alpha|luminance)") })?,
+        None => ViewerChannel::Rgb,
+    };
+    let current = s.color.viewer_channel(doc);
+    let next = if named.is_none() && wanted == current { ViewerChannel::Rgb } else { wanted };
+    s.color.viewer_channel.insert(doc, next);
+    Ok(json!({"channel": next.id()}))
+}
+
+macro_rules! channel_spec {
+    ($id:literal, $label:literal) => {
+        CommandSpec {
+            id: $id,
+            label: $label,
+            menu: &["View", "Viewer Channel"],
+            shortcut: None,
+            params: "{} (shows that channel as grey on the canvas, display only; again: back to RGB)",
+            enabled: has_doc,
+            run: |s, p| viewer_channel_cmd(s, $id, p),
+            journal: false,
+        }
+    };
+}
+
 /// Is a 32-bit preview adjustment active for `doc` (a 32-bit document with non-default options)?
 pub fn hdr_active(c: &ColorState, doc: &Document) -> bool {
     doc.depth == SampleType::F32 && c.hdr.get(&doc.id).is_some_and(|h| !h.is_identity())
@@ -157,7 +253,7 @@ pub fn display_lut_with(c: &ColorState, doc: &Document, size: usize, include_hdr
     if kind == ProofKind::Profile && hdr.is_none() {
         return Ok(None);
     }
-    let err = |e: photocraft_cms::CmsError| EngineError::Other(format!("colour management: {e}"));
+    let err = |e: craft_cms::CmsError| EngineError::Other(format!("colour management: {e}"));
     let src = c.canvas_display_for(doc, display)?.source.clone();
     let mon = c.monitor_for(display);
     let srgb = Builtin::Srgb.profile();
@@ -181,7 +277,8 @@ pub fn display_lut_with(c: &ColorState, doc: &Document, size: usize, include_hdr
             let print = Transform::new(&setup.profile, &mon, Intent::RelativeColorimetric, true).map_err(err)?;
             Box::new(move |v| {
                 let mut ink = [0.0f32; 16];
-                sep.eval(&v, &mut ink);
+                // RGB into a separation: never refused; were it, the plate shows no ink.
+                let _ = sep.eval(&v, &mut ink);
                 let shown = match kind {
                     ProofKind::Plate(p) => [0.0, 0.0, 0.0, ink[usize::from(p.min(3))]],
                     _ => [ink[0], ink[1], ink[2], 0.0],
@@ -205,27 +302,19 @@ pub fn display_lut_with(c: &ColorState, doc: &Document, size: usize, include_hdr
             })
         }
     };
-    let n = size.max(2);
-    let sc = (n - 1) as f32;
-    let mut data = vec![[0.0f32, 0.0, 0.0, 1.0]; n * n * n];
-    for b in 0..n {
-        for g in 0..n {
-            for r in 0..n {
-                let mut v = [r as f32 / sc, g as f32 / sc, b as f32 / sc];
-                if let Some(h) = hdr {
-                    v = v.map(|x| h.apply(x));
-                }
-                let o = base(v);
-                data[r + g * n + b * n * n] = [o[0], o[1], o[2], 1.0];
-            }
+    let lut = Lut3d::from_fn(size.max(2), |mut v| {
+        if let Some(h) = hdr {
+            v = v.map(|x| h.apply(x));
         }
-    }
-    Ok(Some(Lut3d { size: n, data }))
+        base(v)
+    });
+    lut.map(Some).map_err(err)
 }
 
 fn eval3(t: &Transform, v: &[f32]) -> [f32; 3] {
     let mut out = [0.0f32; 16];
-    t.eval(v, &mut out);
+    // Callers pass RGB to transforms built from RGB; a refusal leaves black.
+    let _ = t.eval(v, &mut out);
     if t.outputs() == 1 { [out[0]; 3] } else { [out[0], out[1], out[2]] }
 }
 
@@ -309,6 +398,12 @@ pub fn specs() -> Vec<CommandSpec> {
         kind_spec!("view.proofSetup.legacyMacintoshRgb", "Legacy Macintosh RGB (Gamma 1.8)"),
         kind_spec!("view.proofSetup.colorBlindnessProtanopia", "Color Blindness - Protanopia-type"),
         kind_spec!("view.proofSetup.colorBlindnessDeuteranopia", "Color Blindness - Deuteranopia-type"),
+        channel_spec!("view.viewerChannel.rgb", "RGB"),
+        channel_spec!("view.viewerChannel.red", "Red"),
+        channel_spec!("view.viewerChannel.green", "Green"),
+        channel_spec!("view.viewerChannel.blue", "Blue"),
+        channel_spec!("view.viewerChannel.alpha", "Alpha"),
+        channel_spec!("view.viewerChannel.luminance", "Luminance"),
         CommandSpec {
             id: "view.thirtyTwoBitPreviewOptions",
             label: "32-bit Preview Options…",
@@ -341,6 +436,24 @@ mod tests {
         }
     }
 
+    /// View › Viewer Channel: a channel toggles back to RGB when chosen again (Nuke's keys),
+    /// `{"channel"}` sets it outright, and it is kept per document.
+    #[test]
+    fn viewer_channel_toggles_per_document() {
+        let mut s = session("rgb", 32);
+        let id = s.active().unwrap().doc.id;
+        assert_eq!(s.color.viewer_channel(id), ViewerChannel::Rgb);
+        assert_eq!(s.execute("view.viewerChannel.red", json!({})).unwrap()["channel"], "red");
+        assert_eq!(s.execute("view.viewerChannel.red", json!({})).unwrap()["channel"], "rgb", "again: back to RGB");
+        assert_eq!(s.execute("view.viewerChannel.alpha", json!({"channel": "alpha"})).unwrap()["channel"], "alpha");
+        assert_eq!(s.execute("view.viewerChannel.alpha", json!({"channel": "alpha"})).unwrap()["channel"], "alpha", "explicit: no toggle");
+        assert!(s.execute("view.viewerChannel.rgb", json!({"channel": "purple"})).is_err());
+        assert_eq!(s.color.viewer_channel(id).code(), 4);
+        s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        assert_eq!(s.color.viewer_channel(s.active().unwrap().doc.id), ViewerChannel::Rgb, "per document");
+        assert_eq!(s.color.viewer_channel(id), ViewerChannel::Alpha);
+    }
+
     fn session(mode: &str, depth: u32) -> Session {
         let mut s = Session::new();
         s.execute("file.new", json!({"width": 8, "height": 8, "mode": mode, "depth": depth})).unwrap();
@@ -348,8 +461,8 @@ mod tests {
     }
 
     fn sample(lut: &Lut3d, idx: [usize; 3]) -> [f32; 3] {
-        let n = lut.size;
-        let v = lut.data[idx[0] + idx[1] * n + idx[2] * n * n];
+        let n = lut.size();
+        let v = lut.data()[idx[0] + idx[1] * n + idx[2] * n * n];
         [v[0], v[1], v[2]]
     }
 
@@ -390,7 +503,7 @@ mod tests {
                 let pv = s.color.proof(d.id);
                 assert_eq!(pv.setup.kind.id(), id.trim_start_matches("view.proofSetup."));
                 let lut = s.color.display_lut(&d, 5).unwrap();
-                assert_eq!(lut.data.len(), 125);
+                assert_eq!(lut.data().len(), 125);
                 let bytes = s.color.canvas_lut(&d, 5).unwrap().unwrap();
                 assert_eq!(bytes.len(), 125 * 4);
             }

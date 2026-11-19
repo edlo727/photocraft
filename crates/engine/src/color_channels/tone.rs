@@ -261,6 +261,7 @@ mod tests {
                 black: Vec::new(),
                 pencil: false,
                 space: ToneSpace::Lab,
+                lookup: Default::default(),
             },
         ];
         for mode in [ColorMode::Rgb, ColorMode::Cmyk, ColorMode::Lab] {

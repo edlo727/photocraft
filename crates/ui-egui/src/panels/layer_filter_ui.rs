@@ -226,7 +226,7 @@ pub fn patched(current: &UiState, v: &serde_json::Value) -> Result<Filter, Strin
     }
     if let Some(mode) = o.get("mode") {
         let name = mode.as_str().ok_or("layerFilter.mode must be a blend mode name")?;
-        f.mode = photocraft_engine::commands::blend_from_str(name).filter(|m| BlendMode::LAYER_MODES.contains(m)).ok_or_else(|| {
+        f.mode = photocraft_engine::commands::blend_from_str(name).filter(|m| *m == BlendMode::PassThrough || m.is_menu_mode()).ok_or_else(|| {
             let modes: Vec<&str> = BlendMode::LAYER_MODES.iter().map(|m| m.label()).collect();
             format!("layerFilter.mode: `{name}` is not a layer blend mode the filter lists (modes: {})", modes.join(", "))
         })?;
@@ -326,9 +326,9 @@ pub fn bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             FilterBy::Name => find::name_field(app, ui),
             FilterBy::Effect => effect::controls(app, ui),
             FilterBy::Mode => {
-                // The 27 layer modes, without Pass Through: a group set to Pass Through is never
-                // listed by Mode (#10878).
-                let modes: Vec<(BlendMode, &str)> = BlendMode::LAYER_MODES.into_iter().map(|m| (m, m.label())).collect();
+                // Without Pass Through: a group set to Pass Through is never listed by Mode
+                // (#10878). The Nuke Merge operations are listed when they are turned on.
+                let modes: Vec<(BlendMode, &str)> = BlendMode::menu_modes().map(|m| (m, m.label())).collect();
                 let width = ui.available_width().max(96.0);
                 widgets::dropdown(ui, "layer-filter-mode", tl!("Mode"), &mut app.ui.layer_filter_mode, &modes, width);
             }

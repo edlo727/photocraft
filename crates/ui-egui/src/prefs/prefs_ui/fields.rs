@@ -1,21 +1,25 @@
 use super::appearance::{AppearanceRows, appearance_rows, system_theme};
 use super::dialogs::{mismatch_body, presets_body, presets_io_body, settings_height};
-use super::graphics::{gpu_memory_lines, gpu_status_rows, memory_usage_row, read_at_launch, rendering_mode_row};
+use super::graphics::{gpu_memory_lines, gpu_status_rows, memory_usage_row, performance_mode_row, read_at_launch, rendering_mode_row};
 use super::shortcuts::shortcuts_body;
 use super::{Color32, Map, PhotocraftApp, RichText, SECTIONS, Sense, Tokens, Value, json, prefs, vec2};
 
 // ------------------------------------------------------------------ bodies
 
-/// Render one of our dialogs' bodies.
-pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+/// Render one of our dialogs' bodies (`id`: the dialog's, for answers that arrive later).
+pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>, id: u64) {
     match f.get("__prefsui").and_then(Value::as_str).unwrap_or("") {
         "prefs" => {
             let mut info = app.perf.gpu_info.lines();
             info.extend(gpu_memory_lines(app));
             f.insert("__gpuInfo".into(), json!(info));
             f.insert("__gpuAdapters".into(), json!(app.perf.gpu_info.adapters));
+            f.insert("__agentLink".into(), serde_json::to_value(&app.agent_link).unwrap_or(Value::Null));
             let system = system_theme(app, ui.ctx());
             prefs_body(ui, f, system);
+            if let Some(action) = f.remove("__agentAction").and_then(|a| a.as_str().map(str::to_string)) {
+                super::agents::agent_action(app, f, &action, id);
+            }
         }
         "shortcuts" => shortcuts_body(app, ui, f),
         "presets" => presets_body(app, ui, f),
@@ -31,6 +35,7 @@ pub(super) fn humanize(key: &str) -> String {
     match key {
         "appearanceMode" => return "Appearance Mode".into(),
         "exrAcesCg" => return "Open color-less EXR as ACEScg".into(),
+        "openImagesAsAcesCg" => return "Convert opened images to ACEScg (32-bit linear)".into(),
         "darkTheme" => return "Dark Theme".into(),
         "lightTheme" => return "Light Theme".into(),
         "automaticallyCheckUpdates" => return "Automatically Check for Updates".into(),
@@ -48,6 +53,14 @@ pub(super) fn humanize(key: &str) -> String {
     // The auto-hide notice settings read best with their own labels (Interface › Notification, #2022).
     if key == "notificationAutoHide" {
         return "Auto Hide Notifications".into();
+    }
+    // MCP: the labels its own rows show (`agents::integration_rows`), also for search.
+    match key {
+        "connectAgents" => return "Let AI agents connect (MCP)".into(),
+        "readRoot" => return "Folder agents can open from".into(),
+        "writeRoot" => return "Folder agents can save to".into(),
+        "whenAppClosed" => return "When PhotoCraft is closed".into(),
+        _ => {}
     }
     if key == "notificationDurationSeconds" {
         return "Notification Duration (seconds)".into();
@@ -123,6 +136,10 @@ pub(super) fn choice_label(v: &str) -> String {
         "ahd" => "AHD (adaptive homogeneity)".into(),
         "mhc" => "Malvar–He–Cutler".into(),
         "cpu" => "CPU (no GPU acceleration)".into(),
+        // MCP › When PhotoCraft is closed.
+        "launch" => "Open PhotoCraft".into(),
+        "headless" => "Work without a window".into(),
+        "error" => "Ask to open PhotoCraft".into(),
         v => humanize(v),
     }
 }
@@ -250,6 +267,20 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>, system: Option<egui
                 if !has_visible_fields(&values, &section) {
                     ui.add_space(4.0);
                     ui.label(RichText::new(tl!("These settings aren't available in PhotoCraft yet.")).color(t.text_faint));
+                } else if section == "integrations"
+                    && f.get("__agentLink").and_then(|s| s.get("mcpFlag")).and_then(Value::as_bool) == Some(true)
+                    && let Some(obj) = values.get_mut(&section).and_then(Value::as_object_mut)
+                {
+                    super::agents::integration_rows(ui, obj, f);
+                    ui.add_space(8.0);
+                } else if section == "integrations"
+                    && let Some(obj) = values.get_mut(&section).and_then(Value::as_object_mut)
+                {
+                    // Without the AI-MCP feature flag: the settings PhotoCraft had before.
+                    let mut shown: Map<String, Value> =
+                        obj.iter().filter(|(k, _)| LEGACY_INTEGRATIONS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+                    section_fields(ui, &section, &mut shown, &order, lang, system, filter);
+                    obj.extend(shown);
                 } else if let Some(obj) = values.get_mut(&section).and_then(Value::as_object_mut) {
                     section_fields(ui, &section, obj, &order, lang, system, filter);
                     if section == "fileHandling" {
@@ -370,6 +401,10 @@ fn interface_groups(ui: &mut egui::Ui, obj: &mut Map<String, Value>, keys: &[Str
 
 /// Where a clicked colour swatch leaves its preference path and label for the dialog body, which
 /// holds the fields the Color Picker request goes in.
+/// Preferences › AI Integrations without the AI-MCP feature flag: the settings PhotoCraft had
+/// before the agent connection page.
+const LEGACY_INTEGRATIONS: [&str; 2] = ["allowAgentControl", "controlPort"];
+
 const PICK_ID: &str = "prefs-pick-color";
 
 /// The colour swatch clicked this frame, if any: (preference path, label).
@@ -385,7 +420,9 @@ pub(super) fn field_visible(section: &str, obj: &Map<String, Value>, k: &str, qu
     let drawn_elsewhere = (section == "interface" && matches!(k, "theme" | "appearanceMode" | "darkTheme" | "lightTheme" | "favoriteThemes"))
         // View › Rulers (⌘R) sets it, as in Photoshop.
         || path == "unitsAndRulers.showRulers"
-        || (section == "performance" && matches!(k, "useGpu" | "gpuBackend" | "gpuAdapter" | "renderingMode" | "memoryUsageMb"))
+        // Edit › Color Settings sets the OpenColorIO (ACES) config, with the colour spaces.
+        || path == "fileHandling.ocioConfig"
+        || (section == "performance" && matches!(k, "useGpu" | "gpuBackend" | "gpuAdapter" | "renderingMode" | "performanceMode" | "memoryUsageMb"))
         // The browser presents frames itself: Low-Latency Drawing does nothing there.
         || (cfg!(target_arch = "wasm32") && path == "performance.lowLatencyDrawing")
         || (section == "export" && !export_field_visible(obj, k))
@@ -416,6 +453,9 @@ pub(super) fn section_fields(
     }
     if section == "performance" && (query.is_empty() || preference_matches(section, "renderingMode", query)) {
         rendering_mode_row(ui, obj);
+    }
+    if section == "performance" && (query.is_empty() || preference_matches(section, "performanceMode", query)) {
+        performance_mode_row(ui, obj);
     }
     if section == "performance" && (query.is_empty() || preference_matches(section, "memoryUsageMb", query)) {
         memory_usage_row(ui, obj);
@@ -522,6 +562,11 @@ fn field_rows(ui: &mut egui::Ui, section: &str, obj: &mut Map<String, Value>, ke
                 let mut s = s.clone();
                 ui.add(egui::TextEdit::singleline(&mut s).desired_width(260.0)).accessible_name(tl!(&label));
                 obj.insert(k, json!(s));
+                if read_at_launch(&path) {
+                    ui.end_row();
+                    ui.label("");
+                    ui.label(RichText::new(tl!("Applies at next launch.")).color(t.text_dim));
+                }
             }
             Value::Number(n) => {
                 let value_label = ui.label(RichText::new(tl!(&label)).color(t.text_dim));

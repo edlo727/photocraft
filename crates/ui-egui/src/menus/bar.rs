@@ -4,13 +4,84 @@ use super::render::{alt_click, render_level, render_level_rows};
 use super::search::help_search;
 use super::{PhotocraftApp, TOP_MENUS, Value, json};
 
-/// Draws the menu bar; returns the inner edge of the menu titles, facing the rest of the title bar
-/// (the right edge of the last title, or its left edge in a right-to-left UI, where File is at the
-/// right). The bar itself fills the row.
+#[derive(Clone, Debug)]
+pub struct EXRExportModalState {
+    pub is_open: bool,
+    pub compression: photocraft_io::exr_export::NukeCompression,
+    pub flat_beauty: bool,
+    pub bit_depth_32: bool,
+    pub generate_nuke_script: bool,
+    pub groups: photocraft_io::exr_export::GroupExport,
+}
+
+impl Default for EXRExportModalState {
+    fn default() -> Self {
+        Self {
+            is_open: false,
+            compression: photocraft_io::exr_export::NukeCompression::ZipScanline,
+            flat_beauty: true,
+            bit_depth_32: true,
+            generate_nuke_script: true,
+            groups: photocraft_io::exr_export::GroupExport::Branches,
+        }
+    }
+}
+
+/// The background job command of an EXR + Nuke script export.
+pub const EXR_EXPORT_JOB: &str = "file.exportNukeExr";
+
+/// Export the active document to `path` on a worker thread: the window keeps drawing, the
+/// progress dialog shows (with Cancel, or Esc) while it runs, and the result or error is reported
+/// when it ends (see `jobs_ui`).
+// The export is reached through a native save dialog, which rfd does not build for wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_exr_export(app: &mut PhotocraftApp, path: std::path::PathBuf, opts: EXRExportModalState) {
+    let Some(active) = app.session.active() else { return };
+    let doc = std::sync::Arc::clone(&active.doc);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let label = format!("Exporting {name}");
+    let result = json!({"path": path.to_string_lossy(), "name": name, "nk": opts.generate_nuke_script});
+    let started = app.session.start_job(
+        EXR_EXPORT_JOB,
+        json!({"path": path.to_string_lossy()}),
+        &label,
+        true,
+        move |ctx| {
+            let report = |f: f32, m: &str| {
+                ctx.progress(f, m);
+                !ctx.cancelled()
+            };
+            photocraft_io::exr_export::export_multichannel_exr_with_options(
+                &doc,
+                &path,
+                photocraft_io::exr_export::NukeExportOptions {
+                    compression: opts.compression,
+                    include_flat_beauty: opts.flat_beauty,
+                    use_32bit: opts.bit_depth_32,
+                    write_nuke_script: opts.generate_nuke_script,
+                    groups: opts.groups,
+                },
+                &report,
+            )
+            .map_err(|e| if ctx.cancelled() { photocraft_engine::EngineError::Cancelled } else { photocraft_engine::EngineError::Other(e) })
+        },
+        move |_, ()| Ok(result),
+    );
+    match started {
+        Ok(photocraft_engine::jobs::Started::Done(v)) => crate::jobs_ui::exr_exported(app, &v),
+        Ok(photocraft_engine::jobs::Started::Job(job)) => {
+            app.jobs.last_started = Some(job);
+            app.ui.status.clear();
+            app.ui.status_error = false;
+        }
+        Err(e) => crate::notices::error(app, format!("EXR export failed: {e}")),
+    }
+}
+
 pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
-    // Built only while a menu is open: every item's enabled/checked state scales with the
-    // document (layer lookups), which cost milliseconds per frame on large layouts (#125). While
-    // one stays open, the items are reused until what they depend on changes.
+    let exr_state_id = egui::Id::unique("exr_export_modal_state");
+    let mut exr_state = ui.ctx().data(|d| d.get_temp::<EXRExportModalState>(exr_state_id)).unwrap_or_default();
+
     let kept = std::cell::Cell::new(app.menu_cache.take());
     let built: std::cell::OnceCell<ItemCache> = std::cell::OnceCell::new();
     let app_ref: &PhotocraftApp = app;
@@ -20,13 +91,13 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
     let mut clicked: Option<String> = None;
     let t = crate::theme::Tokens::get(ui.ctx());
     let mut nav = crate::menu_nav::Nav::load(ui.ctx());
-    // The keyboard on the bar (#4988): Alt / F10 focus, Alt+letter, mnemonics.
+    
     let mut keys = crate::menu_keys::Keys::load(ui.ctx());
     keys.take_first_row(&mut nav);
     nav.underline = keys.show_underlines(ui.ctx());
     let translated: Vec<String> = TOP_MENUS.iter().map(|top| crate::i18n::tr(lang, top).to_string()).collect();
     let preferred: Vec<Option<char>> = TOP_MENUS.iter().map(|top| crate::menu_keys::TOP_PREFERRED.iter().find(|(t, _)| t == top).map(|(_, c)| *c)).collect();
-    // A title with no Latin letter shows its English key: "文件(F)" (#5863).
+    
     let (top_labels, top_mnemonics) = crate::menu_keys::localized(&translated, &TOP_MENUS, &preferred);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -35,17 +106,15 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
         v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
         v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, t.text_dim);
         v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        
         egui::MenuBar::new().ui(ui, |ui| {
-            // egui lays the bar out left to right; a right-to-left UI starts it at the right.
             let mut mirrored = rtl.then(|| ui.new_child(egui::UiBuilder::new().layout(crate::direction::row())));
             let ui = mirrored.as_mut().unwrap_or(ui);
             ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
             nav.bar_bottom = Some(ui.max_rect().bottom());
             let mut buttons = Vec::with_capacity(TOP_MENUS.len());
+            
             for (k, top) in TOP_MENUS.iter().enumerate() {
-                // egui's menu_button toggles on release; these titles open on the press (one
-                // gesture can press, drag to an item and release), so each drives its popup.
-                // The title the keyboard is on (Alt / F10) is lit like a hovered one.
                 let focused = keys.focus == Some(if rtl { TOP_MENUS.len() - 1 - k } else { k });
                 let label = if nav.underline {
                     crate::menu_keys::mnemonic_text(ui, "", &top_labels[k], top_mnemonics[k], Some(t.text_dim))
@@ -57,23 +126,20 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                     button = button.fill(ui.visuals().widgets.hovered.weak_bg_fill);
                 }
                 let title = ui.add(button);
-                // The bar's close behaviour and style, as a menu (not bar) config so submenus inside
-                // render as submenus.
+                
                 let bar = egui::containers::menu::MenuConfig::find(ui);
                 let config = egui::containers::menu::MenuConfig::new().close_behavior(bar.close_behavior).style(bar.style.clone());
                 let open = title_press(ui.ctx(), &title);
-                // The release ending the press that opened this menu is a click "outside" the
-                // popup: it must not close it again.
+                
                 let opening = title.clicked() && ui.ctx().data(|d| d.get_temp::<bool>(press_gesture_id())).unwrap_or(false);
                 let close = if opening {
                     egui::PopupCloseBehavior::IgnoreClicks
                 } else if *top == "Help" {
-                    // Menus close on any click, inside them too; a click in Help's search field
-                    // must keep it open. Its items close it themselves when chosen.
                     egui::PopupCloseBehavior::CloseOnClickOutside
                 } else {
                     config.close_behavior
                 };
+                
                 egui::Popup::menu(&title)
                     .align(crate::direction::below())
                     .open_memory(open)
@@ -94,8 +160,8 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                         if mine.is_empty() {
                             ui.weak(crate::i18n::tr(lang, "(coming soon)"));
                         }
+                        
                         if *top == "Help" {
-                            // The search field scrolls with the rows, as part of the menu's content.
                             crate::menu_nav::level(ui, 1, &mut nav, |ui, nav| {
                                 help_search(ui, items, opening, &mut clicked, nav);
                                 render_level_rows(ui, &mine, 1, &mut clicked, nav);
@@ -106,12 +172,13 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
                     });
                 buttons.push(title);
             }
+
             edge = if rtl { buttons.iter().map(|b| b.rect.left()).fold(edge, f32::min) } else { buttons.iter().map(|b| b.rect.right()).fold(edge, f32::max) };
             if let (Some(first), Some(last)) = (buttons.first(), buttons.last()) {
                 crate::zoom_field::set_menu_bar_rect(ui.ctx(), first.rect.union(last.rect));
             }
             switch_on_hover(ui.ctx(), &buttons);
-            // ← and → step to the menu on that side, so in screen order.
+            
             let mut tops: Vec<egui::Id> = buttons.iter().map(egui::Popup::default_response_id).collect();
             if rtl {
                 tops.reverse();
@@ -124,33 +191,166 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
             keys.keys(ui.ctx(), &tops, &mnemonics, &mut nav, &mut clicked);
         });
     });
+    
     keys.store(ui.ctx());
     nav.store(ui.ctx());
-    // No menu open this frame: nothing is kept.
     app.menu_cache = built.into_inner();
-    // The press-drag gesture ends with the button (its release was handled by the rows above).
+    
     if ui.input(|i| i.pointer.primary_released() || !i.pointer.primary_down()) {
         ui.ctx().data_mut(|d| d.remove::<bool>(press_gesture_id()));
     }
+    
+    // INTERCEPT THE COMMAND CLICK HERE
     if let Some(id) = clicked {
-        let ctx = ui.ctx().clone();
-        let alt = ctx.input(|i| i.modifiers.alt);
-        // ⌥ while choosing an Image › Adjustments item opens it at its last settings (#8900).
-        let r = if alt && crate::adjust_dialog::has_dialog(&id) {
-            let opened = crate::adjust_dialog::open_last(app, &id).map(|_| Value::Null).ok_or_else(|| "no document".to_string());
-            // Edit › Search's recents, as `invoke` notes a plain click.
-            if opened.is_ok() {
-                crate::palette::note_recent(&ctx, &id);
+        if id == "file.export.exrAces" {
+            exr_state.is_open = true;
+            // A document opened from a 16-bit half EXR exports as half again by default.
+            if let Some(st) = app.session.active() {
+                exr_state.bit_depth_32 = st.doc.file_encoding.exr_half != Some(true);
             }
-            opened
+        } else if id == "help.safeUpdate" {
+            #[cfg(target_os = "windows")]
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "git fetch origin && git rebase origin/main"])
+                .spawn();
+            
+            #[cfg(not(target_os = "windows"))]
+            let _ = std::process::Command::new("sh")
+                .args(&["-c", "git fetch origin && git rebase origin/main"])
+                .spawn();
+
+            app.ui.status = "Safe update triggered via rebase. Check terminal for details.".to_string();
+            app.ui.status_error = false;
         } else {
-            invoke(app, &ctx, &alt_click(id, alt), json!({}))
-        };
-        if let Err(e) = r {
-            app.ui.status = e;
-            app.ui.status_error = true;
+            let ctx = ui.ctx().clone();
+            let alt = ctx.input(|i| i.modifiers.alt);
+            let r = if alt && crate::adjust_dialog::has_dialog(&id) {
+                let opened = crate::adjust_dialog::open_last(app, &id).map(|_| Value::Null).ok_or_else(|| "no document".to_string());
+                if opened.is_ok() {
+                    crate::palette::note_recent(&ctx, &id);
+                }
+                opened
+            } else {
+                invoke(app, &ctx, &alt_click(id, alt), json!({}))
+            };
+            if let Err(e) = r {
+                app.ui.status = e;
+                app.ui.status_error = true;
+            }
         }
     }
+
+    if exr_state.is_open {
+        let mut closed = false;
+        let mut save_requested = false;
+
+        egui::Window::new("EXR Export Options")
+            .open(&mut exr_state.is_open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ui.ctx(), |ui| {
+                ui.vertical(|ui| {
+                    ui.add_space(4.0);
+                    
+                    egui::Grid::new("exr_export_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Compression:");
+                            use photocraft_io::exr_export::NukeCompression as Comp;
+                            crate::widgets::dropdown(
+                                ui,
+                                "exr_comp_combo",
+                                "Compression",
+                                &mut exr_state.compression,
+                                &[
+                                    (Comp::ZipScanline, "ZIP (1 scanline)"),
+                                    (Comp::ZipBlock, "ZIP (16 scanlines)"),
+                                    (Comp::Piz, "PIZ (wavelet lossless)"),
+                                    (Comp::Rle, "RLE (run length)"),
+                                    (Comp::None, "Uncompressed"),
+                                ],
+                                220.0,
+                            );
+                            ui.end_row();
+
+                            ui.label("Data Type:");
+                            ui.horizontal(|ui| {
+                                ui.radio_value(&mut exr_state.bit_depth_32, false, "16-bit half float");
+                                ui.radio_value(&mut exr_state.bit_depth_32, true, "32-bit float");
+                            });
+                            ui.end_row();
+
+                            ui.label("Groups:");
+                            use photocraft_io::exr_export::GroupExport as Groups;
+                            crate::widgets::dropdown_with_tooltips(
+                                ui,
+                                "exr_groups_combo",
+                                "Groups",
+                                &mut exr_state.groups,
+                                &[
+                                    (
+                                        Groups::Branches,
+                                        "Keep layers (group branches)",
+                                        "Every layer is its own EXR layer; each group is rebuilt in the .nk as a branch merged with the group's blend mode, opacity and mask.",
+                                    ),
+                                    (
+                                        Groups::Merged,
+                                        "Merge each group into one layer",
+                                        "Each group is merged into one EXR layer, as Layer \u{203a} Merge Group does, keeping the group's blend mode, opacity and mask. Your document is not changed.",
+                                    ),
+                                ],
+                                260.0,
+                            );
+                            ui.end_row();
+                        });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    ui.label(egui::RichText::new("Layers & Channels").strong());
+                    ui.checkbox(&mut exr_state.flat_beauty, "Flat (default 'rgba' beauty pass)");
+                    
+                    ui.add_space(4.0);
+                    ui.weak("Includes the current workspace layer stack with individual .R .G .B .A channels");
+                    
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut exr_state.generate_nuke_script, "Generate .nk Nuke Script alongside EXR")
+                        .on_hover_text("Builds a Nuke node graph matching your layers: blend modes, clipping groups (clipped grades stay on their layer), masks on the Merge mask inputs, and groups.");
+                        
+                    ui.add_space(12.0);
+
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Export").clicked() {
+                                save_requested = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                closed = true;
+                            }
+                        });
+                    });
+                });
+            });
+
+        if save_requested {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = rfd::FileDialog::new().add_filter("OpenEXR", &["exr"]).set_file_name("multichannel_export.exr").save_file() {
+                start_exr_export(app, path, exr_state.clone());
+            }
+            closed = true;
+        }
+
+        if closed {
+            exr_state.is_open = false;
+        }
+    }
+
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(exr_state_id, exr_state);
+    });
     edge
 }
 
@@ -158,11 +358,7 @@ fn press_gesture_id() -> egui::Id {
     egui::Id::unique("menu-press-gesture")
 }
 
-/// A menu title's open/close command this frame, the press opens a closed menu (and
-/// starts a press-drag gesture: releasing on an item runs it) or closes an open one; the release
-/// never toggles, so the menu doesn't blink.
 fn title_press(ctx: &egui::Context, title: &egui::Response) -> Option<egui::SetOpenCommand> {
-    // A press this frame on the title (still down, or a whole click within one frame).
     let pressed = ctx.input(|i| i.pointer.primary_pressed()) && (title.is_pointer_button_down_on() || title.clicked());
     if !pressed {
         return None;
@@ -174,7 +370,6 @@ fn title_press(ctx: &egui::Context, title: &egui::Response) -> Option<egui::SetO
     Some(egui::SetOpenCommand::Bool(!open))
 }
 
-/// Did the press-drag gesture that opened the menus end over `item` (released on it)?
 pub(super) fn released_on(ui: &egui::Ui, item: &egui::Response) -> bool {
     item.enabled()
         && item.contains_pointer()
@@ -182,28 +377,16 @@ pub(super) fn released_on(ui: &egui::Ui, item: &egui::Response) -> bool {
         && ui.ctx().data(|d| d.get_temp::<bool>(press_gesture_id())).unwrap_or(false)
 }
 
-/// True only when the pointer can actually reach a menu title. A tall submenu can be
-/// repositioned upward by egui and overlap the menu bar; in that case the popup's layer is
-/// top-most and hovering it must not switch the open top-level menu.
-///
-/// The title's column extends up to the top of the window: egui lights a widget up to
-/// `interact_radius` away, so with the window maximized a pointer pushed against the screen edge
-/// (above the title's own rect) highlights it and must switch to it too (#7702).
 pub(super) fn pointer_reaches_title(ctx: &egui::Context, response: &egui::Response, p: egui::Pos2) -> bool {
     let r = response.interact_rect;
     let column = egui::Rect::from_min_max(egui::pos2(r.left(), f32::NEG_INFINITY), r.max);
     column.contains(p) && ctx.layer_id_at(p) == Some(response.layer_id)
 }
 
-/// Like a native menu bar (Windows, macOS): while one top-level menu is open, hovering another
-/// top-level title opens that menu instead.
 fn switch_on_hover(ctx: &egui::Context, buttons: &[egui::Response]) {
     let ids: Vec<egui::Id> = buttons.iter().map(egui::Popup::default_response_id).collect();
     let Some(open) = ids.iter().position(|id| egui::Popup::is_id_open(ctx, *id)) else { return };
-    // `Response::hovered` is false while the menu's popup layer is open. Hit-test the title
-    // rect manually, but only when its own layer is top-most at the pointer.
     let Some(p) = ctx.pointer_hover_pos() else { return };
-    // Only a moving pointer switches: a pointer resting on a title must not undo ← / → .
     if ctx.input(|i| i.pointer.delta() == egui::Vec2::ZERO) {
         return;
     }

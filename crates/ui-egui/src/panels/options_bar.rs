@@ -148,19 +148,30 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                                 // Its list has Behind, greyed on the Background (#12879).
                                 opt_label(ui, tl!("Mode"));
                                 let behind = crate::brush_mode_menu::enabled(app, crate::brush_mode_menu::Item::Behind);
-                                super::brush_controls::pattern_stamp_mode_dropdown(ui, "retouch-mode", &mut brush, behind);
+                                // An Indexed Color document names Normal "Threshold" (#12887); the other
+                                // entries weren't measured there.
+                                let threshold = app.session.active().is_some_and(|st| st.doc.mode == photocraft_doc::ColorMode::Indexed);
+                                super::brush_controls::pattern_stamp_mode_dropdown(ui, "retouch-mode", &mut brush, behind, threshold);
                             } else if let Some(modes) = crate::blend_keys::tool_modes(tool) {
                                 opt_label(ui, tl!("Mode"));
-                                if let Some(Some(m)) =
-                                    tool_mode_dropdown(ui, "retouch-mode", &modes, Some(crate::blend_keys::brush_tool_mode(tool, brush.mode)))
-                                {
+                                let mode = crate::blend_keys::brush_tool_mode(tool, brush.mode);
+                                // Indexed Color names Normal "Threshold"; the other modes weren't measured.
+                                let threshold = crate::retouch_ui::clone_stamp_indexed(app);
+                                if let Some(Some(m)) = tool_mode_dropdown(ui, "retouch-mode", &modes, Some(mode), threshold) {
                                     brush.mode = m;
                                 }
                             }
-                            if matches!(tool, Tool::CloneStamp | Tool::HistoryBrush) {
+                            if matches!(tool, Tool::CloneStamp | Tool::PatternStamp | Tool::HistoryBrush) {
                                 let width = if t.pro { 62.0 } else { 66.0 };
-                                percent_field(ui, tl!("Opacity"), &mut brush.opacity, 1.0..=100.0, width);
-                                percent_field(ui, tl!("Flow"), &mut brush.flow, 1.0..=100.0, width);
+                                // The Pattern Stamp's are whole percents as measured; the Brush's tooltips (#12616).
+                                let pattern = tool == Tool::PatternStamp;
+                                let field = if pattern { whole_percent_field } else { percent_field };
+                                let opacity = field(ui, tl!("Opacity"), &mut brush.opacity, 1.0..=100.0, width);
+                                let flow = field(ui, tl!("Flow"), &mut brush.flow, 1.0..=100.0, width);
+                                if pattern {
+                                    opacity.on_hover_text(tl!("Set opacity for stroke"));
+                                    flow.on_hover_text(tl!("Set flow rate for stroke"));
+                                }
                             }
                             // Art History has no Mode (the engine paints Normal) and no Flow.
                             if tool == Tool::ArtHistoryBrush {
@@ -195,6 +206,60 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 });
             });
         });
+}
+
+/// Brush › Large Brush Mode (`canvas::GpuStroke`).
+fn large_brush_mode(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    if app.ui.tool != Tool::Brush {
+        return;
+    }
+    widgets::vline(ui, 22.0);
+    widgets::checkbox(ui, &mut app.ui.tool_options.large_brush_mode, tl!("Large Brush Mode")).on_hover_text(tl!(
+        "For very large brushes on big 32-bit files. The stroke is previewed on the GPU while you paint and written at full precision when you lift the pen (a short pause on big strokes). Round brushes in Normal mode on a layer's pixels, without a selection; other strokes paint as usual."
+    ));
+}
+
+/// Intensity (stops) of the paint colour on a 32-bit document: HDR paint above 1.0, shown only
+/// there (other depths can't hold it).
+fn hdr_intensity(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let hdr = app.session.active().is_some_and(|st| st.doc.depth == photocraft_color::SampleType::F32);
+    if !hdr {
+        return;
+    }
+    widgets::vline(ui, 22.0);
+    opt_label(ui, tl!("Intensity"));
+    let ev = &mut app.ui.tool_options.hdr_intensity;
+    ui.add(egui::DragValue::new(ev).range(-10.0..=10.0).speed(0.05).fixed_decimals(2).suffix(" EV")).on_hover_text(tl!(
+        "HDR paint on a 32-bit document: the foreground colour times 2 to this power (stops). +1 doubles it, +3 is 8×: values above 1.0 for glows, emissive passes and light. 0 paints the colour as picked."
+    ));
+    if *ev != 0.0 && crate::widgets::secondary_button(ui, tl!("0"), 0.0).on_hover_text(tl!("Back to 0 EV")).clicked() {
+        *ev = 0.0;
+    }
+}
+
+/// Speed Taper: a shortcut for Shape Dynamics › Size › Control: Pen Speed (a quick stroke
+/// thins out towards the Minimum Diameter, as MyPaint and Krita brushes can). Its response curve
+/// in Brush Settings shapes it.
+fn speed_taper(ui: &mut egui::Ui, b: &mut BrushSettings) {
+    use photocraft_paint::brush::Control;
+    let sd = &mut b.shape_dynamics;
+    let mut on = sd.enabled && sd.size.control == Control::PenSpeed;
+    let was = on;
+    widgets::checkbox(ui, &mut on, tl!("Speed Taper")).on_hover_text(tl!(
+        "Quick strokes get thinner, slow ones stay full size, like a flick of an ink brush. Sets Shape Dynamics › Size › Control to Pen Speed; Minimum Diameter sets how thin, and its response curve in Brush Settings how quickly."
+    ));
+    if on != was {
+        if on {
+            sd.enabled = true;
+            sd.size.control = Control::PenSpeed;
+            // A fast flick would vanish at a 0 % minimum.
+            if sd.size.minimum <= 0.0 {
+                sd.size.minimum = 0.25;
+            }
+        } else {
+            sd.size.control = Control::Off;
+        }
+    }
 }
 
 /// The per-tool options of the bar: the brush, mixer, marquee, pencil and view controls.
@@ -264,6 +329,9 @@ fn brush_specific_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: Tokens,
             if tip(pressure, tl!("Always use Pressure for Size. When off, Brush Preset controls pressure")).clicked() {
                 b.pressure_size = !b.pressure_size;
             }
+            speed_taper(ui, b);
+            hdr_intensity(app, ui);
+            large_brush_mode(app, ui);
         }
         // Pencil: Photoshop's options (no hardness or flow: the pencil is always hard).
         Tool::Pencil => {
@@ -352,6 +420,8 @@ fn brush_specific_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: Tokens,
                 widgets::toggle(ui, &mut b.pressure_opacity, tl!("Pressure for Opacity")),
                 tl!("Always use Pressure for Opacity. When off, Brush Preset controls pressure"),
             );
+            hdr_intensity(app, ui);
+            large_brush_mode(app, ui);
         }
         Tool::MixerBrush => {
             brush_preset_chip(ui, b, &mut app.ui);
@@ -518,7 +588,7 @@ fn selection_specific_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: 
             if let Some(modes) = crate::blend_keys::tool_modes(tool) {
                 let o = &mut app.ui.tool_options;
                 let current = if o.bucket_clear { None } else { Some(o.bucket_blend_mode) };
-                if let Some(m) = tool_mode_dropdown(ui, "bucket-mode", &modes, current) {
+                if let Some(m) = tool_mode_dropdown(ui, "bucket-mode", &modes, current, false) {
                     o.bucket_clear = m.is_none();
                     if let Some(m) = m {
                         o.bucket_blend_mode = m;
@@ -575,10 +645,10 @@ fn selection_specific_options(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: 
             if classic {
                 widgets::vline(ui, 22.0);
                 opt_label(ui, tl!("Mode"));
-                let opts: Vec<(BlendMode, &str)> = BlendMode::LAYER_MODES.iter().map(|m| (*m, m.label())).collect();
+                let opts: Vec<(BlendMode, &str)> = BlendMode::menu_modes().map(|m| (m, m.label())).collect();
                 // The wheel over it steps the mode, as over the Layers panel's (#2061).
                 widgets::dropdown_wheel_grouped(ui, "gradient-blend-mode", tl!("Blend Mode"), &mut app.ui.tool_options.gradient_blend_mode, &opts, 96.0, |m| {
-                    starts_blend_group(*m)
+                    starts_blend_group(*m) || *m == BlendMode::NukeMin
                 });
                 opt_label(ui, tl!("Opacity"));
                 widgets::value_field(ui, &mut app.ui.tool_options.fill_opacity, 1.0..=100.0, "%", 62.0);
@@ -1014,7 +1084,7 @@ fn eraser_percent(ui: &mut egui::Ui, label: &str, value: &mut f32) -> bool {
 }
 
 /// Shows one of the range alerts as a modal with OK, once even if more than one pass asks.
-fn range_alert(ui_state: &mut crate::state::UiState, text: &str) {
+pub(crate) fn range_alert(ui_state: &mut crate::state::UiState, text: &str) {
     let message = tl!(text).to_owned();
     let shown =
         ui_state.dialogs.iter().any(|d| d.kind == crate::state::DialogKind::Error && d.fields.get("message").and_then(|m| m.as_str()) == Some(&message));
@@ -1055,3 +1125,7 @@ mod sharpen_strength_alert_tests;
 #[cfg(test)]
 #[path = "../smudge_strength_alert_tests.rs"]
 mod smudge_strength_alert_tests;
+
+#[cfg(test)]
+#[path = "../pattern_stamp_opacity_flow_tests.rs"]
+mod pattern_stamp_opacity_flow_tests;

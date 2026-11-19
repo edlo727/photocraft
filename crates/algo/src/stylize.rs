@@ -30,7 +30,8 @@ pub(crate) fn solarize(src: &Image, out: Rect, ctx: &Ctx) -> Vec<f32> {
     if subtractive(ctx) {
         per_pixel(src, out, ctx, |v| if v < 0.5 { 1.0 - v } else { v })
     } else {
-        per_pixel(src, out, ctx, |v| if v > 0.5 { 1.0 - v } else { v })
+        // Highlights above 1.0 (32-bit) end at black, where the inverted curve lands at 1.0.
+        per_pixel(src, out, ctx, |v| if v > 0.5 { (1.0 - v).max(0.0) } else { v })
     }
 }
 
@@ -173,7 +174,10 @@ pub(crate) fn emboss(src: &Image, out: Rect, ctx: &Ctx, angle: f32, height: f32,
     for (i, px) in res.chunks_exact_mut(n).enumerate() {
         let (x, y) = (out.x0 + (i % w) as i32, out.y0 + (i / w) as i32);
         let g = 0.5 + k * (lum_at(x + dx, y + dy, &mut tmp) - lum_at(x - dx, y - dy, &mut tmp));
-        set_gray(ctx, px, g.clamp(0.0, 1.0));
+        // Additive models keep relief brighter than 1.0 (32-bit highlights); integer depths clip
+        // it when the result is stored.
+        let top = if matches!(ctx.mode, photocraft_color::ColorMode::Rgb | photocraft_color::ColorMode::Grayscale) { f32::MAX } else { 1.0 };
+        set_gray(ctx, px, g.clamp(0.0, top));
     }
     res
 }

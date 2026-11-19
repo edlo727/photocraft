@@ -105,6 +105,10 @@ fn keeps_gray(adj: &Adjustment) -> bool {
         | Adjustment::Threshold { .. }
         | Adjustment::Invert => true,
         Adjustment::HueSaturation { colorize, .. } => !colorize,
+        // Grade maps gray to gray while every knob has the same value on R, G and B.
+        Adjustment::Grade { blackpoint, whitepoint, lift, gain, multiply, offset, gamma, .. } => {
+            [blackpoint, whitepoint, lift, gain, multiply, offset, gamma].iter().all(|k| k[0] == k[1] && k[1] == k[2])
+        }
         _ => false,
     }
 }

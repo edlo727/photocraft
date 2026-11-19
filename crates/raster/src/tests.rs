@@ -1024,6 +1024,45 @@ fn content_bounds_with_tile_skipping() {
     assert_eq!(s.content_bounds(), Rect::new(-700, 0, 2000, 4001));
 }
 
+/// `copy_region_from` and `write_regions_par` give the pixels of the plain region copies they
+/// replace, keep the snapshot unchanged, and touch nothing outside the region.
+#[test]
+fn region_copies_from_a_snapshot_match_plain_region_writes() {
+    for fmt in [PixelFormat::RGBA8, PixelFormat::RGBA32F] {
+        let mut s = Surface::new(fmt);
+        s.fill_rect(Rect::new(-40, -40, 700, 600), &[0.25, 0.5, 0.75, 1.0]);
+        let pre = s.clone();
+        let pre_bytes = pre.to_interleaved(Rect::new(-300, -300, 1000, 1000));
+        // Paint over the snapshot (a "stroke"), including where the snapshot had no tiles.
+        s.fill_rect(Rect::new(-280, -10, 900, 820), &[1.0, 0.0, 0.0, 1.0]);
+        for r in [Rect::new(0, 0, 512, 512), Rect::new(-270, 3, 777, 811), Rect::new(10, 20, 30, 40), Rect::EMPTY] {
+            let mut plain = s.clone();
+            plain.write_region(r, &pre.read_region(r));
+            let mut fast = s.clone();
+            fast.copy_region_from(&pre, r);
+            let all = Rect::new(-300, -300, 1000, 1000);
+            assert_eq!(fast.read_region(all), plain.read_region(all), "{fmt:?} {r:?}");
+            assert_eq!(pre.to_interleaved(all), pre_bytes, "snapshot unchanged");
+        }
+        // Many small regions at once, as a brush composite writes them.
+        let regions: Vec<(Rect, Vec<f32>)> = (0..40)
+            .map(|i| {
+                let r = Rect::new(i * 64 - 300, (i % 5) * 64, i * 64 - 236, (i % 5) * 64 + 64);
+                let n = (r.width() * r.height()) as usize * fmt.channels();
+                (r, (0..n).map(|k| ((k + i as usize) % 7) as f32 / 7.0).collect())
+            })
+            .collect();
+        let mut serial = s.clone();
+        for (r, d) in &regions {
+            serial.write_region(*r, d);
+        }
+        let mut par = s.clone();
+        let refs: Vec<(Rect, &[f32])> = regions.iter().map(|(r, d)| (*r, d.as_slice())).collect();
+        par.write_regions_par(&refs);
+        let all = Rect::new(-400, -100, 2700, 500);
+        assert_eq!(par.read_region(all), serial.read_region(all), "{fmt:?}");
+    }
+}
 #[test]
 fn fallible_interleaved_writes_match_encoded_pixels_and_reject_bad_lengths() {
     for sample in [SampleType::U8, SampleType::U16, SampleType::F32] {

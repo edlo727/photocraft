@@ -68,6 +68,27 @@ pub struct FrameStages {
     /// eframe's CPU time for the previous frame.
     #[serde(skip)]
     pub cpu_prev_ms: Option<f64>,
+    /// Waiting for Large Brush Mode strokes' background writes to finish (a command, or a stroke
+    /// that isn't Large Brush Mode, needs them in the document first).
+    #[serde(skip)]
+    pub wait_ms: f64,
+    /// What waited for them (`canvas::note_gpu_wait`).
+    #[serde(skip)]
+    pub wait_for: String,
+    /// Layer pages evicted for the GPU memory budget, and the memory layers held (MiB).
+    #[serde(skip)]
+    pub evicted: u64,
+    #[serde(skip)]
+    pub layer_mb: u64,
+    /// The part of `command_ms` spent on the UI's side effects of commands (panels, masks).
+    #[serde(skip)]
+    pub effects_ms: f64,
+    /// Layer tiles the frame's canvas refreshes uploaded (the stroke trace's `tiles`).
+    #[serde(skip)]
+    pub tiles: u64,
+    /// Of those, tiles converted ahead of time (Large Brush Mode's commit thread).
+    #[serde(skip)]
+    pub tiles_ready: u64,
     /// The raw input hook ran for this frame.
     #[serde(skip)]
     started: bool,

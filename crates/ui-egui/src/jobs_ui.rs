@@ -669,6 +669,7 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
             app.sync_views();
             crate::file_ui::print_status(app, result);
         }
+        JobOutcome::Done(ref v) if e.command == crate::menus::bar::EXR_EXPORT_JOB => exr_exported(app, v),
         JobOutcome::Done(_) if cancelled_batch => {
             app.ui.status = crate::i18n::fmt(tl!("Canceled {label}"), &[("label", &e.label)]);
             app.ui.status_error = false;
@@ -690,6 +691,14 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
             app.ui.status_error = false;
         }
     }
+}
+
+/// The status after an EXR export (`{path, name, nk}`).
+pub fn exr_exported(app: &mut PhotocraftApp, v: &Value) {
+    let name = v.get("name").and_then(Value::as_str).unwrap_or_default();
+    let nk = v.get("nk").and_then(Value::as_bool).unwrap_or(false);
+    app.ui.status = if nk { format!("Exported {name} and its Nuke script") } else { format!("Exported {name}") };
+    app.ui.status_error = false;
 }
 
 /// What [`crate::PhotocraftApp::open_bytes`] does after decoding, for a background open's result
@@ -766,7 +775,7 @@ pub(crate) fn after_open(
     name: &str,
     path: Option<&str>,
     warnings: &[String],
-    bytes: Option<&[u8]>,
+    bytes: Option<&Arc<Vec<u8>>>,
 ) -> Result<(), String> {
     let index = app.session.documents().iter().position(|st| st.doc.id == document).ok_or("the opened document is missing")?;
     app.session.set_active(index);

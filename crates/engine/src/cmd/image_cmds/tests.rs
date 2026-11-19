@@ -205,8 +205,20 @@ fn image_size_keeps_canvas_edges_opaque() {
             let mut s = Session::new();
             s.execute("file.new", json!({"width": 30, "height": 20, "depth": depth, "background": "#336699"})).unwrap();
             s.execute("select.all", json!({})).unwrap();
+            // The Crop tool's W x H x Resolution mode still resamples the selection with the
+            // pixels: a full selection keeps reaching the canvas edges.
+            let mut cropped = (*doc(&s)).clone();
+            let ch = (20 * w + 15) / 30;
+            resample_doc(&mut cropped, "test", w, ch, Resample::Bicubic).unwrap();
+            let sel = cropped.selection.as_ref().unwrap();
+            let (x1, y1) = (cropped.size.width as i32 - 1, cropped.size.height as i32 - 1);
+            for (x, y) in [(0, 0), (x1, 0), (0, y1), (x1, y1)] {
+                assert!(sel.pixel(x, y)[0] > 0.99, "{depth} {resample}: selection at ({x},{y})");
+            }
             s.execute("image.imageSize", json!({"width": w, "resample": resample})).unwrap();
             let d = doc(&s);
+            // Image Size drops the selection when it resamples (#13856).
+            assert!(d.selection.is_none(), "{depth} {resample}: Image Size dropped the selection");
             let flat = photocraft_compose::flatten(d);
             let (w, h) = (flat.rect.width() as usize, flat.rect.height() as usize);
             let mid = flat.px[(h / 2) * w + w / 2];
@@ -214,11 +226,6 @@ fn image_size_keeps_canvas_edges_opaque() {
             for p in &flat.px {
                 let off = p.iter().zip(mid).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
                 assert!(off < 0.01, "{depth} {resample} {w}: {p:?} vs {mid:?}");
-            }
-            let sel = d.selection.as_ref().unwrap();
-            let (x1, y1) = (d.size.width as i32 - 1, d.size.height as i32 - 1);
-            for (x, y) in [(0, 0), (x1, 0), (0, y1), (x1, y1)] {
-                assert!(sel.pixel(x, y)[0] > 0.99, "{depth} {resample}: selection at ({x},{y})");
             }
         }
     }
@@ -1279,4 +1286,55 @@ fn trim_and_duplicate_merged_on_too_large_document_fail_gracefully_without_panic
     assert_eq!(doc(&s).layers.len(), initial_layers, "layer count unchanged after failed duplicate");
     assert_eq!(doc(&s).bounds(), initial_bounds, "canvas size unchanged after failed duplicate");
     assert_eq!(s.active().unwrap().revision, initial_rev, "revision unchanged after failed duplicate");
+}
+
+/// 32 → 16 bits keeps the look: a linear profile becomes its sRGB-curve twin as the pixels are
+/// encoded, so the display reads back the same colours (it used to keep the linear profile on
+/// encoded pixels: the gamma shift). Keep Linear keeps both; 8/16 → 32 tags the linear twin.
+#[test]
+fn bit_depth_conversions_keep_the_look() {
+    use craft_cms::Builtin;
+    let px = |doc: &Document| doc.layers[0].surface().unwrap().pixel(2, 2);
+    let linear_doc = || {
+        let mut d = Document::with_background("t", Size::new(8, 8), ColorMode::Rgb, SampleType::F32, photocraft_doc::Color::rgba(0.5, 2.0, 0.1, 1.0));
+        d.icc_profile = Some(Builtin::LinearSrgb.profile().to_bytes());
+        d
+    };
+    let srgb = |v: f32| photocraft_color::convert::linear_to_srgb(v);
+
+    let mut d = linear_doc();
+    convert_depth_keeping_look(&mut d, SampleType::U16, NarrowMethod::Clip);
+    assert!(crate::color_cmds::document_profile(&d).same_colors(Builtin::Srgb.profile()), "Linear sRGB becomes sRGB");
+    let p = px(&d);
+    assert!((p[0] - srgb(0.5)).abs() < 1e-3 && (p[1] - 1.0).abs() < 1e-4, "{p:?}");
+
+    let mut d = linear_doc();
+    convert_depth_keeping_look(&mut d, SampleType::U16, NarrowMethod::KeepLinear);
+    assert!(is_linear_rgb_profile(&crate::color_cmds::document_profile(&d)), "Keep Linear keeps the linear profile");
+    assert!((px(&d)[0] - 0.5).abs() < 1e-3);
+
+    let mut d = linear_doc();
+    convert_depth_keeping_look(&mut d, SampleType::U16, NarrowMethod::HighlightCompression);
+    let p = px(&d);
+    assert!(p[1] < 1.0 && p[1] > srgb(HIGHLIGHT_KNEE), "the 2.0 highlight rolls off below 1: {p:?}");
+    assert!((p[2] - srgb(compress_highlights([0.5, 2.0, 0.1])[2])).abs() < 1e-3, "hue kept: all channels scaled alike");
+
+    let mut d = linear_doc();
+    convert_depth_keeping_look(&mut d, SampleType::U16, NarrowMethod::ExposureGamma { exposure: -1.0, gamma: 1.0 });
+    assert!((px(&d)[1] - 1.0).abs() < 1e-4 && (px(&d)[0] - srgb(0.25)).abs() < 1e-3, "one stop down");
+
+    // And back up: sRGB pixels linearised, the profile its linear twin.
+    let mut d = Document::with_background("t", Size::new(8, 8), ColorMode::Rgb, SampleType::U16, photocraft_doc::Color::rgba(0.5, 0.5, 0.5, 1.0));
+    convert_depth_keeping_look(&mut d, SampleType::F32, NarrowMethod::Clip);
+    assert!(is_linear_rgb_profile(&crate::color_cmds::document_profile(&d)));
+    assert!((px(&d)[0] - photocraft_color::convert::srgb_to_linear(0.5)).abs() < 1e-3);
+
+    // Highlight compression is monotonic and stays below 1.
+    let mut last = 0.0;
+    for i in 0..400 {
+        let v = i as f32 * 0.05;
+        let c = compress_highlights([v, v, v])[0];
+        assert!(c >= last && c < 1.0 + 1e-6, "{v} -> {c}");
+        last = c;
+    }
 }

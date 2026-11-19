@@ -511,9 +511,9 @@ fn blend_tile(bytes: &mut [u8], fmt: &photocraft_color::PixelFormat, origin: Rec
             } else if keep {
                 // Alpha kept: source atop, so a half-transparent pixel takes the new colour by the
                 // source alpha alone (#5783).
-                photocraft_color::blend::composite_atop(blend, d, c, k)
+                photocraft_color::blend::composite_atop_for(fmt.sample, blend, d, c, k)
             } else {
-                photocraft_color::blend::composite(blend, d, c, k)
+                photocraft_color::blend::composite_for(fmt.sample, blend, d, c, k)
             };
             if keep {
                 o[3] = d[3];

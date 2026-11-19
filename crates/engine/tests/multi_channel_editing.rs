@@ -772,6 +772,11 @@ fn lab_single_channel_tone_parameters_round_trip_without_applying_lightness_twic
     }
 }
 
+/// [`flat_rgb`] at 16-bit, for filters that a 32-bit float document does not offer.
+fn flat_rgb_16() -> Session {
+    flat_rgb_at(16)
+}
+
 fn flat_rgb() -> Session {
     flat_rgb_at(32)
 }
@@ -798,8 +803,10 @@ fn noise_monochromatic_and_native_halftone_angles_keep_their_meaning_for_subsets
     assert_eq!(surface(&mono).pixel(4, 12)[0], surface(&mono).pixel(4, 12)[2]);
     assert_ne!(surface(&mono), surface(&color));
     assert_ne!(surface(&color).pixel(4, 12)[0], surface(&color).pixel(4, 12)[2]);
-    let mut a = flat_rgb();
-    let mut b = flat_rgb();
+    // Colour Halftone works on 0..1 values and is unavailable on a 32-bit float document, so its
+    // angles are checked at 16-bit.
+    let mut a = flat_rgb_16();
+    let mut b = flat_rgb_16();
     for s in [&mut a, &mut b] {
         subset(s);
     }

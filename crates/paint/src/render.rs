@@ -760,6 +760,39 @@ pub struct StrokeRenderer {
     dual_buf: Vec<Dab>,
     all_dabs: Option<Vec<Dab>>,
     regions: RegionPool,
+    /// Dabs whose rectangle misses this one are not rasterized (see [`with_clip`](Self::with_clip)).
+    clip: Option<Rect>,
+    /// Dab-rectangle pixels the stroke may still rasterize (see [`MAX_STROKE_DAB_AREA`]).
+    area_left: u64,
+    /// The same budget for the Dual Brush's dabs, so primary and dual dabs are charged apart and
+    /// the result does not depend on how the input was chunked.
+    dual_area_left: u64,
+    /// A dab was left out for want of budget.
+    refused: bool,
+}
+
+/// Most dab-rectangle pixels one stroke rasterizes: past it the stroke stops painting, so a very
+/// large brush at the finest spacing over a very long path costs bounded time and memory instead
+/// of growing with path length times brush area. A soft round dab costs about 1.2 ns per pixel on
+/// an idle four-thread machine, so the limit is a few seconds of work. 2^31 pixels is, for
+/// example, 8 000 dabs of a 500 px brush (about a 40 000 px path at 1 % spacing) or 50 000 dabs of a
+/// 200 px brush; a 20 000 px scribble with a 500 px brush at 5 % spacing uses a fifth of it.
+pub const MAX_STROKE_DAB_AREA: u64 = 1 << 31;
+
+/// Whether a dab with rectangle `rect` is painted: it reaches `clip` and fits `area_left`, which
+/// it is charged against.
+fn admit(clip: Option<Rect>, area_left: &mut u64, refused: &mut bool, rect: Rect) -> bool {
+    if rect.is_empty() || clip.is_some_and(|c| c.intersect(&rect).is_empty()) {
+        return false;
+    }
+    let area = u64::from(rect.width()) * u64::from(rect.height());
+    // A dab that does not fit is skipped; a smaller later one (pressure) may still fit.
+    if area > *area_left {
+        *refused = true;
+        return false;
+    }
+    *area_left -= area;
+    true
 }
 
 /// The tile buffers [`StrokeRenderer::composite`] works in, kept from one composite to the next:
@@ -865,6 +898,10 @@ impl StrokeRenderer {
                         dual_buf: Vec::new(),
                         all_dabs: None,
                         regions: RegionPool::default(),
+                        clip: p.clip,
+                        area_left: p.area_left,
+                        dual_area_left: p.dual_area_left,
+                        refused: p.refused,
                     })
                 }
                 Some(m) => {
@@ -917,7 +954,32 @@ impl StrokeRenderer {
             dual_buf: Vec::new(),
             all_dabs: None,
             regions: RegionPool::default(),
+            clip: None,
+            area_left: MAX_STROKE_DAB_AREA,
+            dual_area_left: MAX_STROKE_DAB_AREA,
+            refused: false,
         }
+    }
+
+    /// Only paint where a dab can reach inside `clip` (the target's paintable area): a dab whose
+    /// rectangle misses it is counted but not rasterized, and allocates no coverage tiles. Pixels
+    /// inside `clip` come out exactly as without it.
+    pub fn with_clip(mut self, clip: Rect) -> Self {
+        self.clip = Some(clip);
+        self
+    }
+
+    /// Override the dab-area budget ([`MAX_STROKE_DAB_AREA`]) for this stroke. Set it before the first
+    /// dab: it replaces what is left, so pixels already charged are not carried over.
+    pub fn with_dab_area_budget(mut self, pixels: u64) -> Self {
+        self.area_left = pixels;
+        self.dual_area_left = pixels;
+        self
+    }
+
+    /// Whether a dab was left out because the stroke used up its dab-area budget.
+    pub fn budget_exhausted(&self) -> bool {
+        self.refused
     }
 
     /// Keep a copy of every primary dab (for tests and sequential tools).
@@ -936,13 +998,125 @@ impl StrokeRenderer {
         self.cov.bounds
     }
 
+    /// Tile by tile: the coverage of `dabs` built one block of the canvas at a time, each block
+    /// taking every dab that reaches it in order, on all cores. Each pixel sees the same dabs in
+    /// the same order with the same arithmetic as the dab-by-dab loop, so the pixels are the
+    /// same; but a block's tiles stay in cache through all its dabs, and no dab-sized buffer is
+    /// written and read back per dab (a 4000 px soft dab is 64 MB of it). False, leaving the
+    /// work to the dab-by-dab loop, when it doesn't pay: one dab, or little area. Not for Wet
+    /// Edges (per-dab depth) or a dual brush.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn raster_tiled(&mut self, dabs: &[Dab]) -> bool {
+        use rayon::prelude::*;
+        /// A block: 4×4 coverage tiles.
+        const BLOCK: i32 = COV_TILE * 4;
+        if dabs.len() < 2 {
+            return false;
+        }
+        let mut rects: Vec<Rect> = dabs.iter().map(|d| self.ctx.dab_rect(d, false)).collect();
+        let area = rects.iter().fold(0usize, |a, r| a.saturating_add(r.width().max(0) as usize * r.height().max(0) as usize));
+        if !parallel(area) {
+            return false;
+        }
+        // The dab-by-dab loop's admission, in stroke order: a dab that can't reach the clip (the
+        // canvas) or no longer fits the area budget is neither rasterised nor counted in the
+        // bounds, which are the stroke's damage.
+        for r in &mut rects {
+            if !admit(self.clip, &mut self.area_left, &mut self.refused, *r) {
+                *r = Rect::EMPTY;
+            }
+        }
+        let nc = self.cov.nc;
+        let colors: Vec<Option<([f32; 8], usize)>> = dabs
+            .iter()
+            .map(|d| match (self.per_dab_color, self.fmt) {
+                (true, Some(f)) if nc > 0 => {
+                    let mut native = [0.0f32; 8];
+                    from_rgba_into(&f, d.color, &mut native);
+                    Some((native, f.mode.color_channels()))
+                }
+                _ => None,
+            })
+            .collect();
+        // Which dabs reach which block, in stroke order.
+        let mut blocks: FxHashMap<(i32, i32), Vec<usize>> = FxHashMap::default();
+        for (i, r) in rects.iter().enumerate() {
+            if r.is_empty() {
+                continue;
+            }
+            for by in r.y0.div_euclid(BLOCK)..=(r.y1 - 1).div_euclid(BLOCK) {
+                for bx in r.x0.div_euclid(BLOCK)..=(r.x1 - 1).div_euclid(BLOCK) {
+                    blocks.entry((bx, by)).or_default().push(i);
+                }
+            }
+        }
+        // Each block owns its tiles while it works (those already in the map, and any it starts).
+        let per = BLOCK / COV_TILE;
+        let mut work: Vec<((i32, i32), Vec<usize>, Vec<((i32, i32), Option<CovTile>, bool)>)> = blocks
+            .into_iter()
+            .map(|(b, list)| {
+                let tiles = (0..per)
+                    .flat_map(|j| (0..per).map(move |i| (b.0 * per + i, b.1 * per + j)))
+                    .map(|k| (k, self.cov.tiles.remove(&tile_key(k)), false))
+                    .collect();
+                (b, list, tiles)
+            })
+            .collect();
+        let ctx = &self.ctx;
+        work.par_iter_mut().for_each_init(Vec::new, |scratch, (b, list, tiles)| {
+            let block = Rect::new(b.0 * BLOCK, b.1 * BLOCK, (b.0 + 1) * BLOCK, (b.1 + 1) * BLOCK);
+            for &i in list.iter() {
+                let r = rects[i].intersect(&block);
+                if r.is_empty() {
+                    continue;
+                }
+                ctx.rasterize_into(&dabs[i], false, r, scratch, None);
+                let color = colors[i].as_ref().map(|(c, n)| &c[..*n]);
+                let dab = DabValues { vals: scratch, rect: r, w: r.width() as usize, ceil: dabs[i].opacity, color, depth: None, nc };
+                for (key, slot, touched) in tiles.iter_mut() {
+                    let tr = Rect::new(key.0 * COV_TILE, key.1 * COV_TILE, (key.0 + 1) * COV_TILE, (key.1 + 1) * COV_TILE).intersect(&r);
+                    if tr.is_empty() || !dab.touches(tr) {
+                        continue;
+                    }
+                    let tile = slot.get_or_insert_with(CovTile::new);
+                    dab.prepare(tile);
+                    dab.tile(tr, *key, tile);
+                    *touched = true;
+                }
+            }
+        });
+        for (_, _, tiles) in work {
+            for (key, slot, touched) in tiles {
+                if let Some(tile) = slot {
+                    self.cov.tiles.insert(tile_key(key), tile);
+                }
+                if touched {
+                    self.cov.dirty.insert(key);
+                }
+            }
+        }
+        for r in &rects {
+            if !r.is_empty() {
+                self.cov.bounds = self.cov.bounds.union(r);
+            }
+        }
+        true
+    }
+
     fn raster_pending(&mut self) {
         let mut dabs = std::mem::take(&mut self.dab_buf);
         let mut duals = std::mem::take(&mut self.dual_buf);
         let wet = self.ctx.brush.wet_edges;
         let mut native = [0.0f32; 8];
-        for d in &dabs {
+        #[cfg(not(target_arch = "wasm32"))]
+        let tiled = !wet && self.dual.is_none() && self.raster_tiled(&dabs);
+        #[cfg(target_arch = "wasm32")]
+        let tiled = false;
+        for d in dabs.iter().filter(|_| !tiled) {
             let rect = self.ctx.dab_rect(d, false);
+            if !admit(self.clip, &mut self.area_left, &mut self.refused, rect) {
+                continue;
+            }
             // Wet Edges acts on the whole stroke (#2088): the dab records how deep it reaches each
             // pixel and the stroke darkens its own rim when composited, not every dab's.
             self.ctx.rasterize_into(d, false, rect, &mut self.scratch, wet.then_some(&mut self.depth_scratch));
@@ -960,6 +1134,9 @@ impl StrokeRenderer {
         if let Some(dm) = self.dual.as_mut() {
             for d in &duals {
                 let rect = self.ctx.dab_rect(d, true);
+                if !admit(self.clip, &mut self.dual_area_left, &mut self.refused, rect) {
+                    continue;
+                }
                 self.ctx.rasterize(d, true, rect, &mut self.scratch);
                 dm.accumulate(rect, &self.scratch, 1.0, None, None);
             }
@@ -989,6 +1166,25 @@ impl StrokeRenderer {
     pub fn push(&mut self, pts: &[StrokePoint]) {
         self.generator.push(pts, &mut self.dab_buf, &mut self.dual_buf);
         self.raster_pending();
+    }
+
+    /// Feed input points and return the primary dabs they make without rasterising them: a GPU
+    /// preview draws them (Large Brush Mode). The same points and seed fed to [`push`](Self::push)
+    /// make the same dabs, so the full-precision commit paints what the preview showed.
+    pub fn push_dabs(&mut self, pts: &[StrokePoint]) -> Vec<Dab> {
+        self.generator.push(pts, &mut self.dab_buf, &mut self.dual_buf);
+        self.dual_buf.clear();
+        self.dabs_done += self.dab_buf.len();
+        std::mem::take(&mut self.dab_buf)
+    }
+
+    /// The dabs finishing the stroke now would add (smoothing catch-up, a lone first point), for
+    /// a GPU preview: see [`push_dabs`](Self::push_dabs).
+    pub fn finish_dabs(&mut self) -> Vec<Dab> {
+        self.generator.finish(&mut self.dab_buf, &mut self.dual_buf);
+        self.dual_buf.clear();
+        self.dabs_done += self.dab_buf.len();
+        std::mem::take(&mut self.dab_buf)
     }
 
     /// End of stroke (smoothing catch-up, a lone first point).
@@ -1048,6 +1244,10 @@ impl StrokeRenderer {
             dual_buf: duals,
             all_dabs: None,
             regions: RegionPool::default(),
+            clip: self.clip,
+            area_left: self.area_left,
+            dual_area_left: self.dual_area_left,
+            refused: self.refused,
         };
         t.raster_pending();
         // Tiles whose coverage the tail doesn't change still composite the same: redraw them all.
@@ -1223,7 +1423,7 @@ impl StrokeRenderer {
         // Each tile composites into a buffer of its own (a large stroke's tiles in parallel, to
         // the same pixels); the writes to the target go one by one, in order. Batches keep the
         // pending buffers few, and the pool keeps them from one composite to the next.
-        const BATCH: usize = 256;
+        const BATCH: usize = 1024;
         let mut pool = std::mem::take(&mut self.regions.0);
         // The document's CMYK profile is active per thread: the workers enter the caller's, or a
         // blend mode other than Normal would convert their tiles through the built-in coated CMYK.
@@ -1309,10 +1509,12 @@ impl StrokeRenderer {
                         } else {
                             let d = to_rgba(&fmt, px);
                             let sr = to_rgba(&fmt, &src[..n]);
+                            // By the surface's depth: a 32-bit float layer keeps values above 1 (a
+                            // Linear Dodge brush adds light past 1 instead of clipping there).
                             let o = if lock_transparency {
-                                photocraft_color::blend::composite_atop(b.mode, d, sr, k)
+                                photocraft_color::blend::composite_atop_for(fmt.sample, b.mode, d, sr, k)
                             } else {
-                                photocraft_color::blend::composite(b.mode, d, sr, k)
+                                photocraft_color::blend::composite_for(fmt.sample, b.mode, d, sr, k)
                             };
                             let mut enc = [0.0f32; 8];
                             from_rgba_into(&fmt, o, &mut enc);
@@ -1328,11 +1530,21 @@ impl StrokeRenderer {
             for_each_item(&mut items, batch.len() * (COV_TILE * COV_TILE) as usize, |item| {
                 photocraft_color::convert::with_cmyk_space(cmyk.as_ref(), || composite_tile(item))
             });
-            for (_, tr, region) in items {
-                if !tr.is_empty() {
-                    target.write_region(tr, &region);
-                    dmg = dmg.union(&tr);
+            // Many tiles (a large brush on a big 32-bit layer): written on all cores, each layer
+            // tile they land in at once. A few (a small dab): one by one, without the thread pool.
+            let written: Vec<(Rect, &[f32])> = items.iter().filter(|(_, tr, _)| !tr.is_empty()).map(|(_, tr, region)| (*tr, region.as_slice())).collect();
+            if written.len() >= 16 {
+                target.write_regions_par(&written);
+            } else {
+                for (tr, region) in &written {
+                    target.write_region(*tr, region);
                 }
+            }
+            for (tr, _) in &written {
+                dmg = dmg.union(tr);
+            }
+            drop(written);
+            for (_, _, region) in items {
                 pool.push(region);
             }
         }
@@ -1350,11 +1562,27 @@ pub fn render_stroke(
     lock_transparency: bool,
     zoom: f32,
 ) -> Rect {
+    render_stroke_clipped(target, brush, points, selection, lock_transparency, zoom, None)
+}
+
+/// [`render_stroke`] that only rasterizes dabs reaching `clip` (see [`StrokeRenderer::with_clip`]).
+pub fn render_stroke_clipped(
+    target: &mut Surface,
+    brush: &BrushSettings,
+    points: &[StrokePoint],
+    selection: Option<&Surface>,
+    lock_transparency: bool,
+    zoom: f32,
+    clip: Option<Rect>,
+) -> Rect {
     if points.is_empty() {
         return Rect::EMPTY;
     }
     let pre = target.clone();
     let mut r = StrokeRenderer::new(brush, Some(target.format()), zoom);
+    if let Some(c) = clip {
+        r = r.with_clip(c);
+    }
     r.push(points);
     r.finish();
     r.composite(&pre, target, selection, lock_transparency, true)
@@ -1607,6 +1835,9 @@ mod reference;
 
 #[cfg(test)]
 mod coverage_tests;
+
+#[cfg(test)]
+mod budget_tests;
 
 #[cfg(test)]
 #[path = "mip_cache_render_tests.rs"]

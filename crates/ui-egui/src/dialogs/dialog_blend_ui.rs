@@ -31,7 +31,7 @@ pub fn body(ui: &mut egui::Ui, fields: &mut Map<String, Value>, prefix: &str, la
     ui.horizontal(|ui| {
         label(ui, tl!("Mode:"));
         let mut mode = fields.get("mode").and_then(Value::as_str).unwrap_or("normal").to_string();
-        let opts: Vec<(String, &str)> = photocraft_color::BlendMode::LAYER_MODES.iter().map(|m| (mode_key(*m), m.label())).collect();
+        let opts: Vec<(String, &str)> = photocraft_color::BlendMode::menu_modes().map(|m| (mode_key(m), m.label())).collect();
         if crate::widgets::dropdown(ui, &format!("{prefix}-mode"), tl!("Blend Mode"), &mut mode, &opts, 170.0) {
             fields.insert("mode".into(), json!(mode));
         }

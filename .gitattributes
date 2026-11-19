@@ -1,2 +1,8 @@
+# Every text file is stored with LF, whatever a working tree uses. Without this a Windows
+# checkout can commit CRLF, and a file stored that way reads as rewritten line for line against
+# upstream: `compose.wgsl` and `app.rs` alone turned an upstream merge into 3,400 lines of
+# conflict that were nothing but line endings.
+* text=auto eol=lf
+
 # The craft-i18n pin: CI and the build read it as one SHA, so it stays LF everywhere (readers trim it too).
 craft-i18n.rev text eol=lf

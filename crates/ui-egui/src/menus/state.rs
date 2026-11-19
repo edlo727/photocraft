@@ -51,6 +51,7 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
         return e;
     }
     match id {
+		"file.export.exrAces" => app.session.active().is_some(),
         "window.panel.activate" | "window.panel.layout" | "ui.dock" => true,
         "window.panel.group"
         | "window.panel.move"
@@ -162,6 +163,14 @@ pub(super) fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
         let Some(d) = app.session.active() else { return Some(false) };
         let pv = app.session.color.proof(d.doc.id);
         return Some(if id == "view.proofColors" { pv.enabled } else { pv.gamut_warning });
+    }
+    if id == "view.ocioViewer.toggle" {
+        let Some(d) = app.session.active() else { return Some(false) };
+        return Some(app.session.color.ocio_viewer(d.doc.id).enabled);
+    }
+    if let Some(c) = id.strip_prefix("view.viewerChannel.") {
+        let Some(d) = app.session.active() else { return Some(false) };
+        return Some(app.session.color.viewer_channel(d.doc.id).id() == c);
     }
     if id.starts_with("window.workspace.") && id != "window.workspace.resetWorkspace" {
         let want = workspace_name(id)?;
